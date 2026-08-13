@@ -1,0 +1,50 @@
+/*
+ * Shared UI colour palette for Vellis (要件#7).
+ *
+ * Application chrome (RootPicker / Explorer / ExplorerItem) reads its colours
+ * from these custom properties instead of hard-coding hex literals, so that a
+ * palette change happens in one place. Markdown document styles keep their own
+ * `--md-color-*` scale in markdown.css; this file covers the app shell only.
+ *
+ * Naming follows markdown.css: `:root` custom properties named by role, not by
+ * widget. Two roles that happen to share a value today keep separate names only
+ * when they can legitimately drift apart (e.g. control hover text vs body text).
+ *
+ * Values are the ones the components used before the extraction — the rendered
+ * appearance is unchanged. No dark-mode overrides (out of scope for 要件#7).
+ */
+
+:root {
+	/* --- Surfaces --- */
+
+	/* Base canvas (RootPicker screen background). */
+	--color-bg-primary: #ffffff;
+	/* Subtle raised surface: Explorer panel, button face, picker row hover. */
+	--color-bg-secondary: #f6f8fa;
+	/* Hover state of a control sitting on a subtle surface (buttons). */
+	--color-bg-hover: #eaeef2;
+	/* Hover state of a file-tree row. */
+	--color-bg-tree-hover: #e8e8e8;
+	/* Selected file-tree row. */
+	--color-bg-tree-active: #d0e0f0;
+
+	/* --- Foreground --- */
+
+	/* Body text. */
+	--color-text-primary: #1f2328;
+	/* Text of an interactive control while hovered. */
+	--color-text-hover: #24292f;
+	/* Secondary text and glyphs: hints, section titles, carets, icon buttons. */
+	--color-text-secondary: #656d76;
+	/* De-emphasised inline notes (loading / empty markers). */
+	--color-text-muted: #8b949e;
+	/* Placeholder copy shown in place of missing content. */
+	--color-text-placeholder: #a0a8b0;
+	/* Error text. */
+	--color-text-danger: #cf222e;
+
+	/* --- Borders --- */
+
+	/* Default separator and control border. */
+	--color-border: #d0d7de;
+}

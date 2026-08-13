@@ -1,0 +1,345 @@
+/*
+ * GitHub-flavoured Markdown styles for the Viewer component.
+ *
+ * All styles are scoped under `.markdown-body`.
+ * CSS custom properties are used throughout so that a dark-mode theme
+ * (Phase 2) can override colours without touching selectors.
+ */
+
+:root {
+	--md-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif,
+		'Apple Color Emoji', 'Segoe UI Emoji';
+	--md-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
+		monospace;
+	--md-font-size: 16px;
+	--md-line-height: 1.6;
+
+	--md-color-text: #1f2328;
+	--md-color-text-secondary: #656d76;
+	--md-color-bg: #ffffff;
+	--md-color-border: #d0d7de;
+	--md-color-border-heavy: #c0c8d0;
+	--md-color-link: #0969da;
+	--md-color-code-bg: #eff1f3;
+	--md-color-blockquote-border: #d0d7de;
+	--md-color-blockquote-text: #656d76;
+	--md-color-table-row-alt: #f6f8fa;
+	--md-color-task-checked: #0969da;
+
+	/* GitHub-style alert blockquotes (requirement #15 / Issue 24) */
+	--md-color-alert-note: #0969da;
+	--md-color-alert-tip: #1a7f37;
+	--md-color-alert-important: #8250df;
+	--md-color-alert-warning: #9a6700;
+	--md-color-alert-caution: #cf222e;
+}
+
+.markdown-body {
+	font-family: var(--md-font-family);
+	font-size: var(--md-font-size);
+	line-height: var(--md-line-height);
+	color: var(--md-color-text);
+	word-wrap: break-word;
+	max-width: 980px;
+	margin: 0 auto;
+	padding: 2rem 3rem;
+}
+
+/* --- Headings --- */
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+	margin-top: 1.5em;
+	margin-bottom: 0.5em;
+	font-weight: 600;
+	line-height: 1.25;
+}
+
+.markdown-body h1 { font-size: 2em; border-bottom: 1px solid var(--md-color-border); padding-bottom: 0.3em; }
+.markdown-body h2 { font-size: 1.5em; border-bottom: 1px solid var(--md-color-border); padding-bottom: 0.3em; }
+.markdown-body h3 { font-size: 1.25em; }
+.markdown-body h4 { font-size: 1em; }
+.markdown-body h5 { font-size: 0.875em; }
+.markdown-body h6 { font-size: 0.85em; color: var(--md-color-text-secondary); }
+
+/* --- Paragraphs & Blocks --- */
+
+.markdown-body p {
+	margin-top: 0;
+	margin-bottom: 1em;
+}
+
+.markdown-body blockquote {
+	margin: 0 0 1em;
+	padding: 0 1em;
+	color: var(--md-color-blockquote-text);
+	border-left: 0.25em solid var(--md-color-blockquote-border);
+}
+
+.markdown-body blockquote > :first-child { margin-top: 0; }
+.markdown-body blockquote > :last-child { margin-bottom: 0; }
+
+/* --- Alert blockquotes (requirement #15 / Issue 24) --- */
+
+/* The type class supplies `--md-alert-color`; the border and title pick it up.
+ * Alert body text drops the muted quote colour (GitHub renders it as body text). */
+.markdown-body blockquote.markdown-alert {
+	color: var(--md-color-text);
+	border-left-color: var(--md-alert-color, var(--md-color-blockquote-border));
+}
+
+.markdown-body .markdown-alert-title {
+	margin-bottom: 0.5em;
+	font-weight: 600;
+	line-height: 1.25;
+	color: var(--md-alert-color, var(--md-color-blockquote-text));
+}
+
+.markdown-body .markdown-alert-note { --md-alert-color: var(--md-color-alert-note); }
+.markdown-body .markdown-alert-tip { --md-alert-color: var(--md-color-alert-tip); }
+.markdown-body .markdown-alert-important { --md-alert-color: var(--md-color-alert-important); }
+.markdown-body .markdown-alert-warning { --md-alert-color: var(--md-color-alert-warning); }
+.markdown-body .markdown-alert-caution { --md-alert-color: var(--md-color-alert-caution); }
+
+.markdown-body hr {
+	height: 0.25em;
+	padding: 0;
+	margin: 1.5em 0;
+	background-color: var(--md-color-border);
+	border: 0;
+}
+
+/* --- Lists --- */
+
+.markdown-body ul,
+.markdown-body ol {
+	padding-left: 2em;
+	margin-top: 0;
+	margin-bottom: 1em;
+}
+
+.markdown-body li + li {
+	margin-top: 0.25em;
+}
+
+/* --- Task Lists --- */
+
+.markdown-body .task-list-item {
+	list-style-type: none;
+	position: relative;
+	padding-left: 0;
+}
+
+.markdown-body .task-list-item input[type='checkbox'] {
+	margin-right: 0.5em;
+	vertical-align: middle;
+	accent-color: var(--md-color-task-checked);
+}
+
+/* --- Inline Code --- */
+
+.markdown-body code {
+	padding: 0.2em 0.4em;
+	margin: 0;
+	font-size: 85%;
+	font-family: var(--md-font-mono);
+	background-color: var(--md-color-code-bg);
+	border-radius: 6px;
+}
+
+/* --- Code Blocks --- */
+
+.markdown-body pre {
+	padding: 1em;
+	overflow: auto;
+	font-size: 85%;
+	line-height: 1.45;
+	background-color: var(--md-color-code-bg);
+	border-radius: 6px;
+	margin-bottom: 1em;
+}
+
+.markdown-body pre code {
+	padding: 0;
+	margin: 0;
+	font-size: 100%;
+	background-color: transparent;
+	border-radius: 0;
+}
+
+/* Shiki-generated blocks already have their own background */
+.markdown-body pre.shiki {
+	padding: 1em;
+	overflow: auto;
+	border-radius: 6px;
+	margin-bottom: 1em;
+}
+
+/* --- Tables --- */
+
+.markdown-body table {
+	border-spacing: 0;
+	border-collapse: collapse;
+	display: block;
+	width: max-content;
+	max-width: 100%;
+	overflow: auto;
+	margin-bottom: 1em;
+}
+
+.markdown-body table th,
+.markdown-body table td {
+	padding: 6px 13px;
+	border: 1px solid var(--md-color-border);
+}
+
+.markdown-body table th {
+	font-weight: 600;
+	background-color: var(--md-color-table-row-alt);
+}
+
+.markdown-body table tr:nth-child(2n) {
+	background-color: var(--md-color-table-row-alt);
+}
+
+/* --- Images --- */
+
+.markdown-body img {
+	max-width: 100%;
+	height: auto;
+	border-radius: 6px;
+}
+
+/* --- Links --- */
+
+.markdown-body a {
+	color: var(--md-color-link);
+	text-decoration: none;
+}
+
+.markdown-body a:hover {
+	text-decoration: underline;
+}
+
+/* --- Footnotes --- */
+
+.markdown-body .footnotes {
+	font-size: 0.875em;
+	color: var(--md-color-text-secondary);
+	border-top: 1px solid var(--md-color-border);
+	margin-top: 2em;
+	padding-top: 1em;
+}
+
+.markdown-body .footnotes ol {
+	padding-left: 1.5em;
+}
+
+.markdown-body .footnote-ref a {
+	font-weight: 600;
+}
+
+.markdown-body .footnote-backref {
+	font-family: var(--md-font-mono);
+}
+
+/* --- Strikethrough --- */
+
+.markdown-body del {
+	text-decoration: line-through;
+	color: var(--md-color-text-secondary);
+}
+
+/* --- Sup / Sub --- */
+
+.markdown-body sup,
+.markdown-body sub {
+	font-size: 75%;
+	line-height: 0;
+	position: relative;
+	vertical-align: baseline;
+}
+
+.markdown-body sup { top: -0.5em; }
+.markdown-body sub { bottom: -0.25em; }
+
+/* --- Mermaid diagrams (docs/mermaid.md §6) --- */
+
+.markdown-body .vellis-mermaid {
+	margin: 0 0 1em;
+	overflow-x: auto;
+	text-align: center;
+}
+
+/* Source-as-fallback while mermaid hasn't replaced it yet, and inside
+   the error <details>. Hidden once `vellis-mermaid-rendered` is set
+   so the diagram body isn't doubled visually. */
+.markdown-body .vellis-mermaid-fallback {
+	margin: 0;
+	padding: 0.6em 0.8em;
+	font-family: var(--md-font-mono);
+	font-size: 0.9em;
+	background-color: var(--md-color-code-bg);
+	border-radius: 4px;
+	white-space: pre;
+	overflow-x: auto;
+	color: var(--md-color-text-secondary);
+}
+
+.markdown-body .vellis-mermaid-rendered:not(.vellis-mermaid-error) > .vellis-mermaid-fallback {
+	display: none;
+}
+
+.markdown-body .vellis-mermaid-rendered svg {
+	max-width: 100%;
+	height: auto;
+}
+
+.markdown-body .vellis-mermaid-error {
+	border: 1px solid var(--md-color-border);
+	border-radius: 4px;
+	padding: 0.6em 0.8em;
+	background-color: var(--md-color-table-row-alt);
+	text-align: left;
+}
+
+.markdown-body .vellis-mermaid-error summary {
+	cursor: pointer;
+	color: var(--md-color-text-secondary);
+	font-size: 0.9em;
+}
+
+.markdown-body .vellis-mermaid-error-message {
+	margin: 0.5em 0;
+	padding: 0.5em 0.7em;
+	color: var(--md-color-text);
+	background-color: var(--md-color-bg);
+	border-left: 3px solid var(--md-color-blockquote-border);
+	font-family: var(--md-font-mono);
+	font-size: 0.85em;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* --- Plain text documents (要件#2) ---
+   Verbatim body: monospace, newlines/tabs kept, no code-block chrome. */
+
+.markdown-body pre.vellis-plaintext {
+	margin: 0;
+	padding: 0;
+	background-color: transparent;
+	border-radius: 0;
+	font-family: var(--md-font-mono);
+	font-size: 90%;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.markdown-body .vellis-unsupported {
+	color: var(--md-color-text-secondary);
+}
