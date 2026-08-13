@@ -1,0 +1,21 @@
+{
+  "extends": "./.svelte-kit/tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "strict": true,
+    "moduleResolution": "bundler"
+  },
+  // Tests under `tests/e2e/` use WebdriverIO + Mocha globals that
+  // pull in their own tsconfig (`tests/e2e/tsconfig.json`). Excluding
+  // them here keeps `pnpm check` (svelte-check) from complaining about
+  // missing Mocha / WebdriverIO type globals in the unit-test scope.
+  "exclude": ["tests/e2e/**"]
+  // Path aliases are handled by https://svelte.dev/docs/kit/configuration#alias
+  // except $lib which is handled by https://svelte.dev/docs/kit/configuration#files
+}

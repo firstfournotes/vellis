@@ -1,0 +1,163 @@
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import { invoke } from '$lib/ipc';
+	import { windowState, type Entry } from '../stores/window-state.svelte';
+	import ExplorerItem from './ExplorerItem.svelte';
+
+	let {
+		entry,
+		depth = 0,
+		selectedUri,
+		onFileClick
+	}: {
+		entry: Entry;
+		depth?: number;
+		selectedUri: string | undefined;
+		onFileClick: (e: MouseEvent, entry: Entry) => void;
+	} = $props();
+
+	let children = $state<Entry[] | null>(null);
+	let loading = $state(false);
+	let loadError = $state<string | null>(null);
+
+	const isDir = $derived(entry.kind === 'dir');
+	/**
+	 * 開閉の状態はウインドウ状態が持つ(要件#10)。ここは映すだけなので、
+	 * reload スナップショットからの復元も「集合に URI が入る」だけで届く。
+	 */
+	const expanded = $derived(isDir && windowState.isExpanded(entry.uri));
+	const active = $derived(entry.uri === selectedUri);
+	const caret = $derived(isDir ? (expanded ? '▾' : '▸') : '');
+	const icon = $derived(isDir ? '\u{1F4C1}' : '\u{1F4C4}');
+
+	/**
+	 * 子の読み込みは「開いている」ことに紐付ける。クリックで開いたときも、
+	 * 復元で最初から開いた状態で現れたときも同じ経路を通る。
+	 * 一度読んだら(children !== null)読み直さない — 更新は directory_changed の担当。
+	 */
+	$effect(() => {
+		if (!expanded) return;
+		// 読むのは expanded だけにする。children / loading を追跡すると
+		// 自分の書き込みで再実行され続ける。
+		untrack(() => {
+			if (children === null && !loading) void loadChildren();
+		});
+	});
+
+	async function loadChildren() {
+		loading = true;
+		loadError = null;
+		try {
+			children = await invoke<Entry[]>('list_dir', { uri: entry.uri });
+		} catch (err) {
+			loadError = String(err);
+			children = [];
+		} finally {
+			loading = false;
+		}
+	}
+
+	function handleClick(e: MouseEvent) {
+		if (isDir) {
+			windowState.toggleExpanded(entry.uri);
+		} else {
+			onFileClick(e, entry);
+		}
+	}
+</script>
+
+<button
+	class="explorer-item"
+	class:active
+	class:is-dir={isDir}
+	style="padding-left: {8 + depth * 14}px"
+	onclick={handleClick}
+	title={entry.uri}
+>
+	<span class="caret">{caret}</span>
+	<span class="icon">{icon}</span>
+	<span class="name">{entry.name}</span>
+</button>
+
+{#if isDir && expanded}
+	{#if loading}
+		<div class="tree-note" style="padding-left: {8 + (depth + 1) * 14}px">読み込み中...</div>
+	{:else if loadError}
+		<div class="tree-note error" style="padding-left: {8 + (depth + 1) * 14}px">{loadError}</div>
+	{:else if children && children.length === 0}
+		<div class="tree-note empty" style="padding-left: {8 + (depth + 1) * 14}px">(空)</div>
+	{:else if children}
+		{#each children as child (child.uri)}
+			<ExplorerItem
+				entry={child}
+				depth={depth + 1}
+				{selectedUri}
+				{onFileClick}
+			/>
+		{/each}
+	{/if}
+{/if}
+
+<style>
+	.explorer-item {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		width: 100%;
+		padding: 4px 12px 4px 8px;
+		border: none;
+		background: none;
+		color: inherit;
+		font: inherit;
+		font-size: 13px;
+		text-align: left;
+		cursor: pointer;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.explorer-item:hover {
+		background-color: var(--color-bg-tree-hover);
+	}
+
+	.explorer-item.active {
+		background-color: var(--color-bg-tree-active);
+		font-weight: 600;
+	}
+
+	.caret {
+		display: inline-block;
+		width: 10px;
+		color: var(--color-text-secondary);
+		font-size: 10px;
+		flex-shrink: 0;
+	}
+
+	.icon {
+		flex-shrink: 0;
+		font-size: 14px;
+	}
+
+	.name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.is-dir .name {
+		font-weight: 500;
+	}
+
+	.tree-note {
+		font-size: 12px;
+		color: var(--color-text-muted);
+		padding-top: 2px;
+		padding-bottom: 2px;
+		font-style: italic;
+	}
+
+	.tree-note.error {
+		color: var(--color-text-danger);
+		font-style: normal;
+	}
+</style>

@@ -1,0 +1,123 @@
+/*
+ * Print stylesheet for Vellis Markdown Viewer (issue #21).
+ *
+ * Cmd+P inside the WebView opens the OS print dialog (or "Save as PDF").
+ * The screen UI — Explorer sidebar, Viewer toolbar, StatusBar, MarkList
+ * sidebar, dialogs — is dropped from the printed output; only the rendered
+ * Markdown body is sent to paper.
+ *
+ * Constraints (mermaid SVG, Shiki inline styles, vellis-asset images) all
+ * print correctly without extra plumbing because they're already part of
+ * `.markdown-body`'s subtree. The main work here is page-break hygiene
+ * (don't slice code blocks / diagrams / tables in half) and color
+ * preservation (Shiki backgrounds are part of the syntax cue and must
+ * survive `-webkit-print-color-adjust: exact`).
+ */
+
+@media print {
+	/* Reset html/body so the printed page can flow over multiple sheets.
+	   The screen layout uses `overflow: hidden; height: 100vh` to clip the
+	   single-window viewport — both make printing show only one page. */
+	html,
+	body {
+		height: auto;
+		overflow: visible;
+		background-color: transparent;
+	}
+
+	/* Hide every chrome element. Anything inside the article > markdown-body
+	   subtree is the document; everything else is UI. */
+	.explorer,
+	.viewer-toolbar,
+	.status-bar,
+	.mark-list,
+	.dialog-overlay {
+		display: none !important;
+	}
+
+	/* The .app / .app-body wrappers default to flex containers sized to the
+	   screen viewport. For print, collapse them so the markdown body owns
+	   the page width directly. */
+	.app,
+	.app-body,
+	.viewer {
+		display: block;
+		height: auto;
+		width: auto;
+		overflow: visible;
+		background-color: transparent;
+	}
+
+	/* Drop the screen-only constraints on the body itself: max-width caps
+	   the column on screen for readability but on paper we already have
+	   physical margins via @page. */
+	.markdown-body {
+		max-width: none;
+		margin: 0;
+		padding: 0;
+		overflow: visible;
+		font-size: 10pt;
+		line-height: 1.45;
+	}
+
+	/* コードブロック / inline code は本文より少し小さく落として、印刷時の
+	   1 行に入る情報量を確保する。pt 指定はブラウザの "Save as PDF" でも
+	   Print でも安定する。 */
+	.markdown-body pre,
+	.markdown-body code {
+		font-size: 9pt;
+	}
+
+	/* Keep Shiki / Mermaid background colours and inline styles when
+	   printing — without this, Safari/WebKit defaults to "economode" and
+	   strips backgrounds, which destroys the syntax-highlight readability. */
+	.markdown-body,
+	.markdown-body pre,
+	.markdown-body code,
+	.markdown-body span,
+	.markdown-body .vellis-mermaid,
+	.markdown-body .vellis-mermaid svg {
+		print-color-adjust: exact;
+		-webkit-print-color-adjust: exact;
+	}
+
+	/* Page-break hygiene. `break-inside: avoid` keeps a single block on a
+	   single page if it fits; `break-after: avoid` glues a heading to the
+	   first paragraph that follows so a heading can never end a page alone. */
+	.markdown-body pre,
+	.markdown-body table,
+	.markdown-body figure,
+	.markdown-body blockquote,
+	.markdown-body .vellis-mermaid {
+		break-inside: avoid;
+		page-break-inside: avoid;
+	}
+
+	.markdown-body h1,
+	.markdown-body h2,
+	.markdown-body h3,
+	.markdown-body h4,
+	.markdown-body h5,
+	.markdown-body h6 {
+		break-after: avoid;
+		page-break-after: avoid;
+	}
+
+	/* Mermaid placeholder that hasn't been replaced by SVG yet (rare edge
+	   case where Cmd+P is hit before mountMermaid finishes). Ensure the
+	   fallback <pre> at least shows the source so the print is not blank. */
+	.markdown-body .vellis-mermaid:not(.vellis-mermaid-rendered) .vellis-mermaid-fallback {
+		display: block;
+	}
+
+	/* Anchor links: keep clickable styling but stop prefixing href values —
+	   print is paper, the URL string clutters readability. */
+	.markdown-body a {
+		color: inherit;
+		text-decoration: none;
+	}
+}
+
+@page {
+	margin: 16mm;
+}

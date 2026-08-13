@@ -1,0 +1,59 @@
+/*
+ * Global application styles for Vellis Markdown Viewer.
+ *
+ * Resets, base typography, and layout primitives.
+ * Component-specific styles live in their respective .svelte files.
+ */
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+	overflow: hidden;
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif,
+		'Apple Color Emoji', 'Segoe UI Emoji';
+	font-size: 14px;
+	line-height: 1.5;
+	color: #1f2328;
+	background-color: #ffffff;
+}
+
+/* App layout: Explorer (left) + Main (right) + StatusBar (bottom) */
+.app {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+	width: 100vw;
+}
+
+.app-body {
+	display: flex;
+	flex: 1;
+	min-height: 0;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background-color: #c0c8d0;
+	border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background-color: #a0a8b0;
+}

@@ -1,0 +1,47 @@
+# Vellis `--fix <agent>` 用の agents.toml サンプル
+# 実利用は `~/.config/vellis/agents.toml` に配置 (`docs/ai-collab.md` §9.2)
+#
+# 使い方:
+#   cp fixtures/agents.toml.example ~/.config/vellis/agents.toml
+#
+# プレースホルダ: `{{inbox}}` / `{{root}}` のみ展開される。shell injection
+# はかからない (argv 各要素として渡される、`sh -c` 不介在)。
+
+# ────────────────────────────────────────────
+# 動作確認用 (AI CLI を入れていなくても試せる)
+# ────────────────────────────────────────────
+
+# 1. inbox の中身をターミナルに出すだけ
+[agents.echo]
+command = ["cat", "{{inbox}}"]
+cwd = "{{root}}"
+
+# 2. root と inbox のパスをエコー
+[agents.show]
+command = [
+  "sh", "-c",
+  "echo '== root =='; pwd; echo '== inbox =='; cat \"$1\"",
+  "_", "{{inbox}}",
+]
+cwd = "{{root}}"
+
+# 3. 意図的に exit 42 (vellis 側のエラー処理経路を検証)
+[agents.fail]
+command = ["sh", "-c", "exit 42"]
+cwd = "{{root}}"
+
+# ────────────────────────────────────────────
+# 実用例 (該当 CLI が PATH 上にあること)
+# ────────────────────────────────────────────
+
+[agents.claude]
+command = ["claude", "-p", "Follow {{inbox}}"]
+cwd = "{{root}}"
+
+[agents.codex]
+command = ["codex", "exec", "Follow {{inbox}}"]
+cwd = "{{root}}"
+
+[agents.aider]
+command = ["aider", "--message-file", "{{inbox}}"]
+cwd = "{{root}}"
