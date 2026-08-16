@@ -15,6 +15,10 @@ pub mod update_check;
 pub mod watch;
 pub mod window;
 
+/// Window title derivation, also reachable as `vellis_lib::window_title`
+/// (requirements.md #17).
+pub use window::title as window_title;
+
 use std::sync::Arc;
 
 use tauri::{Listener, Manager};
@@ -28,6 +32,7 @@ use commands::annotation::{
 use commands::app::init_window;
 use commands::asset::handle_asset;
 use commands::build_info::get_build_info;
+use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
 use commands::document::open_document;
 use commands::history::list_history;
 use commands::list::list_dir;
@@ -115,6 +120,8 @@ pub fn run_with_args(initial_args: WindowArgs) {
         set_root,
         new_window,
         list_dir,
+        subscribe_dir,
+        unsubscribe_dir,
         add_mark,
         list_marks,
         update_mark,
@@ -135,6 +142,8 @@ pub fn run_with_args(initial_args: WindowArgs) {
         set_root,
         new_window,
         list_dir,
+        subscribe_dir,
+        unsubscribe_dir,
         add_mark,
         list_marks,
         update_mark,
@@ -152,7 +161,14 @@ pub fn run_with_args(initial_args: WindowArgs) {
         .setup(move |app| {
             // --- Native menu bar ---
             let menu = menu::build(app.handle())?;
+            #[cfg(target_os = "macos")]
+            let window_menu_owner = menu.clone();
             app.set_menu(menu)?;
+            // Ordering matters: only after `set_menu` has run muda's
+            // `init_for_nsapp` may the Window submenu be handed to NSApp
+            // (requirements.md #17).
+            #[cfg(target_os = "macos")]
+            menu::attach_windows_menu_to_nsapp(&window_menu_owner);
             app.on_menu_event(|app_handle, event| match event.id().as_ref() {
                 id if id == menu::INSTALL_CLI_ITEM_ID => {
                     menu::handle_install_cli_click(app_handle);

@@ -2,6 +2,7 @@ pub mod annotation;
 pub mod app;
 pub mod asset;
 pub mod build_info;
+pub mod dir_watch;
 pub mod document;
 pub mod history;
 pub mod list;

@@ -31,6 +31,10 @@ pub const OPEN_FOLDER_ITEM_ID: &str = "open-folder";
 pub const MENU_OPEN_FILE_EVENT: &str = "menu_open_file";
 pub const MENU_OPEN_FOLDER_EVENT: &str = "menu_open_folder";
 
+/// Stable identifier for the Window submenu, so it can be found again after
+/// the menu is installed (see [`attach_windows_menu_to_nsapp`]).
+pub const WINDOW_MENU_ID: &str = "window-menu";
+
 /// Build the application's native menu bar.
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // macOS の muda About ダイアログは `<version> (<short_version>)` の順で
@@ -160,7 +164,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
     let minimize = PredefinedMenuItem::minimize(app, None)?;
     let close = PredefinedMenuItem::close_window(app, None)?;
-    let window_menu = Submenu::with_items(app, "Window", true, &[&minimize, &close])?;
+    let window_menu = Submenu::with_id_and_items(
+        app,
+        WINDOW_MENU_ID,
+        "Window",
+        true,
+        &[&minimize, &close],
+    )?;
 
     let toggle_devtools = MenuItem::with_id(
         app,
@@ -175,6 +185,29 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         app,
         &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
     )
+}
+
+/// Hand the Window submenu to NSApp as *the* Window menu (requirements.md
+/// #17). macOS then maintains the list of open windows inside it on its own —
+/// the entries, the checkmark on the frontmost window and the switch on click
+/// are all AppKit's, which is why nothing here manages menu items.
+///
+/// Must run **after** the menu is installed: `set_as_windows_menu_for_nsapp`
+/// requires muda's `init_for_nsapp` to have run, and `App::set_menu` is what
+/// does that. Failure is logged rather than propagated — a menu without the
+/// window list is still a working menu.
+#[cfg(target_os = "macos")]
+pub fn attach_windows_menu_to_nsapp<R: Runtime>(menu: &Menu<R>) {
+    let Some(window_menu) = menu
+        .get(WINDOW_MENU_ID)
+        .and_then(|kind| kind.as_submenu().cloned())
+    else {
+        tracing::warn!("Window submenu '{}' not found in the app menu", WINDOW_MENU_ID);
+        return;
+    };
+    if let Err(e) = window_menu.set_as_windows_menu_for_nsapp() {
+        tracing::warn!("failed to set the Window menu as NSApp's windows menu: {}", e);
+    }
 }
 
 /// Handle the "Print…" menu click — opens the native OS print dialog on

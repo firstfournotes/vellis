@@ -16,9 +16,14 @@
 		onFileClick: (e: MouseEvent, entry: Entry) => void;
 	} = $props();
 
-	let children = $state<Entry[] | null>(null);
 	let loading = $state(false);
 	let loadError = $state<string | null>(null);
+
+	/**
+	 * 子はウインドウ状態が持つ(要件#18)。`directory_changed` が届いたときに
+	 * ツリーの外から差し替えられる必要があるため。ここは映すだけ。
+	 */
+	const children = $derived(windowState.childEntries[entry.uri] ?? null);
 
 	const isDir = $derived(entry.kind === 'dir');
 	/**
@@ -31,27 +36,49 @@
 	const icon = $derived(isDir ? '\u{1F4C1}' : '\u{1F4C4}');
 
 	/**
-	 * 子の読み込みは「開いている」ことに紐付ける。クリックで開いたときも、
+	 * 子の読み込みと監視は「開いている」ことに紐付ける。クリックで開いたときも、
 	 * 復元で最初から開いた状態で現れたときも同じ経路を通る。
-	 * 一度読んだら(children !== null)読み直さない — 更新は directory_changed の担当。
+	 *
+	 * 開いている間だけ backend にディレクトリ監視を持たせる(要件#18)。折りたたみ・
+	 * 親の折りたたみ・ノードの消滅はどれもこの effect の後始末に集まるので、
+	 * 解除の呼び忘れが起きる場所が1つしかない。開くたびに読み直すのは、閉じている
+	 * 間の変更は届かない(監視が無い)ため — 開いている間の更新は
+	 * `directory_changed` の担当。
 	 */
 	$effect(() => {
 		if (!expanded) return;
-		// 読むのは expanded だけにする。children / loading を追跡すると
+		const uri = entry.uri;
+		void subscribeDir(uri);
+		// 読むのは expanded だけにする。childEntries / loading を追跡すると
 		// 自分の書き込みで再実行され続ける。
 		untrack(() => {
-			if (children === null && !loading) void loadChildren();
+			if (!loading) void loadChildren();
 		});
+		return () => {
+			void invoke('unsubscribe_dir', { uri });
+		};
 	});
+
+	/**
+	 * 監視の登録は失敗しても展開自体は成立させる(自動反映が付かないだけ)。
+	 * ssh リモートは対象外で、backend 側が no-op で受ける(要件#18 ⑤)。
+	 */
+	async function subscribeDir(uri: string) {
+		try {
+			await invoke('subscribe_dir', { uri });
+		} catch (err) {
+			console.warn(`subscribe_dir failed for ${uri}:`, err);
+		}
+	}
 
 	async function loadChildren() {
 		loading = true;
 		loadError = null;
 		try {
-			children = await invoke<Entry[]>('list_dir', { uri: entry.uri });
+			windowState.setChildEntries(entry.uri, await invoke<Entry[]>('list_dir', { uri: entry.uri }));
 		} catch (err) {
 			loadError = String(err);
-			children = [];
+			windowState.setChildEntries(entry.uri, []);
 		} finally {
 			loading = false;
 		}
@@ -80,7 +107,7 @@
 </button>
 
 {#if isDir && expanded}
-	{#if loading}
+	{#if loading && !children}
 		<div class="tree-note" style="padding-left: {8 + (depth + 1) * 14}px">読み込み中...</div>
 	{:else if loadError}
 		<div class="tree-note error" style="padding-left: {8 + (depth + 1) * 14}px">{loadError}</div>

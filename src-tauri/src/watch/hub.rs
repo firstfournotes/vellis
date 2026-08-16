@@ -320,11 +320,14 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
         }
     }
 
-    // -- Test helpers -------------------------------------------------------
+    // -- Observation helpers ------------------------------------------------
 
-    /// Return the current refcount for a canonical URI (test-only).
-    #[cfg(test)]
-    pub(crate) async fn refcount(&self, canonical: &str) -> Option<usize> {
+    /// Return the current refcount for a canonical URI.
+    ///
+    /// Observation only — the integration tests for the expanded-directory
+    /// watch set (`tests/acceptance_req18.rs`) assert that two windows share
+    /// one watch and that collapsing releases it.
+    pub async fn refcount(&self, canonical: &str) -> Option<usize> {
         self.inner.lock().await.get(canonical).map(|e| e.refcount)
     }
 

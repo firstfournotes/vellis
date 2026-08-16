@@ -354,11 +354,13 @@
 			}
 		});
 
-		// Directory listing change event (for Explorer refresh, issue #18)
+		// Directory listing change event (for Explorer refresh, issue #18).
+		// root 直下と展開中サブディレクトリ(要件#18)の両方がここに届く —
+		// どちらの一覧かの判定とツリーへの当て方は `$lib/tree-refresh`。
+		// 消えたディレクトリの監視解除は ExplorerItem の後始末が担う
+		// (ノードが消える=展開の effect が畳まれる)。
 		await listen<DirectoryChangedPayload>('directory_changed', (e) => {
-			if (e.payload.root_uri === windowState.root) {
-				windowState.entries = e.payload.entries;
-			}
+			windowState.applyDirectoryEvent(e.payload.root_uri, e.payload.entries);
 		});
 
 		// `vellis --marks` / `vellis --changed` from a second invocation

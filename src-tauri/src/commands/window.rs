@@ -3,6 +3,7 @@
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use super::AppState;
+use crate::window::title::derive_window_title;
 
 /// Register and open a new application window, returning its label.
 ///
@@ -24,6 +25,10 @@ pub async fn create_window(
     root: Option<String>,
 ) -> Result<String, String> {
     let state = app.state::<AppState>();
+    // The title names the root folder (requirements.md #17); `root` itself is
+    // handed to the manager below. When it is `None` the window opens on the
+    // history picker, which keeps the app name.
+    let root_for_title = root.clone();
     let label = {
         let mut wm = state.window_manager.lock().await;
         wm.register_new_window(path, root)
@@ -47,7 +52,7 @@ pub async fn create_window(
     // confirmed by a `sample` of the hung process). Leave the restore to the
     // plugin — that is also what the IPC-spawned window path does.
     WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
-        .title("vellis")
+        .title(derive_window_title(root_for_title.as_deref()))
         .inner_size(800.0, 600.0)
         .build()
         .map_err(|e| format!("failed to create window: {}", e))?;

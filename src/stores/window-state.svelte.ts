@@ -14,6 +14,7 @@
  * the Viewer is a passive presenter (rendering-engine.md §3.1).
  */
 import type { DisplayResult } from '../lib/file-type';
+import { applyDirectoryChanged } from '../lib/tree-refresh';
 import type { SourceIndex } from '../markdown/types';
 
 export type DocumentPayload = {
@@ -45,6 +46,15 @@ class WindowState {
 	 */
 	expandedDirs = $state<string[]>([]);
 
+	/**
+	 * 展開して取得済みのサブディレクトリ → その直下一覧(要件#18)。
+	 *
+	 * 以前は `ExplorerItem` 個別の `$state` に閉じていたが、`directory_changed` が
+	 * 届いたときに「どのノードの子を差し替えるか」をツリーの外から決める必要が
+	 * あるためウインドウ状態へ出した。ツリーはここを映すだけ。
+	 */
+	childEntries = $state<Record<string, Entry[]>>({});
+
 	renderedHtml = $state<string>('');
 	sourceIndex = $state<SourceIndex | null>(null);
 	renderedUri = $state<string | null>(null);
@@ -66,7 +76,33 @@ class WindowState {
 		this.root = rootUri;
 		this.entries = entries;
 		this.expandedDirs = [];
+		this.childEntries = {};
 		if (!documentRetained) this.clearDocument();
+	}
+
+	/** 取得した子一覧を覚える(`ExplorerItem` の `list_dir` 応答)。 */
+	setChildEntries(uri: string, entries: Entry[]): void {
+		this.childEntries = { ...this.childEntries, [uri]: entries };
+	}
+
+	/**
+	 * `directory_changed` 1件をツリーへ反映する(要件#18)。root 直下も展開中
+	 * サブディレクトリも同じ入口を通る。どこを差し替えるか・消えたノードを
+	 * どう落とすかの判定は `$lib/tree-refresh` の純関数が持つ。
+	 */
+	applyDirectoryEvent(uri: string, entries: Entry[]): void {
+		const next = applyDirectoryChanged(
+			{
+				rootUri: this.root,
+				rootEntries: this.entries,
+				childEntries: this.childEntries,
+				expandedDirs: this.expandedDirs
+			},
+			{ uri, entries }
+		);
+		this.entries = next.rootEntries;
+		this.childEntries = next.childEntries;
+		this.expandedDirs = next.expandedDirs;
 	}
 
 	isExpanded(uri: string): boolean {
