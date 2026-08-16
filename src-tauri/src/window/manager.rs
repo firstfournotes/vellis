@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::fs::uri::Uri;
 use crate::session::document::DocumentSession;
+use crate::watch::dir_watch::DirWatchSet;
 use crate::watch::hub::WatchSubscription;
 /// Per-window state held by the manager.
 pub struct WindowState<R: tauri::Runtime = tauri::Wry> {
@@ -17,6 +18,11 @@ pub struct WindowState<R: tauri::Runtime = tauri::Wry> {
     /// closing or switching root automatically tears down its directory
     /// watch. `None` while the window has not yet resolved a root.
     pub root_watch: Option<WatchSubscription<R>>,
+    /// Directory watches for the subdirectories this window currently has
+    /// expanded in its tree (requirements.md #18). Same RAII story as
+    /// `root_watch`: dropping the `WindowState` (window closed) releases
+    /// every one of them.
+    pub dir_watches: DirWatchSet<R>,
     /// Initial arguments passed when the window was created.
     pub initial_args: WindowArgs,
 }
@@ -162,6 +168,7 @@ impl<R: tauri::Runtime> WindowManager<R> {
                 session: None,
                 root_uri: None,
                 root_watch: None,
+                dir_watches: DirWatchSet::new(),
                 initial_args: args,
             },
         );

@@ -96,6 +96,21 @@ pub async fn init_window(
         crate::history::record_root(window.app_handle(), &root_uri.raw);
     }
 
+    // Name the window after the folder it settled on (requirements.md #17) —
+    // the builder could only use the root it was given, which is absent when
+    // the window was opened on a file (root derived above) and meaningless
+    // while the history picker is up.
+    let title = crate::window::title::derive_window_title(
+        (!needs_root_selection).then_some(root_uri.raw.as_str()),
+    );
+    if let Err(e) = window.set_title(&title) {
+        tracing::warn!(
+            "init_window: failed to set window title to '{}': {}",
+            title,
+            e
+        );
+    }
+
     // Subscribe to directory changes for the new root so the Explorer
     // auto-refreshes when files / folders are added, removed or
     // renamed inside it (issue #18). Failure is non-fatal: the rest

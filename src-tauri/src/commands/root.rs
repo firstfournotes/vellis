@@ -68,6 +68,9 @@ pub async fn set_root(
     // attached below; if it fails we leave the explorer without a
     // live watch but the root switch itself still succeeds.
     win_state.root_watch = None;
+    // 旧 root 配下の展開はすべて畳まれる(`applyRoot` が expandedDirs を捨てる)。
+    // その監視もここで手放す(要件#18)。
+    win_state.dir_watches.clear();
     win_state.root_uri = Some(new_root.clone());
 
     // Release the WindowManager lock before we await the subscribe call
@@ -79,6 +82,14 @@ pub async fn set_root(
     // reopen it later (requirements.md #3).  Best-effort: a failed write
     // must not fail the root switch.
     crate::history::record_root(window.app_handle(), &new_root.raw);
+
+    // The window is now named after the new root folder (requirements.md
+    // #17). Best-effort like the history write: a title that fails to apply
+    // must not fail the root switch.
+    let title = crate::window::title::derive_window_title(Some(&new_root.raw));
+    if let Err(e) = window.set_title(&title) {
+        tracing::warn!("set_root: failed to set window title to '{}': {}", title, e);
+    }
 
     let coordinator = state.coordinator.clone();
     let app_handle = window.app_handle().clone();
