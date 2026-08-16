@@ -39,8 +39,12 @@ pub const UPDATE_AVAILABLE_EVENT: &str = "update_available";
 
 /// The single endpoint this module talks to.  `releases/latest` already
 /// excludes drafts and pre-releases on the GitHub side.
-const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/firstfournotes/product-vellis/releases/latest";
+///
+/// This is the *public* release repository, not the development one: the
+/// check runs unauthenticated, and `product-vellis` stays private and so
+/// answers 404 to it (`docs/publishing.md` §9).
+pub const LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/firstfournotes/vellis/releases/latest";
 
 /// Whole-request budget.  Short on purpose: nothing in the app waits for
 /// this, so a hung connection should be abandoned rather than retried late.

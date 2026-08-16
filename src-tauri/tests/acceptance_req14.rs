@@ -4,8 +4,11 @@
 //! 定期チェックで検知しアプリ内に通知を表示する(更新の適用は行わない。
 //! 「ダウンロード」で Releases ページを既定ブラウザで開く)」
 //!
-//! 契約(2026-08-11 由谷決定。検討記録=docs/update-notification.md §7):
-//! - 情報源=GET https://api.github.com/repos/firstfournotes/product-vellis/
+//! 契約(2026-08-11 由谷決定。検討記録=docs/update-notification.md §7。
+//! 追補 2026-08-13 由谷決定=公開方式 案C・docs/publishing.md §9:
+//! 情報源を公開専用リポジトリ firstfournotes/vellis へ変更。変更は情報源
+//! URL のみ=比較・トリガ・配信・表示・失敗時・channel・永続化は不変):
+//! - 情報源=GET https://api.github.com/repos/firstfournotes/vellis/
 //!   releases/latest の tag_name
 //! - 比較=先頭 v を除いた x.y.z と CARGO_PKG_VERSION の数値比較で
 //!   **厳密に新しいときだけ**通知(同値・降格・パース不能は通知しない)
@@ -32,6 +35,13 @@
 //!
 //! /// 再チェック間隔(6時間)を秒で固定する。
 //! pub const CHECK_INTERVAL_SECS: i64 = 6 * 60 * 60;
+//!
+//! /// 情報源エンドポイント(URL の正本=docs/update-notification.md §7)。
+//! /// 2026-08-13 追補で公開専用リポジトリ firstfournotes/vellis を指す
+//! /// (旧 product-vellis は private 継続で無認証 404)。テストから参照する
+//! /// ため pub であること。
+//! pub const LATEST_RELEASE_URL: &str =
+//!     "https://api.github.com/repos/firstfournotes/vellis/releases/latest";
 //!
 //! /// remote_tag(GitHub の tag_name。先頭 v は任意)が current
 //! /// (CARGO_PKG_VERSION 形式の x.y.z)より**厳密に新しい**ときだけ true。
@@ -105,8 +115,25 @@ use tempfile::TempDir;
 use vellis_lib::channel::Channel;
 use vellis_lib::update_check::{
     channel_allows_check, is_newer, parse_latest_release, should_check,
-    LastCheckStore, CHECK_INTERVAL_SECS,
+    LastCheckStore, CHECK_INTERVAL_SECS, LATEST_RELEASE_URL,
 };
+
+// ---------------------------------------------------------------------------
+// 0. 情報源 URL(要件14 追補 2026-08-13=公開方式 案C・docs/publishing.md §9)
+// ---------------------------------------------------------------------------
+
+/// 0-1. 情報源は公開専用リポジトリ firstfournotes/vellis の releases/latest。
+///      旧 product-vellis は private 継続のため無認証では 404 になり
+///      (2026-08-12 実機確認)、旧 URL のままでは通知が一切機能しない。
+#[test]
+fn latest_release_url_points_at_public_repo() {
+    assert_eq!(
+        LATEST_RELEASE_URL,
+        "https://api.github.com/repos/firstfournotes/vellis/releases/latest",
+        "the update check must query the public firstfournotes/vellis \
+         repository (the private product-vellis 404s unauthenticated)"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // 1. バージョン比較の純関数(is_newer)
@@ -273,14 +300,14 @@ fn under_six_hours_does_not_require_check() {
 #[test]
 fn parses_tag_and_url_from_realistic_response() {
     let body = r#"{
-        "url": "https://api.github.com/repos/firstfournotes/product-vellis/releases/241119",
+        "url": "https://api.github.com/repos/firstfournotes/vellis/releases/241119",
         "id": 241119,
         "tag_name": "v0.1.22",
         "target_commitish": "main",
         "name": "v0.1.22",
         "draft": false,
         "prerelease": false,
-        "html_url": "https://github.com/firstfournotes/product-vellis/releases/tag/v0.1.22",
+        "html_url": "https://github.com/firstfournotes/vellis/releases/tag/v0.1.22",
         "body": "release notes here",
         "assets": [{"name": "Vellis_0.1.22_aarch64.dmg", "size": 1}]
     }"#;
@@ -293,7 +320,7 @@ fn parses_tag_and_url_from_realistic_response() {
     );
     assert_eq!(
         info.html_url,
-        "https://github.com/firstfournotes/product-vellis/releases/tag/v0.1.22",
+        "https://github.com/firstfournotes/vellis/releases/tag/v0.1.22",
         "html_url is the page the Download button opens"
     );
 }

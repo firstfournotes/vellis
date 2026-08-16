@@ -69,3 +69,9 @@ tests/e2e/fixtures/
 
 ### Claude Code worktrees ###
 .claude/worktrees/
+
+### CI artifacts ###
+# Where the release job downloads the built DMG before attaching it to the
+# Releases (`.github/workflows/release.yml`). Untracked here it would make the
+# working tree look dirty to scripts/publish-snapshot.sh.
+dist-dmg/
