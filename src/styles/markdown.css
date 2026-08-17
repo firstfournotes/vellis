@@ -40,8 +40,6 @@
 	line-height: var(--md-line-height);
 	color: var(--md-color-text);
 	word-wrap: break-word;
-	max-width: 980px;
-	margin: 0 auto;
 	padding: 2rem 3rem;
 }
 

@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import { invoke } from '$lib/ipc';
 	import { windowState, type Entry } from '../stores/window-state.svelte';
+	import { contextMenu } from '../stores/context-menu.svelte';
 	import ExplorerItem from './ExplorerItem.svelte';
 
 	let {
@@ -91,6 +92,15 @@
 			onFileClick(e, entry);
 		}
 	}
+
+	/**
+	 * ツリーの行の上では webview 既定のメニューを自前のものに差し替える(要件#19)。
+	 * 他の領域の既定挙動には触らない。開き直しがそのまま前のメニューを閉じる。
+	 */
+	function handleContextMenu(e: MouseEvent) {
+		e.preventDefault();
+		contextMenu.openAt(entry, e.clientX, e.clientY);
+	}
 </script>
 
 <button
@@ -99,6 +109,7 @@
 	class:is-dir={isDir}
 	style="padding-left: {8 + depth * 14}px"
 	onclick={handleClick}
+	oncontextmenu={handleContextMenu}
 	title={entry.uri}
 >
 	<span class="caret">{caret}</span>
