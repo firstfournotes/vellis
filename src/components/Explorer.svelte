@@ -4,6 +4,7 @@
 	import { openForDisplay } from '$lib/open-document';
 	import { DEFAULT_PANE_WIDTH } from '$lib/pane-resize';
 	import { windowState, type Entry } from '../stores/window-state.svelte';
+	import ContextMenu from './ContextMenu.svelte';
 	import ExplorerItem from './ExplorerItem.svelte';
 
 	type RootPayload = {
@@ -86,6 +87,12 @@
 		{/each}
 	</nav>
 </aside>
+
+<!--
+	コンテキストメニューはウインドウにつき1つ(要件#19)。position: fixed なので
+	Explorer の overflow には切られず、ツリーの外にもはみ出して表示できる。
+-->
+<ContextMenu />
 
 <style>
 	/*

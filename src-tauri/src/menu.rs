@@ -1,7 +1,7 @@
 //! Native macOS menu bar for the Vellis app.
 
 use tauri::menu::{AboutMetadataBuilder, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, Runtime, Wry};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 /// Stable identifier for the "Install 'vellis' Command in PATH" menu item.
@@ -46,9 +46,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .version(Some(env!("CARGO_PKG_VERSION").to_string()))
         .short_version(Some(env!("VELLIS_BUILD_NUMBER").to_string()))
         .comments(Some(format!("Built: {}", env!("VELLIS_BUILD_TIME"))))
-        .website(Some(
-            "https://github.com/firstfournotes/product-vellis".to_string(),
-        ))
+        // 公開リポジトリを指す。開発は private の product-vellis で行うが、
+        // 公開ユーザーがここを開くと 404 になるため (backlog #41)。
+        .website(Some("https://github.com/firstfournotes/vellis".to_string()))
         .website_label(Some("GitHub".to_string()))
         .build();
     let about = PredefinedMenuItem::about(app, Some("About Vellis"), Some(about_metadata))?;
@@ -210,6 +210,20 @@ pub fn attach_windows_menu_to_nsapp<R: Runtime>(menu: &Menu<R>) {
     }
 }
 
+/// The window a menu click applies to: the focused one, or — when no window
+/// reports focus — whichever comes first. `is_focused()` can fail (the query
+/// goes to the window manager), and a failure is treated as "not focused"
+/// rather than aborting the click.
+///
+/// Returns `None` only when the app has no webview windows at all.
+fn focused_or_first_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
+    app.webview_windows()
+        .values()
+        .find(|w| w.is_focused().unwrap_or(false))
+        .cloned()
+        .or_else(|| app.webview_windows().values().next().cloned())
+}
+
 /// Handle the "Print…" menu click — opens the native OS print dialog on
 /// the focused Webview. Uses Tauri's `Webview::print()` rather than
 /// JavaScript `window.print()`: WKWebView does **not** implement the JS
@@ -219,13 +233,7 @@ pub fn attach_windows_menu_to_nsapp<R: Runtime>(menu: &Menu<R>) {
 /// formatting is handled by `@media print` in `src/styles/print.css`
 /// (issue #21).
 pub fn handle_print_click(app: &AppHandle<Wry>) {
-    let Some(window) = app
-        .webview_windows()
-        .values()
-        .find(|w| w.is_focused().unwrap_or(false))
-        .cloned()
-        .or_else(|| app.webview_windows().values().next().cloned())
-    else {
+    let Some(window) = focused_or_first_window(app) else {
         return;
     };
     if let Err(e) = window.print() {
@@ -248,13 +256,7 @@ pub fn handle_print_click(app: &AppHandle<Wry>) {
 /// `ipc::handler` targets a single window for the same reason). The payload
 /// is empty — the event itself is the whole message.
 pub fn handle_menu_open_click(app: &AppHandle<Wry>, event: &str) {
-    let Some(window) = app
-        .webview_windows()
-        .values()
-        .find(|w| w.is_focused().unwrap_or(false))
-        .cloned()
-        .or_else(|| app.webview_windows().values().next().cloned())
-    else {
+    let Some(window) = focused_or_first_window(app) else {
         return;
     };
     if let Err(e) = app.emit_to(window.label(), event, ()) {
@@ -291,13 +293,7 @@ pub fn handle_new_window_click(app: &AppHandle<Wry>) {
 /// Webview inspector on the currently focused window. Requires the `devtools`
 /// feature on the `tauri` crate, which is enabled in `Cargo.toml`.
 pub fn handle_toggle_devtools_click(app: &AppHandle<Wry>) {
-    let Some(window) = app
-        .webview_windows()
-        .values()
-        .find(|w| w.is_focused().unwrap_or(false))
-        .cloned()
-        .or_else(|| app.webview_windows().values().next().cloned())
-    else {
+    let Some(window) = focused_or_first_window(app) else {
         return;
     };
     if window.is_devtools_open() {

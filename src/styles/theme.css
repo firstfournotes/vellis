@@ -47,4 +47,9 @@
 
 	/* Default separator and control border. */
 	--color-border: #d0d7de;
+
+	/* --- Elevation --- */
+
+	/* Drop shadow of a floating surface (context menu). */
+	--color-shadow: rgba(0, 0, 0, 0.18);
 }

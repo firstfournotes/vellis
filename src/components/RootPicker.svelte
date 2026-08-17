@@ -107,7 +107,7 @@
 	}
 
 	.history-item:hover {
-		background-color: var(--color-bg-secondary);
+		background-color: var(--color-bg-hover);
 	}
 
 	.history-label {

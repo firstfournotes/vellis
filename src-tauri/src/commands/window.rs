@@ -53,7 +53,7 @@ pub async fn create_window(
     // plugin — that is also what the IPC-spawned window path does.
     WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
         .title(derive_window_title(root_for_title.as_deref()))
-        .inner_size(800.0, 600.0)
+        .inner_size(1280.0, 800.0)
         .build()
         .map_err(|e| format!("failed to create window: {}", e))?;
 
