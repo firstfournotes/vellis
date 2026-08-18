@@ -14,15 +14,15 @@
  * - 履歴記録は `set_root` 経由(要件#3。ファイル時は親を記録=#5 踏襲)。
  *   フロントで別途記録しない
  * - キャンセル=無変化(invoke を一切呼ばない)
- * - ラスタ画像は `open_document` を通さない(要件#16 ⑦)。root の切替は同じで、
- *   文書は読まずに URI だけを返す
+ * - ラスタ画像は `open_document` ではなく `open_binary_document` を通す
+ *   (要件#16 ⑦・#22)。読まない監視だけを張るコマンドで、root の切替は同じ
  *
  * 2項目に割れているのは plugin-dialog の制約: 1つのダイアログでファイルと
  * フォルダを同時に選ばせることができない。
  */
 import { invoke } from '$lib/ipc';
 import { listen } from '$lib/events';
-import { readsAsText } from '$lib/image-viewing';
+import { openCommandFor } from '$lib/open-document';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 /** Rust のメニュー項目 → Webview の通知イベント名(ペイロードなし)。 */
@@ -36,16 +36,16 @@ export type MenuOpenKind = 'file' | 'folder';
 export type MenuOpenPlan = {
 	/** `set_root` に渡す URI。file なら親フォルダ・folder なら当該フォルダ。 */
 	rootUri: string;
-	/** `open_document` に渡す URI。folder のときは null(開く文書がない)。 */
+	/** 文書コマンドに渡す URI。folder のときは null(開く文書がない)。 */
 	docUri: string | null;
 };
 
 /**
  * Open… / Open Folder… の結果。folder のときは `document: null`。
  *
- * `document` は `open_document` を通した場合の解決値。ラスタ画像(要件#16 ⑦)は
- * テキストとして読めないので通さず、`document: null` + `docUri` だけが返る —
- * 読まずに表示する組み立ては配線側(`+page.svelte`)の持ち場。
+ * `document` は文書コマンドの解決値。ラスタ画像もテキストとして読まないだけで
+ * セッションは張られる(`open_binary_document`。要件#22)ので、file のときは
+ * 常に非 null になる。
  */
 export type MenuOpened<Root = unknown, Doc = unknown> = {
 	root: Root;
@@ -117,10 +117,10 @@ const DIALOG_OPTIONS: Record<MenuOpenKind, Record<string, unknown>> = {
 };
 
 /**
- * ダイアログ → `set_root` →(ファイルなら)`open_document`。
+ * ダイアログ → `set_root` →(ファイルなら)文書コマンド。
  *
  * 失敗は握りつぶさず reject させる(root-picker の openHistoryEntry と同じ家風)。
- * `set_root` が失敗した時点で止め、`open_document` は呼ばない — root を切り替え
+ * `set_root` が失敗した時点で止め、文書コマンドは呼ばない — root を切り替え
  * られていないのに文書だけ開くと、backend と画面の root が食い違う。
  */
 async function openFromMenu<Root, Doc>(kind: MenuOpenKind): Promise<MenuOpened<Root, Doc> | null> {
@@ -131,11 +131,11 @@ async function openFromMenu<Root, Doc>(kind: MenuOpenKind): Promise<MenuOpened<R
 	// 履歴記録(要件#3)は set_root の backend 側 record_root が担う。
 	const root = await invoke<Root>('set_root', { uri: plan.rootUri });
 	// ラスタ画像(要件#16 ⑦)は open_document を呼ばない — 呼べば InvalidUtf8 で
-	// 失敗し、root を切り替えた直後にエラーだけが出る。URI は docUri で返す。
+	// 失敗する。代わりに読まない監視を張る open_binary_document を通す(要件#22)。
 	const document =
-		plan.docUri === null || !readsAsText(plan.docUri)
+		plan.docUri === null
 			? null
-			: await invoke<Doc>('open_document', { uri: plan.docUri });
+			: await invoke<Doc>(openCommandFor(plan.docUri), { uri: plan.docUri });
 	return { root, document, docUri: plan.docUri };
 }
 

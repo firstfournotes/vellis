@@ -18,7 +18,8 @@
 	import { marksStore } from '../stores/marks.svelte';
 	import { featureFlags } from '$lib/flags.svelte';
 	import { renderForDisplay } from '$lib/file-type';
-	import { openForDisplay, unreadDocument } from '$lib/open-document';
+	import { openForDisplay } from '$lib/open-document';
+	import { imageSrcWithVersion } from '$lib/image-watch';
 	import {
 		DEFAULT_PANE_WIDTH,
 		clampPaneWidth,
@@ -67,6 +68,10 @@
 	// なので、閉じるのはこの窓のバナーだけ(他の窓は出たまま)。保存しない
 	// ので、次回起動時のチェックでまた出る。
 	let updateBanner = $state<UpdateAvailablePayload | null>(null);
+	// 要件#22: 表示中のラスタ画像の版数。`binary_file_changed` が届くたびに進み、
+	// `<img>` の src に乗ってキャッシュを破る。どの URI の版数かを一緒に持つので、
+	// 別のファイルへ移れば(uri が一致しなくなり)版数0=素の URI に戻る。
+	let imageVersion = $state<{ uri: string; version: number }>({ uri: '', version: 0 });
 	// 要件#10: 起動処理(スナップショット復元 or 起動時引数)が片付いたか。
 	// 片付くまでスナップショットを書かない — 復元前の中間状態で復元元を潰さないため。
 	let startupSettled = $state(false);
@@ -186,6 +191,12 @@
 		uri: string;
 	};
 
+	// 要件#22: ラスタ画像の変更通知。本文は載らない(監視は読まない)ので
+	// URI だけが届き、再取得は `<img>` の src を変えて行う。
+	type BinaryFileChangedPayload = {
+		uri: string;
+	};
+
 	type DirectoryChangedPayload = {
 		root_uri: string;
 		entries: Entry[];
@@ -251,10 +262,9 @@
 				// 後に入れる(applyRoot は切替時に現在の文書を落とすため)。
 				// スナップショット(要件#10)は windowState を見ている $effect が拾う。
 				applyRoot(opened.root);
+				// ラスタ画像も文書コマンドを通る(要件#22)ので、ファイルを選んだ
+				// ときは常に document が返る。
 				if (opened.document) windowState.setDocument(opened.document);
-				// document なし + docUri あり=ラスタ画像(要件#16 ⑦)。
-				// 読まずに URI だけで画像ビューアへ渡す。
-				else if (opened.docUri) windowState.setDocument(unreadDocument(opened.docUri));
 			},
 			onError: (err) => {
 				alert(`開けませんでした: ${err}`);
@@ -347,7 +357,18 @@
 			}
 		});
 
-		// File removed event
+		// 要件#22: 表示中のラスタ画像がディスク上で変わった。中身は届かないので
+		// 表示版数を進め、`<img>` の src を版数付きに変えて WebView に取り直させる。
+		// 版数は URI とセットで持つ — 別のファイルへ移れば版数0の素の URI に戻る。
+		await listen<BinaryFileChangedPayload>('binary_file_changed', (e) => {
+			if (e.payload.uri !== windowState.currentDocument?.uri) return;
+			imageVersion =
+				imageVersion.uri === e.payload.uri
+					? { uri: e.payload.uri, version: imageVersion.version + 1 }
+					: { uri: e.payload.uri, version: 1 };
+		});
+
+		// File removed event(ラスタ画像も同じ経路で表示が閉じる=要件#22 ②)
 		await listen<FileRemovedPayload>('file_removed', (e) => {
 			if (e.payload.uri === windowState.currentDocument?.uri) {
 				windowState.clearDocument();
@@ -482,7 +503,10 @@
 				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedImageSrc !== null}
 					<ImageViewer
 						uri={windowState.currentDocument.uri}
-						src={windowState.renderedImageSrc}
+						src={imageSrcWithVersion(
+							windowState.renderedImageSrc,
+							imageVersion.uri === windowState.currentDocument.uri ? imageVersion.version : 0
+						)}
 						source={windowState.currentDocument.content}
 					/>
 				{:else}

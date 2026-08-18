@@ -19,6 +19,10 @@ use super::AppState;
 /// - `vellis-asset://local/<absolute-path>` -> `file:///<absolute-path>`
 /// - `vellis-asset://ssh/<user>@<host>[:<port>]/<absolute-path>` -> `ssh://...`
 ///
+/// A query string, if any, is ignored: the frontend appends a version query to
+/// bust the WebView cache when a watched image changes (要件#22,
+/// `src/lib/image-watch.ts`), and it is not part of the path being served.
+///
 /// Rejects paths containing `..` segments and unknown scheme prefixes.
 pub fn parse_asset_uri(url: &str) -> Result<Uri, VellisError> {
     // Strip the scheme prefix.
@@ -27,6 +31,9 @@ pub fn parse_asset_uri(url: &str) -> Result<Uri, VellisError> {
         .ok_or_else(|| VellisError::Uri(crate::errors::UriError::Invalid(
             format!("not a vellis-asset URI: {}", url),
         )))?;
+
+    // Drop the query (and any fragment behind it) — path only from here on.
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
 
     if rest.is_empty() {
         return Err(VellisError::Uri(crate::errors::UriError::Invalid(
