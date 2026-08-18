@@ -1,4 +1,5 @@
-//! `open_document` command — opens a document in the calling window.
+//! `open_document` / `open_binary_document` commands — open a document in the
+//! calling window. The binary variant watches without reading (要件#22).
 
 use tauri::{Manager, Window};
 
@@ -16,6 +17,28 @@ pub async fn open_document(
     window: Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<DocumentPayload, String> {
+    open_in_window(uri, window, state, false).await
+}
+
+/// Open a raster image as a watch-only document (要件#22): same session
+/// swap and subscribe-first ordering as `open_document`, but the file is
+/// never read — the payload's content is empty and the bytes reach the
+/// `<img>` through `vellis-asset:`.
+#[tauri::command]
+pub async fn open_binary_document(
+    uri: String,
+    window: Window,
+    state: tauri::State<'_, AppState>,
+) -> Result<DocumentPayload, String> {
+    open_in_window(uri, window, state, true).await
+}
+
+async fn open_in_window(
+    uri: String,
+    window: Window,
+    state: tauri::State<'_, AppState>,
+    binary: bool,
+) -> Result<DocumentPayload, String> {
     let label = window.label().to_string();
     let parsed_uri = Uri::parse(&uri).map_err(|e| e.to_string())?;
     let window_id = WindowId(label.clone());
@@ -29,17 +52,28 @@ pub async fn open_document(
         }
     }
 
-    // Open new session: subscribe-first, then read.
+    // Open new session: subscribe-first, then read (binary: no read at all).
     let app_handle = window.app_handle().clone();
-    let (session, payload) = DocumentSession::open(
-        window_id,
-        parsed_uri,
-        &state.fs_registry,
-        &state.coordinator,
-        &app_handle,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let opened = if binary {
+        DocumentSession::open_binary(
+            window_id,
+            parsed_uri,
+            &state.fs_registry,
+            &state.coordinator,
+            &app_handle,
+        )
+        .await
+    } else {
+        DocumentSession::open(
+            window_id,
+            parsed_uri,
+            &state.fs_registry,
+            &state.coordinator,
+            &app_handle,
+        )
+        .await
+    };
+    let (session, payload) = opened.map_err(|e| e.to_string())?;
 
     // Store the new session in the window manager.
     {

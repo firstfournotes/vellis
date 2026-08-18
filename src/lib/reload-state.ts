@@ -22,6 +22,7 @@
  * `loadSnapshot` は呼ばれるたびにそこを読む(pane-resize と同じ家風)。
  */
 import { invoke } from '$lib/ipc';
+import { openCommandFor } from '$lib/open-document';
 
 /**
  * 保存キー。同一ウインドウの reload 前後(開発中はビルドをまたぐこともある)で
@@ -197,13 +198,15 @@ export function shouldShowRootPicker(
  * スナップショットから root と文書を復元する。既存コマンドの再利用のみで、
  * Rust 側には何も足さない。
  *
- * `set_root` → (docUri があれば)`open_document` の順に呼ぶ。ツリーの展開は
+ * `set_root` → (docUri があれば)文書コマンドの順に呼ぶ。ラスタ画像は
+ * `open_binary_document`(要件#22。`open_document` は InvalidUtf8 で必ず失敗する)、
+ * それ以外は従来どおり `open_document` — 選ぶのは `openCommandFor`。ツリーの展開は
  * ここではやらない — 展開は配線側(Explorer の展開状態)の持ち場。
  *
  * 失敗は reject させず、呼び出し側がフォールバックを選べる形で解決する:
  * - `set_root` 失敗(root が消えた等) → `{ ok: false }`。`open_document` は呼ばない。
  *   まだ何も変わっていないので起動時引数の挙動へ丸ごと戻せる
- * - `open_document` 失敗(root は在るがファイルが消えた) → root は復元したまま
+ * - 文書コマンド失敗(root は在るがファイルが消えた) → root は復元したまま
  *   `document: null`。既存の `file_removed` → `clearDocument` と同じ最終状態で、
  *   `set_root` 済みの backend とも食い違わない
  */
@@ -219,8 +222,9 @@ export async function restoreSnapshot<Root = unknown, Doc = unknown>(
 
 	if (snapshot.docUri === null) return { ok: true, root, document: null };
 
+	const command = openCommandFor(snapshot.docUri);
 	try {
-		return { ok: true, root, document: await invoke<Doc>('open_document', { uri: snapshot.docUri }) };
+		return { ok: true, root, document: await invoke<Doc>(command, { uri: snapshot.docUri }) };
 	} catch {
 		return { ok: true, root, document: null };
 	}

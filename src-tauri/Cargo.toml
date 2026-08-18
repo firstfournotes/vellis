@@ -1,6 +1,6 @@
 [package]
 name = "vellis"
-version = "0.1.26"
+version = "0.1.27"
 description = "A read-only Markdown viewer for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"

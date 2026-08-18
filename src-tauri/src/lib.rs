@@ -33,7 +33,7 @@ use commands::app::init_window;
 use commands::asset::handle_asset;
 use commands::build_info::get_build_info;
 use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
-use commands::document::open_document;
+use commands::document::{open_binary_document, open_document};
 use commands::history::list_history;
 use commands::list::list_dir;
 use commands::root::set_root;
@@ -117,6 +117,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
     let builder = builder.invoke_handler(tauri::generate_handler![
         init_window,
         open_document,
+        open_binary_document,
         set_root,
         new_window,
         list_dir,
@@ -139,6 +140,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
     let builder = builder.invoke_handler(tauri::generate_handler![
         init_window,
         open_document,
+        open_binary_document,
         set_root,
         new_window,
         list_dir,

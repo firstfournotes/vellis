@@ -75,6 +75,41 @@ impl<R: tauri::Runtime> DocumentSession<R> {
             },
         ))
     }
+
+    /// Open a document that is watched but never read (raster images, 要件#22).
+    ///
+    /// Same session shape as `open` — the window holds it and its `Drop`
+    /// releases the watch — but the content stays empty: the bytes reach the
+    /// `<img>` through `vellis-asset:`, not through the IPC payload. A missing
+    /// file fails at the subscribe step, which is what lets the caller (reload
+    /// restore) fall back.
+    pub async fn open_binary(
+        window_id: WindowId,
+        uri: Uri,
+        providers: &FileProviderRegistry,
+        coordinator: &Arc<DocumentCoordinator<R>>,
+        app: &tauri::AppHandle<R>,
+    ) -> Result<(Self, DocumentPayload), VellisError> {
+        let subscription = coordinator
+            .subscribe_binary(uri.clone(), window_id.clone(), app.clone())
+            .await?;
+
+        let provider = providers.resolve(&uri)?;
+        let modified = provider.stat(&uri).await.ok().and_then(|e| e.modified);
+
+        Ok((
+            Self {
+                window_id,
+                uri: uri.clone(),
+                watch_subscription: subscription,
+            },
+            DocumentPayload {
+                uri: uri.raw.clone(),
+                content: String::new(),
+                modified,
+            },
+        ))
+    }
 }
 
 // Drop for DocumentSession is implicit: when the struct is dropped,

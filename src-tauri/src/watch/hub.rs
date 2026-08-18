@@ -47,6 +47,10 @@ struct SubscriberHandle<R: tauri::Runtime> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WatchKind {
     File,
+    /// A file that is never read by the watch itself (raster images,
+    /// 要件#22). Modify only announces *that* it changed; the bytes are
+    /// fetched later by the `<img>` through `vellis-asset:`.
+    Binary,
     Directory,
 }
 
@@ -89,6 +93,22 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
         app: tauri::AppHandle<R>,
     ) -> Result<WatchSubscription<R>, FsError> {
         self.subscribe_inner(uri, window_id, app, WatchKind::File).await
+    }
+
+    /// Subscribe a window to change notifications for the given URI as a
+    /// **binary document** — a file that is watched but never read (要件#22).
+    ///
+    /// Modify fans out `binary_file_changed { uri }` (no content: reading a
+    /// raster image as UTF-8 would fail, and the bytes reach the frontend via
+    /// `vellis-asset:` instead). Remove fans out the same `file_removed` the
+    /// text path uses, so the existing close wiring applies unchanged.
+    pub async fn subscribe_binary(
+        self: &Arc<Self>,
+        uri: Uri,
+        window_id: WindowId,
+        app: tauri::AppHandle<R>,
+    ) -> Result<WatchSubscription<R>, FsError> {
+        self.subscribe_inner(uri, window_id, app, WatchKind::Binary).await
     }
 
     /// Subscribe a window to change notifications for the given URI as a
@@ -198,7 +218,8 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
     /// Spawn an async task that reads from the provider watch channel and fans
     /// out events to all current subscribers. The action depends on `kind`:
     /// File entries re-read content and emit `file_changed`/`file_removed`;
-    /// Directory entries re-list and emit `directory_changed`.
+    /// Binary entries emit `binary_file_changed`/`file_removed` without
+    /// reading; Directory entries re-list and emit `directory_changed`.
     fn spawn_fanout(
         self: &Arc<Self>,
         canonical: String,
@@ -212,6 +233,11 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
                     WatchKind::File => {
                         coordinator
                             .handle_file_event(&canonical, event.kind)
+                            .await;
+                    }
+                    WatchKind::Binary => {
+                        coordinator
+                            .handle_binary_file_event(&canonical, event.kind)
                             .await;
                     }
                     WatchKind::Directory => {
@@ -246,6 +272,16 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
                     Err(e) => tracing::warn!("failed to re-read {}: {}", canonical, e),
                 }
             }
+            WatchEventKind::Remove => self.emit_file_removed(canonical).await,
+            _ => {}
+        }
+    }
+
+    /// Same shape as `handle_file_event` minus the read: Modify announces the
+    /// change, Remove goes down the shared removal path (要件#22).
+    async fn handle_binary_file_event(&self, canonical: &str, kind: WatchEventKind) {
+        match kind {
+            WatchEventKind::Modify => self.emit_binary_file_changed(canonical).await,
             WatchEventKind::Remove => self.emit_file_removed(canonical).await,
             _ => {}
         }
@@ -287,6 +323,21 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
             };
             for ((_wid, _sid), handle) in &entry.subscribers {
                 let _ = handle.app_handle.emit("file_changed", &payload);
+            }
+        }
+    }
+
+    /// Emit `binary_file_changed` to every window subscribed to `canonical`.
+    /// The payload carries the URI only — the frontend re-fetches the bytes by
+    /// bumping the `<img>` cache key (`src/lib/image-watch.ts`).
+    async fn emit_binary_file_changed(&self, canonical: &str) {
+        let inner = self.inner.lock().await;
+        if let Some(entry) = inner.get(canonical) {
+            let payload = BinaryFileChangedPayload {
+                uri: canonical.to_string(),
+            };
+            for ((_wid, _sid), handle) in &entry.subscribers {
+                let _ = handle.app_handle.emit("binary_file_changed", &payload);
             }
         }
     }
@@ -346,6 +397,12 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
 struct FileChangedPayload {
     uri: String,
     content: String,
+}
+
+/// No `content` field by design — the watch never reads the file (要件#22).
+#[derive(Clone, Debug, Serialize)]
+struct BinaryFileChangedPayload {
+    uri: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
