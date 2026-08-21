@@ -106,12 +106,33 @@ fn safe_mime(mime: &str) -> &str {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+/// Origins allowed to read an asset response (backlog #55 / 要件#23).
+///
+/// `<img src="vellis-asset://…">` never needed this: the WebView draws an
+/// opaque image without letting the page read its bytes. `ModelViewer` does
+/// read the bytes (`fetch` -> `ArrayBuffer` -> STL / 3MF parser), and that
+/// makes the request a cross-origin one from the page's origin
+/// (`http://localhost:1420` in dev, `tauri://localhost` in the bundle) to the
+/// `vellis-asset` origin — without this header the WebView blocks the body
+/// even though the request itself succeeded with 200.
+///
+/// `*` is the right value here rather than a specific origin: the protocol is
+/// only reachable from inside this app's WebView (no network listener), the
+/// page origin differs between dev and bundle, and the handler already
+/// enforces its own access rules (path traversal rejection, MIME downgrade).
+const ALLOW_ORIGIN: &str = "*";
+
 /// Build a plain-text error response with the given HTTP status code.
+///
+/// Errors carry the CORS header too: without it the frontend cannot even
+/// observe the status code (the fetch rejects with an opaque network error),
+/// so a missing file would be indistinguishable from a broken protocol.
 pub fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
     http::Response::builder()
         .status(status)
         .header("Content-Type", "text/plain; charset=utf-8")
         .header("Cache-Control", "no-store")
+        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
         .body(msg.as_bytes().to_vec())
         .expect("failed to build error response")
 }
@@ -126,7 +147,12 @@ pub fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
 /// 2. Resolve a `FileProvider` from the registry.
 /// 3. Read raw bytes via `provider.read_bytes`.
 /// 4. Determine MIME type and apply the safety filter.
-/// 5. Return the response with `Cache-Control: no-store`.
+/// 5. Return the response with `Cache-Control: no-store` and the CORS header.
+///
+/// Every response this module can produce comes from one of exactly two
+/// builders — the 200 path below and `error_response` (400 / 404 / 413 / 500)
+/// — and both carry `Access-Control-Allow-Origin` so that `fetch` from the
+/// page can read the result (backlog #55).
 pub async fn handle_asset(
     state: &AppState,
     req: http::Request<Vec<u8>>,
@@ -159,6 +185,7 @@ pub async fn handle_asset(
         .status(200)
         .header("Content-Type", mime)
         .header("Cache-Control", "no-store")
+        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
         .body(bytes)
         .expect("failed to build asset response")
 }
@@ -288,5 +315,95 @@ mod tests {
         let resp = error_response(404, "not found");
         assert_eq!(resp.status().as_u16(), 404);
         assert_eq!(resp.body(), b"not found");
+    }
+
+    // ---- CORS(backlog #55 の回帰・要件#23) ----
+    //
+    // ModelViewer は `<img src>` と違い fetch(vellis-asset://…) でバイトを取るため、
+    // 応答に `Access-Control-Allow-Origin` が無いと WebView(origin
+    // http://localhost:1420 等)が本文を遮断する。契約: 成功・エラーを問わず
+    // すべての応答に `Access-Control-Allow-Origin: *` を付ける(エラーも
+    // フロントから観測可能でなければならない)。
+
+    /// handle_asset を通すための最小 AppState(実プロバイダ・実ファイル)。
+    fn test_state() -> AppState {
+        let registry = std::sync::Arc::new(crate::fs::registry::FileProviderRegistry::new());
+        AppState {
+            fs_registry: registry.clone(),
+            coordinator: std::sync::Arc::new(crate::watch::hub::DocumentCoordinator::new(
+                registry,
+            )),
+            window_manager: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::window::manager::WindowManager::new(),
+            )),
+            annotation_stores: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        }
+    }
+
+    fn allow_origin(resp: &http::Response<Vec<u8>>) -> Option<&str> {
+        resp.headers()
+            .get("Access-Control-Allow-Origin")
+            .and_then(|v| v.to_str().ok())
+    }
+
+    #[tokio::test]
+    async fn asset_success_response_allows_cross_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cube.stl");
+        std::fs::write(&path, b"solid cube\nendsolid cube\n").unwrap();
+
+        let url = format!(
+            "vellis-asset://local{}",
+            path.to_str().unwrap() // 絶対パスなので先頭 '/' がそのまま区切りになる
+        );
+        let req = http::Request::builder().uri(url).body(Vec::new()).unwrap();
+
+        let resp = handle_asset(&test_state(), req).await;
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            allow_origin(&resp),
+            Some("*"),
+            "200 応答に Access-Control-Allow-Origin: * が要る(fetch が本文を読めない)"
+        );
+        assert_eq!(resp.body(), b"solid cube\nendsolid cube\n");
+    }
+
+    #[tokio::test]
+    async fn asset_not_found_response_allows_cross_origin() {
+        let req = http::Request::builder()
+            .uri("vellis-asset://local/no/such/dir/missing.stl")
+            .body(Vec::new())
+            .unwrap();
+
+        let resp = handle_asset(&test_state(), req).await;
+
+        assert_eq!(resp.status().as_u16(), 404);
+        assert_eq!(
+            allow_origin(&resp),
+            Some("*"),
+            "エラー応答にも要る(付けないと 404 すらフロントで観測できない)"
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_bad_request_response_allows_cross_origin() {
+        let req = http::Request::builder()
+            .uri("vellis-asset://local/Users/tetsuo/../etc/passwd")
+            .body(Vec::new())
+            .unwrap();
+
+        let resp = handle_asset(&test_state(), req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        assert_eq!(allow_origin(&resp), Some("*"));
+    }
+
+    #[test]
+    fn error_response_allows_cross_origin() {
+        let resp = error_response(500, "read error");
+        assert_eq!(allow_origin(&resp), Some("*"));
     }
 }

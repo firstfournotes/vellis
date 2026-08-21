@@ -1,6 +1,6 @@
 [package]
 name = "vellis"
-version = "0.1.27"
+version = "0.1.28"
 description = "A read-only Markdown viewer for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"
@@ -46,6 +46,9 @@ chrono = { version = "0.4.44", features = ["serde"] }
 strsim = "0.11.1"
 sha2 = "0.11.0"
 similar = "3.1.0"
+# SpaceMouse (要件#24): raw HID reads. WKWebView has no WebHID, so the 6DoF
+# device is read here and pushed to the front end as events.
+hidapi = "2"
 toml = "1.1.2"
 
 # E2E test harness — exposes a W3C WebDriver server inside the running app

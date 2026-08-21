@@ -1,6 +1,6 @@
 {
   "name": "vellis",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "description": "",
   "type": "module",
   "packageManager": "pnpm@10.33.2",
@@ -31,6 +31,7 @@
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
+    "three": "^0.185.1",
     "unified": "^11.0.5",
     "unist-util-visit": "^5.1.0"
   },
@@ -44,6 +45,7 @@
     "@types/hast": "^3.0.4",
     "@types/mdast": "^4.0.4",
     "@types/node": "^22.0.0",
+    "@types/three": "^0.185.4",
     "@wdio/cli": "^9.4.0",
     "@wdio/globals": "^9.4.0",
     "@wdio/local-runner": "^9.4.0",

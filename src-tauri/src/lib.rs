@@ -11,6 +11,7 @@ pub mod history;
 pub mod ipc;
 pub mod menu;
 pub mod session;
+pub mod spacemouse;
 pub mod update_check;
 pub mod watch;
 pub mod window;
@@ -96,6 +97,22 @@ pub fn run_with_args(initial_args: WindowArgs) {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // --- SpaceMouse focus tracking (要件#25) ---
+        // The 3Dconnexion driver deactivates our client as soon as another
+        // application comes to the front, so coming back needs an explicit
+        // re-activation — without this the device goes dead after the first
+        // focus round trip. Deactivating on blur is also what lets other 3D
+        // apps keep using the device while Vellis is running (backlog #58).
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(focused) = event {
+                if let Some(spacemouse) = window
+                    .app_handle()
+                    .try_state::<spacemouse::SpaceMouseHandle>()
+                {
+                    spacemouse.set_window_focus(window.label(), *focused);
+                }
+            }
+        })
         .register_asynchronous_uri_scheme_protocol(
             "vellis-asset",
             move |ctx, req, responder| {
@@ -245,6 +262,17 @@ pub fn run_with_args(initial_args: WindowArgs) {
             // process behind every window). It is a no-op on the dev
             // channel, and every failure inside it is a log line only.
             update_check::spawn_poller(app.handle().clone());
+
+            // --- SpaceMouse (要件#24 / #25) ---
+            // One input source for the process; it emits `spacemouse_input`
+            // to every window and the 3D viewer picks it up while it is on
+            // screen. The source is decided once here: the 3DconnexionClient
+            // framework when 3DxWare is installed (it seizes the device, so
+            // raw HID reads nothing), otherwise the raw HID reader. No device
+            // (the common case) is not an error. The handle is kept in
+            // managed state so dropping it on shutdown stops the reader
+            // thread / unregisters the SDK client.
+            app.manage(spacemouse::start(app.handle().clone()));
 
             // Register the default window created by tauri.conf.json with the
             // CLI-derived initial arguments.
