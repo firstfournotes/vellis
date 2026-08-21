@@ -18,7 +18,7 @@ import type { SourceIndex } from '../markdown/types';
 import { buildSrcdoc } from './html-viewer';
 import { toAssetUri } from './uri';
 
-export type FileType = 'markdown' | 'html' | 'text' | 'image' | 'binary';
+export type FileType = 'markdown' | 'html' | 'text' | 'image' | 'model3d' | 'binary';
 
 /** Rendered by the Markdown pipeline. Mirrors `looks_like_markdown` (Rust). */
 const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown', 'mdx']);
@@ -50,6 +50,15 @@ const IMAGE_EXTENSIONS = new Set([
 	// default and can be toggled to its source (要件#16 ③).
 	'svg',
 ]);
+
+/**
+ * Shown as an interactive 3D scene instead of a binary placeholder (要件#23).
+ *
+ * Only the two mesh formats three.js reads directly: STL (ASCII / binary alike)
+ * and 3MF (a ZIP of XML). STEP is deliberately absent — it is a B-rep format
+ * that needs a CAD kernel to tessellate (docs/3d-model-viewing.md §4).
+ */
+const MODEL3D_EXTENSIONS = new Set(['stl', '3mf']);
 
 /** Never opened as text. Everything not listed here is treated as text. */
 const BINARY_EXTENSIONS = new Set([
@@ -124,6 +133,7 @@ export function detectFileType(nameOrUri: string): FileType {
 	if (MARKDOWN_EXTENSIONS.has(ext)) return 'markdown';
 	if (HTML_EXTENSIONS.has(ext)) return 'html';
 	if (IMAGE_EXTENSIONS.has(ext)) return 'image';
+	if (MODEL3D_EXTENSIONS.has(ext)) return 'model3d';
 	if (BINARY_EXTENSIONS.has(ext)) return 'binary';
 	return 'text';
 }
@@ -168,6 +178,13 @@ export interface DisplayResult {
 	 * same way `srcdoc` selects `HtmlViewer`.
 	 */
 	imageSrc?: string;
+	/**
+	 * Present only for 3D model files: the `vellis-asset:` URI `ModelViewer`
+	 * fetches the mesh from (要件#23). Its presence is what selects the 3D
+	 * viewer, exactly as `srcdoc` selects `HtmlViewer` and `imageSrc` the
+	 * `ImageViewer` — the bytes never travel through the document payload.
+	 */
+	modelSrc?: string;
 }
 
 /**
@@ -191,6 +208,11 @@ export async function renderForDisplay(uri: string, content: string): Promise<Di
 			// `toImageSrc` is this same conversion, imported straight from `uri.ts`
 			// to keep `image-viewing.ts` off this module's import cycle.
 			return { html: '', index: null, imageSrc: toAssetUri(uri) };
+		case 'model3d':
+			// 画像と同じ形: 本体バイトは本文に載せず、`ModelViewer` が asset URI から
+			// 取ってパースする(要件#23 ②③)。`content` は空(読まない経路=
+			// `open_binary_document` を通っている)。
+			return { html: '', index: null, modelSrc: toAssetUri(uri) };
 		case 'binary':
 			return { html: BINARY_PLACEHOLDER, index: null };
 		default:

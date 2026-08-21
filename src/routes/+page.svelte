@@ -68,10 +68,11 @@
 	// なので、閉じるのはこの窓のバナーだけ(他の窓は出たまま)。保存しない
 	// ので、次回起動時のチェックでまた出る。
 	let updateBanner = $state<UpdateAvailablePayload | null>(null);
-	// 要件#22: 表示中のラスタ画像の版数。`binary_file_changed` が届くたびに進み、
-	// `<img>` の src に乗ってキャッシュを破る。どの URI の版数かを一緒に持つので、
+	// 要件#22: 読まない経路で表示しているファイル(ラスタ画像・3D モデル=要件#23)の
+	// 版数。`binary_file_changed` が届くたびに進み、`<img>` の src / ModelViewer が
+	// fetch する URI に乗ってキャッシュを破る。どの URI の版数かを一緒に持つので、
 	// 別のファイルへ移れば(uri が一致しなくなり)版数0=素の URI に戻る。
-	let imageVersion = $state<{ uri: string; version: number }>({ uri: '', version: 0 });
+	let binaryVersion = $state<{ uri: string; version: number }>({ uri: '', version: 0 });
 	// 要件#10: 起動処理(スナップショット復元 or 起動時引数)が片付いたか。
 	// 片付くまでスナップショットを書かない — 復元前の中間状態で復元元を潰さないため。
 	let startupSettled = $state(false);
@@ -357,14 +358,15 @@
 			}
 		});
 
-		// 要件#22: 表示中のラスタ画像がディスク上で変わった。中身は届かないので
-		// 表示版数を進め、`<img>` の src を版数付きに変えて WebView に取り直させる。
-		// 版数は URI とセットで持つ — 別のファイルへ移れば版数0の素の URI に戻る。
+		// 要件#22: 表示中のラスタ画像・3D モデル(要件#23)がディスク上で変わった。
+		// 中身は届かないので表示版数を進め、asset URI を版数付きに変えて取り直させる
+		// (画像は `<img src>`・モデルは ModelViewer の fetch)。版数は URI とセットで
+		// 持つ — 別のファイルへ移れば版数0の素の URI に戻る。
 		await listen<BinaryFileChangedPayload>('binary_file_changed', (e) => {
 			if (e.payload.uri !== windowState.currentDocument?.uri) return;
-			imageVersion =
-				imageVersion.uri === e.payload.uri
-					? { uri: e.payload.uri, version: imageVersion.version + 1 }
+			binaryVersion =
+				binaryVersion.uri === e.payload.uri
+					? { uri: e.payload.uri, version: binaryVersion.version + 1 }
 					: { uri: e.payload.uri, version: 1 };
 		});
 
@@ -505,10 +507,26 @@
 						uri={windowState.currentDocument.uri}
 						src={imageSrcWithVersion(
 							windowState.renderedImageSrc,
-							imageVersion.uri === windowState.currentDocument.uri ? imageVersion.version : 0
+							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
 						)}
 						source={windowState.currentDocument.content}
 					/>
+					<!-- modelSrc がある=3D モデル(要件#23)。imageSrc と同じ形の分岐で、
+					     版数も同じ `binary_file_changed` の機構に乗る -->
+				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedModelSrc !== null}
+					<!--
+						three.js は重い(数百 KB)ので、3D モデルを開いたときだけ読み込む
+						(mermaid を図が出たときだけ `import()` するのと同じ整理)。
+					-->
+					{#await import('../components/ModelViewer.svelte') then module}
+						<module.default
+							uri={windowState.currentDocument.uri}
+							src={imageSrcWithVersion(
+								windowState.renderedModelSrc,
+								binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+							)}
+						/>
+					{/await}
 				{:else}
 					<Viewer
 						document={windowState.currentDocument}

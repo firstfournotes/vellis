@@ -57,11 +57,14 @@ function isSvg(nameOrUri: string): boolean {
 /**
  * `open_document` を通してよいか(= テキストとして読めるか)。
  *
- * 通さないのはラスタ画像だけ。SVG・Markdown・HTML・プレーンテキストは従来どおり
- * 読み、ラスタ画像は読まずに URI だけで表示する(要件#16 ⑦)。
+ * 通さないのはラスタ画像と 3D モデル(要件#23)。どちらも UTF-8 として読めない
+ * (STL はバイナリ形があり・3MF は ZIP)ので、読まずに URI だけで表示へ渡す。
+ * SVG・Markdown・HTML・プレーンテキストは従来どおり読む(要件#16 ⑦)。
  */
 export function readsAsText(nameOrUri: string): boolean {
-	return detectFileType(nameOrUri) !== 'image' || isSvg(nameOrUri);
+	const type = detectFileType(nameOrUri);
+	if (type === 'model3d') return false;
+	return type !== 'image' || isSvg(nameOrUri);
 }
 
 /**

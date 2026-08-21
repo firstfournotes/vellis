@@ -60,6 +60,7 @@ class WindowState {
 	renderedUri = $state<string | null>(null);
 	renderedSrcdoc = $state<string | null>(null);
 	renderedImageSrc = $state<string | null>(null);
+	renderedModelSrc = $state<string | null>(null);
 
 	setDocument(doc: DocumentPayload) {
 		this.currentDocument = doc;
@@ -128,13 +129,16 @@ class WindowState {
 		this.renderedUri = null;
 		this.renderedSrcdoc = null;
 		this.renderedImageSrc = null;
+		this.renderedModelSrc = null;
 	}
 
 	// `index` is null for non-Markdown bodies (plain text / binary / html /
 	// image), which carry no source map (要件#2). `srcdoc` is non-null only for
 	// HTML, where it holds the sandboxed iframe body instead of `html` (要件#8);
 	// `imageSrc` likewise only for images, where it holds the `<img>` asset URI
-	// (要件#16). At most one of the two is set — they pick the viewer.
+	// (要件#16), and `modelSrc` only for 3D models, where it holds the asset URI
+	// `ModelViewer` fetches the mesh from (要件#23). At most one of the three is
+	// set — they pick the viewer.
 	setRenderResult(uri: string, result: DisplayResult): void {
 		// Drop stale results: the active document may have changed while the
 		// async render was in flight.
@@ -143,6 +147,7 @@ class WindowState {
 		this.sourceIndex = result.index;
 		this.renderedSrcdoc = result.srcdoc ?? null;
 		this.renderedImageSrc = result.imageSrc ?? null;
+		this.renderedModelSrc = result.modelSrc ?? null;
 		this.renderedUri = uri;
 	}
 }
