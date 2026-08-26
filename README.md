@@ -10,7 +10,6 @@ Vellis is a viewer — it has no editor. The only files it writes are its own me
 
 ### Viewing
 
-- **Tree explorer** — every file in the folder is listed, not just Markdown, and directories load their children lazily. `Shift`-click an entry to open it in a new window; the `↑` button in the header moves the root up one directory.
 - **GitHub Flavored Markdown + Shiki** — tables, task lists, footnotes and strikethrough, with syntax-highlighted code blocks (11 languages preloaded: TypeScript, JavaScript, Rust, Python, Bash, JSON, YAML, HTML, CSS, Markdown, TOML).
 - **Alerts and diagrams** — `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]` and `> [!CAUTION]` blockquotes render as coloured callouts, and fenced blocks tagged `mermaid` render as diagrams. Mermaid is loaded on first use, so documents without diagrams never pay for it.
 - **HTML rendered, never run** — `.html` / `.htm` open rendered rather than as source, inside a sandboxed iframe. Scripts never run and links are inert, which makes self-contained AI-generated reports safe to read in place.
