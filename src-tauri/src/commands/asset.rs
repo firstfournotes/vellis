@@ -3,6 +3,13 @@
 //! This module implements the Tauri custom protocol that serves images and
 //! attachments to the Webview. The protocol translates `vellis-asset://`
 //! URIs into internal `Uri` values and reads bytes through `FileProviderRegistry`.
+//!
+//! Responses are range-capable (要件#27, modelled on Tauri's own
+//! `examples/streaming` but parsed here rather than pulling in a dependency):
+//! the handler stats the target first, answers `Range` with `206` + a slice, and
+//! falls back to a `200` whole-file response otherwise. That whole-file path
+//! streams too — it is not subject to `LocalProvider`'s `read_bytes` size cap,
+//! which is what used to turn files over 10 MB into a `413` (backlog #59).
 
 use crate::errors::{FsError, VellisError};
 use crate::fs::uri::Uri;
@@ -137,6 +144,149 @@ pub fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
         .expect("failed to build error response")
 }
 
+/// Map a read failure to the status code it has always produced.
+fn read_error_response(err: FsError) -> http::Response<Vec<u8>> {
+    match err {
+        FsError::NotFound(_) => error_response(404, "not found"),
+        FsError::FileTooLarge(_) => error_response(413, "file too large"),
+        _ => error_response(500, "read error"),
+    }
+}
+
+/// Build the body-carrying response: `206` when `content_range` is present,
+/// `200` otherwise. Both advertise `Accept-Ranges: bytes` so the WebView knows
+/// it may seek instead of pulling the whole file.
+fn body_response(
+    mime: &str,
+    bytes: Vec<u8>,
+    content_range: Option<String>,
+) -> http::Response<Vec<u8>> {
+    let builder = http::Response::builder()
+        .header("Content-Type", mime)
+        .header("Accept-Ranges", "bytes")
+        .header("Cache-Control", "no-store")
+        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+
+    let builder = match content_range {
+        Some(range) => builder.status(206).header("Content-Range", range),
+        None => builder.status(200),
+    };
+
+    builder.body(bytes).expect("failed to build asset response")
+}
+
+/// `416 Range Not Satisfiable`, telling the client the real size so it can
+/// re-ask for a range that exists.
+fn unsatisfiable_response(total: u64) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(416)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("Content-Range", format!("bytes */{}", total))
+        .header("Accept-Ranges", "bytes")
+        .header("Cache-Control", "no-store")
+        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
+        .body(b"range not satisfiable".to_vec())
+        .expect("failed to build 416 response")
+}
+
+// ---------------------------------------------------------------------------
+// Range requests
+// ---------------------------------------------------------------------------
+
+/// Largest body one open-ended `Range` (`bytes=N-`) response carries (1 MiB).
+///
+/// A media element asks for `bytes=N-` meaning "everything from here", which for
+/// a video is the whole file. Answering with one chunk and a `Content-Range`
+/// that says so is what makes the WebView come back for the next piece instead
+/// of waiting on a multi-gigabyte read. 1 MiB is the size Tauri's own streaming
+/// example settles on.
+pub const STREAM_CHUNK_SIZE: u64 = 1024 * 1024;
+
+/// What a `Range` header value means for a file of a given size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeResolution {
+    /// No usable range in the header. Per RFC 9110 an unparsable `Range` is
+    /// ignored rather than rejected, so this means "serve the whole file".
+    Ignore,
+    /// Serve bytes `start..=end` (`end` inclusive, as in `Content-Range`).
+    Partial { start: u64, end: u64 },
+    /// The range starts at or past EOF — nothing to serve (`416`).
+    Unsatisfiable,
+}
+
+/// Interpret a `Range` header value against the total file size.
+///
+/// Handles the three forms browsers send, taking only the first range of a
+/// multi-range request (no `multipart/byteranges`):
+/// - `bytes=a-b` — both ends given; `b` is clamped to the last byte.
+/// - `bytes=a-`  — open-ended; capped at `STREAM_CHUNK_SIZE`.
+/// - `bytes=-n`  — the last `n` bytes; clamped to the whole file.
+pub fn resolve_range(header: &str, total: u64) -> RangeResolution {
+    let spec = match split_bytes_unit(header.trim()) {
+        Some(s) => s,
+        None => return RangeResolution::Ignore,
+    };
+
+    // Only the first range of `bytes=0-1,5-6` is served.
+    let spec = spec.split(',').next().unwrap_or("").trim();
+    let (first, last) = match spec.split_once('-') {
+        Some(parts) => parts,
+        None => return RangeResolution::Ignore,
+    };
+
+    if first.is_empty() {
+        // `bytes=-n`: the last n bytes.
+        let n: u64 = match last.trim().parse() {
+            Ok(n) => n,
+            Err(_) => return RangeResolution::Ignore,
+        };
+        if n == 0 || total == 0 {
+            return RangeResolution::Unsatisfiable;
+        }
+        return RangeResolution::Partial {
+            start: total.saturating_sub(n),
+            end: total - 1,
+        };
+    }
+
+    let start: u64 = match first.trim().parse() {
+        Ok(s) => s,
+        Err(_) => return RangeResolution::Ignore,
+    };
+    let last = last.trim();
+
+    if last.is_empty() {
+        // `bytes=a-`: to EOF, but no more than one chunk per response.
+        if start >= total {
+            return RangeResolution::Unsatisfiable;
+        }
+        let end = start.saturating_add(STREAM_CHUNK_SIZE - 1).min(total - 1);
+        return RangeResolution::Partial { start, end };
+    }
+
+    // `bytes=a-b`
+    let end: u64 = match last.parse() {
+        Ok(e) => e,
+        Err(_) => return RangeResolution::Ignore,
+    };
+    if start > end {
+        return RangeResolution::Ignore; // malformed, not unsatisfiable
+    }
+    if start >= total {
+        return RangeResolution::Unsatisfiable;
+    }
+    RangeResolution::Partial {
+        start,
+        end: end.min(total - 1),
+    }
+}
+
+/// Strip the `bytes=` unit prefix, rejecting any other range unit.
+fn split_bytes_unit(header: &str) -> Option<&str> {
+    let (unit, spec) = header.split_once('=')?;
+    unit.trim().eq_ignore_ascii_case("bytes").then_some(spec)
+}
+
 // ---------------------------------------------------------------------------
 // Asset request handler
 // ---------------------------------------------------------------------------
@@ -145,14 +295,17 @@ pub fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
 ///
 /// 1. Parse the URI to an internal `Uri`.
 /// 2. Resolve a `FileProvider` from the registry.
-/// 3. Read raw bytes via `provider.read_bytes`.
-/// 4. Determine MIME type and apply the safety filter.
-/// 5. Return the response with `Cache-Control: no-store` and the CORS header.
+/// 3. `stat` the target for its size — needed to decide whether a `Range` can
+///    be satisfied and to fill in `Content-Range`.
+/// 4. Read the requested slice (or the whole file) via `provider.read_range`.
+/// 5. Determine MIME type and apply the safety filter.
+/// 6. Return `206` / `200` with `Cache-Control: no-store` and the CORS header.
 ///
-/// Every response this module can produce comes from one of exactly two
-/// builders — the 200 path below and `error_response` (400 / 404 / 413 / 500)
-/// — and both carry `Access-Control-Allow-Origin` so that `fetch` from the
-/// page can read the result (backlog #55).
+/// Every response this module can produce comes from one of exactly three
+/// builders — `body_response` (200 / 206), `unsatisfiable_response` (416) and
+/// `error_response` (400 / 404 / 413 / 500) — and all carry
+/// `Access-Control-Allow-Origin` so that `fetch` from the page can read the
+/// result (backlog #55).
 pub async fn handle_asset(
     state: &AppState,
     req: http::Request<Vec<u8>>,
@@ -169,11 +322,40 @@ pub async fn handle_asset(
         Err(_) => return error_response(404, "unsupported scheme"),
     };
 
-    let bytes = match provider.read_bytes(&inner_uri).await {
-        Ok(b) => b,
+    // `size` is `None` for anything that is not a regular file (a directory,
+    // say). There is no total to range against, so the request falls through to
+    // a whole-file read, which fails exactly as it did before ranges existed.
+    let total = match provider.stat(&inner_uri).await {
+        Ok(entry) => entry.size,
         Err(FsError::NotFound(_)) => return error_response(404, "not found"),
-        Err(FsError::FileTooLarge(_)) => return error_response(413, "file too large"),
-        Err(_) => return error_response(500, "read error"),
+        Err(_) => return error_response(500, "stat error"),
+    };
+
+    let range_header = req
+        .headers()
+        .get(http::header::RANGE)
+        .and_then(|v| v.to_str().ok());
+
+    let resolution = match (total, range_header) {
+        (Some(total), Some(header)) => resolve_range(header, total),
+        _ => RangeResolution::Ignore,
+    };
+
+    let (start, max_len, content_range) = match (resolution, total) {
+        (RangeResolution::Partial { start, end }, Some(total)) => (
+            start,
+            end - start + 1,
+            Some(format!("bytes {}-{}/{}", start, end, total)),
+        ),
+        (RangeResolution::Unsatisfiable, Some(total)) => return unsatisfiable_response(total),
+        // Whole file. `u64::MAX` only stands in for an unknown size; the read
+        // stops at EOF either way.
+        _ => (0, total.unwrap_or(u64::MAX), None),
+    };
+
+    let bytes = match provider.read_range(&inner_uri, start, max_len).await {
+        Ok(b) => b,
+        Err(e) => return read_error_response(e),
     };
 
     let mime_raw = mime_guess::from_path(inner_uri.path_str())
@@ -181,13 +363,7 @@ pub async fn handle_asset(
         .to_string();
     let mime = safe_mime(&mime_raw);
 
-    http::Response::builder()
-        .status(200)
-        .header("Content-Type", mime)
-        .header("Cache-Control", "no-store")
-        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
-        .body(bytes)
-        .expect("failed to build asset response")
+    body_response(mime, bytes, content_range)
 }
 
 // ---------------------------------------------------------------------------

@@ -57,13 +57,15 @@ function isSvg(nameOrUri: string): boolean {
 /**
  * `open_document` を通してよいか(= テキストとして読めるか)。
  *
- * 通さないのはラスタ画像と 3D モデル(要件#23)。どちらも UTF-8 として読めない
- * (STL はバイナリ形があり・3MF は ZIP)ので、読まずに URI だけで表示へ渡す。
+ * 通さないのはラスタ画像と 3D モデル(要件#23)と動画(要件#28)と PDF(要件#29)。
+ * どれも UTF-8 として読めない(STL はバイナリ形があり・3MF は ZIP・動画と PDF は
+ * 言うまでもない)ので、読まずに URI だけで表示へ渡す。再生できないコンテナ(mkv/avi)と
+ * ssh の動画・PDF も同じ — 表示はプレースホルダでも、読まない監視(要件#22)は張る。
  * SVG・Markdown・HTML・プレーンテキストは従来どおり読む(要件#16 ⑦)。
  */
 export function readsAsText(nameOrUri: string): boolean {
 	const type = detectFileType(nameOrUri);
-	if (type === 'model3d') return false;
+	if (type === 'model3d' || type === 'video' || type === 'pdf') return false;
 	return type !== 'image' || isSvg(nameOrUri);
 }
 

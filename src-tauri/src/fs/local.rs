@@ -12,8 +12,19 @@ use super::entry::{Entry, FileKind};
 use super::provider::{FileProvider, WatchEvent, WatchEventKind, WatchHandle};
 use super::uri::Uri;
 
-/// Maximum file size for `read_bytes` (10 MB).
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+/// Maximum file size for `read_bytes` (50 MB).
+///
+/// This caps the *whole-file* read only. `read_range` streams and is deliberately
+/// exempt, so a large asset is served in pieces rather than refused (要件#27).
+/// The limit was 10 MB until backlog #59 showed it turning away files the viewers
+/// are expected to open (3D models above 10 MB, 要件#23).
+const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Buffer size for one `read` call inside `read_range` (64 KB).
+///
+/// Only an I/O granularity — unrelated to `asset::STREAM_CHUNK_SIZE`, which caps
+/// how much one HTTP response carries.
+const READ_CHUNK_SIZE: u64 = 64 * 1024;
 
 /// Counter for generating unique watch handle IDs.
 static WATCH_ID: AtomicU64 = AtomicU64::new(1);
@@ -147,6 +158,39 @@ impl FileProvider for LocalProvider {
         }
 
         tokio::fs::read(path).await.map_err(io_to_fs)
+    }
+
+    /// Seek to `start` and read up to `max_len` bytes in 64 KB chunks.
+    ///
+    /// Overrides the trait default (whole-file read + slice) so that a partial
+    /// read costs only the bytes asked for. No `MAX_FILE_SIZE` check: the size
+    /// cap exists to bound a single whole-file read, and this path is bounded by
+    /// `max_len` instead (要件#27 契約③).
+    async fn read_range(&self, uri: &Uri, start: u64, max_len: u64) -> Result<Vec<u8>, FsError> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let mut file = tokio::fs::File::open(&uri.path).await.map_err(io_to_fs)?;
+        if start > 0 {
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(io_to_fs)?;
+        }
+
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; max_len.min(READ_CHUNK_SIZE) as usize];
+        let mut remaining = max_len;
+
+        while remaining > 0 {
+            let want = remaining.min(buf.len() as u64) as usize;
+            let n = file.read(&mut buf[..want]).await.map_err(io_to_fs)?;
+            if n == 0 {
+                break; // EOF: return what we got (past-EOF reads are not errors)
+            }
+            out.extend_from_slice(&buf[..n]);
+            remaining -= n as u64;
+        }
+
+        Ok(out)
     }
 
     // read_text: uses the default trait implementation (read_bytes + UTF-8 decode)

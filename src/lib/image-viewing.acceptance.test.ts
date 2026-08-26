@@ -121,11 +121,8 @@ describe('detectFileType — 既存分類の不変ガード(image 分離後も�
 		expectAll(['notes.txt', 'config.json', 'data.xml', 'Makefile', '.gitignore'], 'text');
 	});
 
-	test('画像以外の既知バイナリは binary のまま(pdf zip gz exe dll woff2 mp3 mp4)', () => {
-		expectAll(
-			['doc.pdf', 'a.zip', 'a.gz', 'a.exe', 'a.dll', 'font.woff2', 'a.mp3', 'a.mp4'],
-			'binary',
-		);
+	test('画像以外の既知バイナリは binary のまま(zip gz exe dll woff2 mp3)', () => {
+		expectAll(['a.zip', 'a.gz', 'a.exe', 'a.dll', 'font.woff2', 'a.mp3'], 'binary');
 	});
 });
 

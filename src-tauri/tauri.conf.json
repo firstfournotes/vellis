@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: customprotocol: asset:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: vellis-asset: asset: http://asset.localhost tauri: customprotocol:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost vellis-asset: asset: http://asset.localhost tauri: customprotocol:; object-src 'none'; base-uri 'self' vellis-asset:; frame-ancestors 'none'"
+      "csp": "default-src 'self' tauri: customprotocol: asset:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: vellis-asset: asset: http://asset.localhost tauri: customprotocol:; font-src 'self' data:; media-src 'self' vellis-asset: asset: http://asset.localhost; frame-src 'self' vellis-asset:; connect-src 'self' ipc: http://ipc.localhost vellis-asset: asset: http://asset.localhost tauri: customprotocol:; object-src 'none'; base-uri 'self' vellis-asset:; frame-ancestors 'none'"
     }
   },
   "bundle": {

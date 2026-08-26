@@ -4,6 +4,8 @@
 	import Viewer from '../components/Viewer.svelte';
 	import HtmlViewer from '../components/HtmlViewer.svelte';
 	import ImageViewer from '../components/ImageViewer.svelte';
+	import VideoViewer from '../components/VideoViewer.svelte';
+	import PdfViewer from '../components/PdfViewer.svelte';
 	import EmptyState from '../components/EmptyState.svelte';
 	import StatusBar from '../components/StatusBar.svelte';
 	import InstructionDialog from '../components/InstructionDialog.svelte';
@@ -68,9 +70,10 @@
 	// なので、閉じるのはこの窓のバナーだけ(他の窓は出たまま)。保存しない
 	// ので、次回起動時のチェックでまた出る。
 	let updateBanner = $state<UpdateAvailablePayload | null>(null);
-	// 要件#22: 読まない経路で表示しているファイル(ラスタ画像・3D モデル=要件#23)の
-	// 版数。`binary_file_changed` が届くたびに進み、`<img>` の src / ModelViewer が
-	// fetch する URI に乗ってキャッシュを破る。どの URI の版数かを一緒に持つので、
+	// 要件#22: 読まない経路で表示しているファイル(ラスタ画像・3D モデル=要件#23・
+	// 動画=要件#28)の版数。`binary_file_changed` が届くたびに進み、`<img>` の src /
+	// ModelViewer が fetch する URI / `<video src>` に乗ってキャッシュを破る。
+	// どの URI の版数かを一緒に持つので、
 	// 別のファイルへ移れば(uri が一致しなくなり)版数0=素の URI に戻る。
 	let binaryVersion = $state<{ uri: string; version: number }>({ uri: '', version: 0 });
 	// 要件#10: 起動処理(スナップショット復元 or 起動時引数)が片付いたか。
@@ -527,6 +530,28 @@
 							)}
 						/>
 					{/await}
+					<!-- videoSrc がある=動画(要件#28)。imageSrc と同じ形の分岐で、版数も
+					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
+					     mkv/avi・ssh もこの経路を通る(出し分けは VideoViewer の中) -->
+				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedVideoSrc !== null}
+					<VideoViewer
+						uri={windowState.currentDocument.uri}
+						src={imageSrcWithVersion(
+							windowState.renderedVideoSrc,
+							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+						)}
+					/>
+					<!-- pdfSrc がある=PDF(要件#29)。videoSrc と同じ形の分岐で、版数も
+					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
+					     ssh もこの経路を通る(出し分けは PdfViewer の中) -->
+				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedPdfSrc !== null}
+					<PdfViewer
+						uri={windowState.currentDocument.uri}
+						src={imageSrcWithVersion(
+							windowState.renderedPdfSrc,
+							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+						)}
+					/>
 				{:else}
 					<Viewer
 						document={windowState.currentDocument}

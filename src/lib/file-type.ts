@@ -18,7 +18,15 @@ import type { SourceIndex } from '../markdown/types';
 import { buildSrcdoc } from './html-viewer';
 import { toAssetUri } from './uri';
 
-export type FileType = 'markdown' | 'html' | 'text' | 'image' | 'model3d' | 'binary';
+export type FileType =
+	| 'markdown'
+	| 'html'
+	| 'text'
+	| 'image'
+	| 'model3d'
+	| 'video'
+	| 'pdf'
+	| 'binary';
 
 /** Rendered by the Markdown pipeline. Mirrors `looks_like_markdown` (Rust). */
 const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown', 'mdx']);
@@ -60,6 +68,27 @@ const IMAGE_EXTENSIONS = new Set([
  */
 const MODEL3D_EXTENSIONS = new Set(['stl', '3mf']);
 
+/**
+ * 動画(要件#28)。バイナリのプレースホルダではなく `VideoViewer` へ回す5種。
+ *
+ * mp4 / mov / webm は WebKit がそのままデコードするのでインライン再生でき、
+ * mkv / avi はデコーダが無いので「既定アプリで開く」へ誘導するプレースホルダに
+ * なる — が、その出し分けは表示側(`video-viewing.ts` の `videoViewMode`)の
+ * 持ち場で、分類はどちらも `video`。音声(mp3/wav/flac/m4a/ogg)は別要件なので
+ * binary のまま(docs/video-viewing.md §7 Q7)。
+ */
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'webm', 'mkv', 'avi']);
+
+/**
+ * PDF(要件#29)。バイナリのプレースホルダではなく `PdfViewer` へ回す唯一の拡張子。
+ *
+ * WKWebView が PDF を自前で描けることは実機プローブで確認済み(docs/pdf-viewing.md
+ * §7 の追記=案A 確定)なので、描画も依存も持たずに `<iframe>` へ渡す。ssh リモートは
+ * 初版の対象外だが分類はここ — プレースホルダの出し分けは表示側(`pdf-viewing.ts` の
+ * `pdfViewMode`)の持ち場で、動画(mkv/avi)と同じ整理。
+ */
+const PDF_EXTENSIONS = new Set(['pdf']);
+
 /** Never opened as text. Everything not listed here is treated as text. */
 const BINARY_EXTENSIONS = new Set([
 	// image formats no WebView draws portably — deliberately kept out of the
@@ -67,8 +96,7 @@ const BINARY_EXTENSIONS = new Set([
 	'tiff',
 	'tif',
 	'heic',
-	// documents / archives
-	'pdf',
+	// documents / archives(pdf は PdfViewer へ移した=要件#29)
 	'zip',
 	'gz',
 	'bz2',
@@ -98,17 +126,12 @@ const BINARY_EXTENSIONS = new Set([
 	'ttf',
 	'otf',
 	'eot',
-	// media
+	// media(動画5種は video へ移した=要件#28。ここに残るのは音声だけ)
 	'mp3',
-	'mp4',
 	'wav',
 	'flac',
 	'ogg',
 	'm4a',
-	'mov',
-	'avi',
-	'mkv',
-	'webm',
 	// databases / disk images
 	'sqlite',
 	'db',
@@ -134,6 +157,8 @@ export function detectFileType(nameOrUri: string): FileType {
 	if (HTML_EXTENSIONS.has(ext)) return 'html';
 	if (IMAGE_EXTENSIONS.has(ext)) return 'image';
 	if (MODEL3D_EXTENSIONS.has(ext)) return 'model3d';
+	if (VIDEO_EXTENSIONS.has(ext)) return 'video';
+	if (PDF_EXTENSIONS.has(ext)) return 'pdf';
 	if (BINARY_EXTENSIONS.has(ext)) return 'binary';
 	return 'text';
 }
@@ -185,6 +210,22 @@ export interface DisplayResult {
 	 * `ImageViewer` — the bytes never travel through the document payload.
 	 */
 	modelSrc?: string;
+	/**
+	 * Present only for video files: the `vellis-asset:` URI `VideoViewer` puts on
+	 * `<video src>` (要件#28). Its presence selects the video viewer, the same way
+	 * `srcdoc` selects `HtmlViewer`. Non-playable containers (mkv / avi) and ssh
+	 * remotes carry it too — the viewer shows a placeholder instead of a player,
+	 * and that decision belongs to `videoViewMode` (`$lib/video-viewing`).
+	 */
+	videoSrc?: string;
+	/**
+	 * Present only for PDF files: the `vellis-asset:` URI `PdfViewer` puts on the
+	 * `<iframe src>` WKWebView renders natively (要件#29). Its presence selects the
+	 * PDF viewer, the same way `srcdoc` selects `HtmlViewer`. ssh remotes carry it
+	 * too — the viewer shows a placeholder instead of the document, and that
+	 * decision belongs to `pdfViewMode` (`$lib/pdf-viewing`).
+	 */
+	pdfSrc?: string;
 }
 
 /**
@@ -213,6 +254,18 @@ export async function renderForDisplay(uri: string, content: string): Promise<Di
 			// 取ってパースする(要件#23 ②③)。`content` は空(読まない経路=
 			// `open_binary_document` を通っている)。
 			return { html: '', index: null, modelSrc: toAssetUri(uri) };
+		case 'video':
+			// 画像・3D と同じ形: 本体バイトは本文に載せず、`<video src>` が asset URI を
+			// 取りに行く(要件#28 ②)。`content` は空(`open_binary_document` 経由)。
+			// インライン再生できないコンテナ・ssh もここを通り、プレースホルダの
+			// 出し分けは `videoViewMode` が引き受ける。
+			return { html: '', index: null, videoSrc: toAssetUri(uri) };
+		case 'pdf':
+			// 動画と同じ形: 本体バイトは本文に載せず、`<iframe src>` が asset URI を
+			// 取りに行き、描画は WKWebView のネイティブ PDF ビューアが行う(要件#29)。
+			// `content` は空(`open_binary_document` 経由)。ssh もここを通り、
+			// プレースホルダの出し分けは `pdfViewMode` が引き受ける。
+			return { html: '', index: null, pdfSrc: toAssetUri(uri) };
 		case 'binary':
 			return { html: BINARY_PLACEHOLDER, index: null };
 		default:

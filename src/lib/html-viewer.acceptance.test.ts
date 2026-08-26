@@ -196,7 +196,7 @@ describe('detectFileType — 要件#2 契約の不変ガード(html 分離後。
 	test('md→markdown・text 系→text・既知バイナリ→binary・画像系→image(要件#16)', () => {
 		expectAll(['README.md', 'notes.markdown', 'page.mdx'], 'markdown');
 		expectAll(['notes.txt', 'data.xyz', 'Makefile'], 'text');
-		expectAll(['doc.pdf'], 'binary');
+		expectAll(['report.zip'], 'binary');
 		expectAll(['icon.svg', 'photo.png'], 'image');
 	});
 });

@@ -55,6 +55,27 @@ pub trait FileProvider: Send + Sync {
     /// Read the raw bytes of a file (images, attachments, Markdown source).
     async fn read_bytes(&self, uri: &Uri) -> Result<Vec<u8>, FsError>;
 
+    /// Read at most `max_len` bytes starting at byte offset `start`
+    /// (要件#27: the `vellis-asset` protocol serves Range requests through this).
+    ///
+    /// Default implementation: `read_bytes` + slice, so a provider that can only
+    /// fetch whole files (`ssh.rs`) still answers partial reads correctly without
+    /// any change of its own. Providers that can seek should override this — the
+    /// default inherits whatever size cap `read_bytes` enforces, the override
+    /// does not (see `LocalProvider::read_range`).
+    ///
+    /// Reading past EOF is not an error: it yields however many bytes are left
+    /// (an empty `Vec` when `start` is at or beyond EOF). The caller decides
+    /// whether a range is satisfiable — the asset handler does it with `stat`
+    /// before reading.
+    async fn read_range(&self, uri: &Uri, start: u64, max_len: u64) -> Result<Vec<u8>, FsError> {
+        let bytes = self.read_bytes(uri).await?;
+        let len = bytes.len() as u64;
+        let start = start.min(len);
+        let end = start.saturating_add(max_len).min(len);
+        Ok(bytes[start as usize..end as usize].to_vec())
+    }
+
     /// Read the file content as a UTF-8 string.
     ///
     /// Default implementation: calls `read_bytes` and decodes as UTF-8.

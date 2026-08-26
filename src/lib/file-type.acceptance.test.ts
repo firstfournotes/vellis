@@ -11,8 +11,10 @@
  *      根拠: 既存判定 looks_like_markdown(src-tauri/src/window/manager.rs:59)と
  *      Viewer.svelte:106 の /\.(md|markdown|mdx)$/i に一致させる
  *    - binary: 既知バイナリ拡張子のブロックリスト(大文字小文字不問)。
- *      本テストが固定する代表例: pdf zip gz exe dll woff2 mp3 mp4
- *      (png jpg jpeg gif webp bmp ico は要件#16 により image 分類へ分離)
+ *      本テストが固定する代表例: zip gz exe dll woff2 mp3
+ *      (png jpg jpeg gif webp bmp ico は要件#16 により image 分類へ、mp4 は
+ *      要件#28 により video 分類へ、pdf は要件#29 により pdf 分類へ分離。
+ *      mp3 ほか音声は binary のまま=要件#28 ⑦)
  *    - text: 上記以外のすべて。既知テキスト拡張子(txt json log csv yaml yml
  *      toml xml ts js rs py sh)・拡張子なし(Makefile 等)・ドットファイル・
  *      未知拡張子を含む
@@ -108,8 +110,8 @@ describe('detectFileType — テキスト系', () => {
 });
 
 describe('detectFileType — バイナリ系', () => {
-	test('代表的バイナリ拡張子を binary と判定する(画像8種は要件#16 で image へ分離済み)', () => {
-		const exts = ['pdf', 'zip', 'gz', 'exe', 'dll', 'woff2', 'mp3', 'mp4'];
+	test('代表的バイナリ拡張子を binary と判定する(画像8種は要件#16 で image へ・mp4 は要件#28 で video へ分離済み)', () => {
+		const exts = ['zip', 'gz', 'exe', 'dll', 'woff2', 'mp3'];
 		expectAll(
 			exts.map((ext) => `blob.${ext}`),
 			'binary',
@@ -117,7 +119,7 @@ describe('detectFileType — バイナリ系', () => {
 	});
 
 	test('大文字拡張子も binary', () => {
-		expectAll(['ARCHIVE.ZIP', 'DOC.PDF'], 'binary');
+		expectAll(['ARCHIVE.ZIP', 'SETUP.EXE'], 'binary');
 	});
 });
 

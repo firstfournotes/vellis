@@ -50,7 +50,7 @@
 
 	async function handleFileClick(e: MouseEvent, entry: Entry) {
 		// 要件#2: バイナリは表示対象外。エラーにはせず、開かないだけにする。
-		// 画像(要件#16)はここを通る — image は binary ではない。
+		// 画像(要件#16)・動画(要件#28)はここを通る — どちらも binary ではない。
 		if (detectFileType(entry.uri) === 'binary') return;
 		if (e.shiftKey) {
 			// Open in a new window -- current window state is unaffected.

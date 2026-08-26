@@ -61,6 +61,8 @@ class WindowState {
 	renderedSrcdoc = $state<string | null>(null);
 	renderedImageSrc = $state<string | null>(null);
 	renderedModelSrc = $state<string | null>(null);
+	renderedVideoSrc = $state<string | null>(null);
+	renderedPdfSrc = $state<string | null>(null);
 
 	setDocument(doc: DocumentPayload) {
 		this.currentDocument = doc;
@@ -130,14 +132,18 @@ class WindowState {
 		this.renderedSrcdoc = null;
 		this.renderedImageSrc = null;
 		this.renderedModelSrc = null;
+		this.renderedVideoSrc = null;
+		this.renderedPdfSrc = null;
 	}
 
 	// `index` is null for non-Markdown bodies (plain text / binary / html /
 	// image), which carry no source map (要件#2). `srcdoc` is non-null only for
 	// HTML, where it holds the sandboxed iframe body instead of `html` (要件#8);
 	// `imageSrc` likewise only for images, where it holds the `<img>` asset URI
-	// (要件#16), and `modelSrc` only for 3D models, where it holds the asset URI
-	// `ModelViewer` fetches the mesh from (要件#23). At most one of the three is
+	// (要件#16), `modelSrc` only for 3D models, where it holds the asset URI
+	// `ModelViewer` fetches the mesh from (要件#23), `videoSrc` only for videos,
+	// where it holds the `<video>` asset URI (要件#28), and `pdfSrc` only for PDFs,
+	// where it holds the `<iframe>` asset URI (要件#29). At most one of the five is
 	// set — they pick the viewer.
 	setRenderResult(uri: string, result: DisplayResult): void {
 		// Drop stale results: the active document may have changed while the
@@ -148,6 +154,8 @@ class WindowState {
 		this.renderedSrcdoc = result.srcdoc ?? null;
 		this.renderedImageSrc = result.imageSrc ?? null;
 		this.renderedModelSrc = result.modelSrc ?? null;
+		this.renderedVideoSrc = result.videoSrc ?? null;
+		this.renderedPdfSrc = result.pdfSrc ?? null;
 		this.renderedUri = uri;
 	}
 }

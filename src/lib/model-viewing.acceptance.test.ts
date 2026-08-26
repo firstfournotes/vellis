@@ -99,7 +99,7 @@ describe('detectFileType — stl / 3mf を model3d と判定する(要件#23 ①
 		expect(detectFileType('page.html')).toBe('html');
 		expect(detectFileType('icon.svg')).toBe('image');
 		expect(detectFileType('photo.png')).toBe('image');
-		expect(detectFileType('report.pdf')).toBe('binary');
+		expect(detectFileType('report.zip')).toBe('binary');
 		expect(detectFileType('notes.txt')).toBe('text');
 		expect(detectFileType('data.xyz')).toBe('text'); // 未知拡張子のフォールバックも不変
 		expect(detectFileType('Makefile')).toBe('text');

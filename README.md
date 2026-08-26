@@ -17,6 +17,7 @@ Vellis is a viewer — it has no editor. The only files it writes are its own me
 - **3D models** — STL (ASCII and binary) and 3MF open as an interactive scene: left-drag rotates, right-drag pans, the wheel zooms, a reset button restores the opening framing, and the toolbar shows the triangle count. Rotation is a screen-relative trackball rather than a fixed-axis orbit, so the drag direction and the way the model turns agree however far it has already been turned.
 - **SpaceMouse** — a 3Dconnexion 6DoF device drives that same camera: tilt to rotate, slide to pan, push or pull to zoom. It works with or without the vendor driver installed (the official `3DconnexionClient` framework when 3DxWare is present, raw HID otherwise) and follows window focus. Nothing is bundled and no device is required.
 - **Video** — plays inline with the system player controls, streamed a range at a time as you seek rather than read whole before it starts. See [Supported formats](#supported-formats) for containers and codecs.
+- **PDF** — opens in the WebView's built-in PDF viewer, so scrolling, zooming, text selection and copying work as they do in Safari. A file that turns out not to be a PDF shows a placeholder offering to open it in the default application instead.
 - **Remote viewing over SSH/SFTP** — `vellis ssh://user@host/path`, including `~/.ssh/config` host aliases (`vellis ssh://myhost/path`). Authentication falls back from `ssh-agent` to `IdentityFile` (unencrypted keys only), and hosts are verified against `~/.ssh/known_hosts` (trust on first use). Remote files are polled every 2 seconds for changes.
 - **Quality-of-life** — live reload (the open file re-renders when it changes on disk and the tree follows), a resizable explorer pane, reload restoring the root and open file and expanded folders, a recent-folder picker, printing (`⌘P`), a Window menu of the open windows, a tree context menu (reveal in the Finder, open with, copy path), single-instance launch, and an update banner that tells you about a new release without ever installing it.
 
@@ -31,10 +32,11 @@ Vellis is a viewer — it has no editor. The only files it writes are its own me
 | 3D models | `.stl` `.3mf` | Interactive scene, mouse or SpaceMouse |
 | Video | `.mp4` `.mov` `.webm` | Inline playback, system controls |
 | Video (other containers) | `.mkv` `.avi` | Placeholder offering the default application |
+| PDF | `.pdf` | Built-in PDF viewer, inline |
 | Plain text | any other extension | Shown verbatim, no Markdown parsing |
-| Other binaries | PDF, archives, audio, fonts, TIFF, HEIC, … | Listed in the tree, not opened |
+| Other binaries | archives, audio, fonts, TIFF, HEIC, … | Listed in the tree, not opened |
 
-Video decoding is the system WebView's, so H.264, HEVC and ProRes play, AV1 needs an M3-generation Mac or newer, and WebM has to be VP8/Opus — VP9 does not decode. Video on an ssh remote is not played in place either; it shows the placeholder without the opener, as the context menu does for remote entries. A file with an unlisted extension is read as text; the reader has the final say and refuses anything that is not UTF-8 or is larger than 50 MB.
+Video decoding is the system WebView's, so H.264, HEVC and ProRes play, AV1 needs an M3-generation Mac or newer, and WebM has to be VP8/Opus — VP9 does not decode. Video and PDF on an ssh remote are not opened in place either; they show the placeholder without the opener, as the context menu does for remote entries. A file with an unlisted extension is read as text; the reader has the final say and refuses anything that is not UTF-8 or is larger than 50 MB.
 
 ### Copying source Markdown
 
@@ -197,7 +199,7 @@ Releases are cut in the development repository: pushing a `v*` tag builds the `.
 - **Frontend** — SvelteKit (Svelte 5 runes) + TypeScript
 - **Desktop shell** — Tauri 2 (Rust)
 - **Markdown** — a unified pipeline (remark-parse → remark-gfm → alerts → source map → remark-rehype → rehype-raw → mermaid → Shiki → URI rewrite → rehype-sanitize → rehype-stringify) with custom plugins for source mapping and asset URI rewriting
-- **Assets** — images, 3D models and video reach the WebView through a custom `vellis-asset://` protocol that answers HTTP range requests with `206` slices, so a large file streams instead of being read whole into memory
+- **Assets** — images, 3D models, video and PDFs reach the WebView through a custom `vellis-asset://` protocol that answers HTTP range requests with `206` slices, so a large file streams instead of being read whole into memory
 - **3D** — three.js with its STL and 3MF loaders, driving a camera state machine of plain functions that both mouse events and SpaceMouse axes map onto, so the viewer itself carries no per-input-source branching
 - **Persistence** — JSON Lines (`marks.jsonl`) written by atomic rename, with a per-store mutex serializing concurrent IPC
 
