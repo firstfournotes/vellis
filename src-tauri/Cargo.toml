@@ -1,6 +1,6 @@
 [package]
 name = "vellis"
-version = "0.1.29"
+version = "0.1.30"
 description = "A read-only Markdown viewer for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"
@@ -28,6 +28,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mime_guess = "2"
 http = "1"
+# Percent-decoding for `vellis-asset://` paths (要件#30 / backlog #67). The
+# frontend builds those URIs from `URL.pathname`, so a Japanese or spaced file
+# name arrives encoded and must be decoded before it becomes a `PathBuf`.
+# Already in the tree via `url` (and so via `tauri`); this only declares the
+# direct use so the import is honest.
+percent-encoding = "2"
 tauri-plugin-dialog = "2.7.0"
 # Update notification (要件#14): the only outbound HTTP in the app — one GET
 # to the GitHub releases API. `rustls` is reqwest's default TLS in 0.13 and

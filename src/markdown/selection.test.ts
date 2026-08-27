@@ -7,6 +7,12 @@
  *
  * Spec: `docs/archives/rendering-engine.md` §3.8.  Covers part of P0.13 ahead of
  * the dedicated test task; see tasks/todo.md.
+ *
+ * Requirement #32 (2026-08-27) replaced the copy-path contract: the oncopy
+ * route no longer uses this resolution (see
+ * src/lib/copy-selection.acceptance.test.ts).  These tests remain as the
+ * regression guard for the mark (ai-collab) foundation only — requirement
+ * #32 contract ④ keeps `resolveSelectionToMarkdown` / `buildAnchor` intact.
  */
 import { beforeEach, describe, expect, test } from 'vitest';
 import { render } from './renderer';

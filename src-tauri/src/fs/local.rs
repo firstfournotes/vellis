@@ -50,27 +50,50 @@ impl FileProvider for LocalProvider {
         let mut read_dir = tokio::fs::read_dir(&dir_path).await.map_err(io_to_fs)?;
 
         while let Some(de) = read_dir.next_entry().await.map_err(io_to_fs)? {
-            let metadata = de.metadata().await.map_err(io_to_fs)?;
             let file_name = de.file_name();
             let name = file_name.to_string_lossy().to_string();
 
-            // Skip hidden files/directories
+            // Skip hidden files/directories. Decided on the name alone, before any
+            // symlink is resolved, so a hidden broken link costs nothing (要件#31).
             if name.starts_with('.') {
                 continue;
             }
 
+            let entry_path = dir_path.join(&name);
+
+            // `DirEntry::metadata` does *not* traverse symlinks, so a link to a
+            // directory would show up as `Symlink` and the tree could not expand it
+            // (要件#31 契約①, backlog #68). Re-stat links through `fs::metadata`
+            // (which follows) so kind/size/modified describe the *target*.
+            let mut metadata = de.metadata().await.map_err(io_to_fs)?;
+            if metadata.is_symlink() {
+                match tokio::fs::metadata(&entry_path).await {
+                    Ok(target) => metadata = target,
+                    Err(e) => {
+                        // Unreachable target — missing, a permission wall, or a loop
+                        // (ELOOP on a self-referencing link). Keep the entry listed as
+                        // a symlink instead of failing the whole listing (契約②).
+                        tracing::debug!(
+                            path = %entry_path.display(),
+                            error = %e,
+                            "symlink target is unreachable; listing it as Symlink"
+                        );
+                    }
+                }
+            }
+
             let kind = if metadata.is_dir() {
                 FileKind::Dir
-            } else if metadata.is_symlink() {
-                FileKind::Symlink
             } else if metadata.is_file() {
                 // Every regular file is listed, regardless of extension.
                 FileKind::File
+            } else if metadata.is_symlink() {
+                // Only reachable when the re-stat above failed: a broken link.
+                FileKind::Symlink
             } else {
                 continue;
             };
 
-            let entry_path = dir_path.join(&name);
             let entry_uri = uri.with_path(&entry_path);
 
             let modified = metadata
@@ -107,12 +130,13 @@ impl FileProvider for LocalProvider {
 
     async fn stat(&self, uri: &Uri) -> Result<Entry, FsError> {
         let path = &uri.path;
+        // `fs::metadata` follows symlinks, so a link is already described by its
+        // target here — the same rule `list` now applies (要件#31 契約④). There is
+        // no `Symlink` arm because this metadata can never report one.
         let metadata = tokio::fs::metadata(path).await.map_err(io_to_fs)?;
 
         let kind = if metadata.is_dir() {
             FileKind::Dir
-        } else if metadata.is_symlink() {
-            FileKind::Symlink
         } else {
             FileKind::File
         };

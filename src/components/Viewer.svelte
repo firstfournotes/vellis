@@ -5,13 +5,10 @@
 	import { isExternal } from '$lib/uri';
 	import { sha256 } from '$lib/annotation';
 	import { mountMermaid } from '$lib/mermaid-mounter';
+	import { planSelectionCopy } from '$lib/copy-selection';
 	import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
 	import type { SourceIndex } from '../markdown/types';
-	import {
-		buildAnchor,
-		resolveSelectionToMarkdown,
-		type BuiltAnchor,
-	} from '../markdown/selection';
+	import { buildAnchor, type BuiltAnchor } from '../markdown/selection';
 
 	let {
 		document,
@@ -74,17 +71,18 @@
 	}
 
 	function handleCopy(e: ClipboardEvent) {
-		// Phase B (copy-original-markdown.md §B-3): replace the rendered-text
-		// copy with the underlying Markdown source for the selected range.
-		// Falls back to the browser default when the selection is collapsed,
-		// outside the rendered tree, or `index` is not yet available.
-		if (!index) return;
+		// Requirement #32: copy exactly the visible text of the selection.
+		// The Markdown-source resolution that used to run here (requirement
+		// #13 / copy-original-markdown.md §B-3) is gone from the copy path —
+		// it widened partial selections to whole blocks and reintroduced
+		// notation markers (backlog #20-#22, #27, #71).  `index` is not
+		// consulted at all any more; it stays for mark creation (buildAnchor).
 		const sel = window.getSelection();
 		if (!sel) return;
-		const result = resolveSelectionToMarkdown(sel, index, document.content);
-		if (!result) return;
+		const text = planSelectionCopy(sel);
+		if (text === null) return; // browser default (collapsed selection etc.)
 		e.preventDefault();
-		e.clipboardData?.setData('text/plain', result.markdown);
+		e.clipboardData?.setData('text/plain', text);
 	}
 
 	async function handleClick(e: MouseEvent) {

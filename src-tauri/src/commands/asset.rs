@@ -20,6 +20,11 @@ use super::AppState;
 // URI parsing
 // ---------------------------------------------------------------------------
 
+/// Every rejection this module reports is an "invalid URI".
+fn invalid_uri(msg: impl Into<String>) -> VellisError {
+    VellisError::Uri(crate::errors::UriError::Invalid(msg.into()))
+}
+
 /// Convert a `vellis-asset://` URL into an internal `Uri`.
 ///
 /// Accepted forms:
@@ -30,64 +35,122 @@ use super::AppState;
 /// bust the WebView cache when a watched image changes (要件#22,
 /// `src/lib/image-watch.ts`), and it is not part of the path being served.
 ///
-/// Rejects paths containing `..` segments and unknown scheme prefixes.
+/// The path arrives percent-encoded — the frontend builds these URIs out of
+/// `URL.pathname` (`src/lib/uri.ts`), so `2025年度.pdf` reaches us as
+/// `2025%E5%B9%B4%E5%BA%A6.pdf` — and is decoded here, exactly once, before it
+/// becomes a `PathBuf` (要件#30 / backlog #67; opening the literal `%XX` name
+/// is what used to 404 every non-ASCII asset).
+///
+/// Order matters both ways round:
+/// - the query is dropped *before* decoding, so that a file whose name really
+///   contains `?` or `#` (delivered as `%3F` / `%23`) is not truncated;
+/// - the `..` check runs *after* decoding, where every disguise — `%2e%2e` for
+///   the dots, `..%2f` for the separator — has collapsed into a plain segment.
+///
+/// Rejects paths containing `..` segments, malformed percent escapes, decodes
+/// that are not valid UTF-8, and unknown scheme prefixes.
 pub fn parse_asset_uri(url: &str) -> Result<Uri, VellisError> {
     // Strip the scheme prefix.
     let rest = url
         .strip_prefix("vellis-asset://")
-        .ok_or_else(|| VellisError::Uri(crate::errors::UriError::Invalid(
-            format!("not a vellis-asset URI: {}", url),
-        )))?;
+        .ok_or_else(|| invalid_uri(format!("not a vellis-asset URI: {}", url)))?;
 
     // Drop the query (and any fragment behind it) — path only from here on.
     let rest = rest.split(['?', '#']).next().unwrap_or("");
 
     if rest.is_empty() {
-        return Err(VellisError::Uri(crate::errors::UriError::Invalid(
-            "empty vellis-asset URI".into(),
-        )));
-    }
-
-    // Reject path traversal anywhere in the URI.
-    if contains_path_traversal(rest) {
-        return Err(VellisError::Uri(crate::errors::UriError::Invalid(
-            "path traversal (..) is not allowed".into(),
-        )));
+        return Err(invalid_uri("empty vellis-asset URI"));
     }
 
     if let Some(path) = rest.strip_prefix("local/") {
         // vellis-asset://local/<absolute-path> -> file:///<absolute-path>
         if path.is_empty() {
-            return Err(VellisError::Uri(crate::errors::UriError::Invalid(
-                "empty path in local asset URI".into(),
-            )));
+            return Err(invalid_uri("empty path in local asset URI"));
         }
+        let path = decode_path(path)?;
         let file_uri = format!("file:///{}", path);
         Uri::parse(&file_uri).map_err(VellisError::from)
     } else if let Some(rest_after_ssh) = rest.strip_prefix("ssh/") {
         // vellis-asset://ssh/<user>@<host>[:<port>]/<absolute-path>
         if rest_after_ssh.is_empty() {
-            return Err(VellisError::Uri(crate::errors::UriError::Invalid(
-                "empty ssh asset URI".into(),
-            )));
+            return Err(invalid_uri("empty ssh asset URI"));
         }
-        let ssh_uri = format!("ssh://{}", rest_after_ssh);
+        // Only the path is decoded; the authority (`user@host:port`) is passed
+        // through as received, as it always was.
+        let ssh_uri = match rest_after_ssh.split_once('/') {
+            Some((authority, path)) => format!("ssh://{}/{}", authority, decode_path(path)?),
+            // No path at all — `Uri::parse` is the one that says so.
+            None => format!("ssh://{}", rest_after_ssh),
+        };
         Uri::parse(&ssh_uri).map_err(VellisError::from)
     } else {
         // Unknown provider scheme
         let scheme = rest.split('/').next().unwrap_or(rest);
-        Err(VellisError::Uri(crate::errors::UriError::Invalid(
-            format!("unsupported asset provider: {}", scheme),
-        )))
+        Err(invalid_uri(format!("unsupported asset provider: {}", scheme)))
     }
 }
 
-/// Check whether the path contains `..` traversal segments.
+/// Percent-decode the path portion of an asset URI — once — and check it.
+///
+/// Validation runs on the **encoded** input, before decoding, for two reasons
+/// that pull in opposite directions:
+/// - `percent_encoding`'s decoder is lenient: `%zz` and a trailing `%` are
+///   copied through untouched, which would quietly serve a path nobody asked
+///   for. Those are rejected here instead.
+/// - Validating the *decoded* text instead would reject honest names: a file
+///   called `100%off.pdf` arrives as `100%25off.pdf` and decodes to a literal
+///   `%o`, which is not a valid escape and does not need to be. For the same
+///   reason the result is never fed back through the decoder — `%252e%252e`
+///   names a directory `%2e%2e`, it is not a way out of the tree.
+fn decode_path(encoded: &str) -> Result<String, VellisError> {
+    reject_malformed_escapes(encoded)?;
+
+    let decoded = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .map_err(|_| {
+            invalid_uri(format!(
+                "percent-decoded path is not valid UTF-8: {}",
+                encoded
+            ))
+        })?
+        .into_owned();
+
+    if contains_path_traversal(&decoded) {
+        return Err(invalid_uri("path traversal (..) is not allowed"));
+    }
+
+    Ok(decoded)
+}
+
+/// Reject any `%` that is not followed by two hex digits.
+fn reject_malformed_escapes(s: &str) -> Result<(), VellisError> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        match bytes.get(i + 1..i + 3) {
+            Some(hex) if hex.iter().all(u8::is_ascii_hexdigit) => i += 3,
+            _ => {
+                return Err(invalid_uri(format!(
+                    "malformed percent-encoding in asset URI: {}",
+                    s
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check whether a **decoded** path contains `..` traversal segments.
+///
+/// Decoding first is what makes one plain comparison enough: the encoded form
+/// can hide a traversal in the dots (`%2e%2e/`) or in the separator (`..%2f`),
+/// and only the decoded string shows both as a `..` segment.
 fn contains_path_traversal(s: &str) -> bool {
-    // Percent-decoded `..` check: literal `..` as a path segment.
-    // Also check the percent-encoded form `%2e%2e` / `%2E%2E`.
-    let decoded = s.replace("%2e", ".").replace("%2E", ".");
-    decoded.split('/').any(|seg| seg == "..")
+    s.split('/').any(|seg| seg == "..")
 }
 
 // ---------------------------------------------------------------------------

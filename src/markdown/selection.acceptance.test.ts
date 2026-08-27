@@ -1,12 +1,15 @@
 /**
- * 要件#13 の受け入れテスト(requirements.md 要件13・GitHub Issue 26)
- * 「部分選択のコピーは選択した範囲だけをコピーする(選択を含む行・段落全体に広がらない)」
+ * resolveSelectionToMarkdown / buildAnchor の回帰ガード(旧・要件#13 の受け入れテスト)
  *
- * 対象: Viewer の oncopy 経路の核 `resolveSelectionToMarkdown`(src/markdown/selection.ts)
- * とマークアンカー構築 `buildAnchor`。Viewer.svelte 側の配線(handleCopy が
- * result.markdown を text/plain へ載せる)は現行のまま=reviewer 照合。
+ * 【要件#32(2026-08-27)による再スコープ】要件#13 の「コピーは Markdown ソース
+ * 断片(装飾は記法ごと)」契約は要件#32 で「可視文字列のみ」に置き換えられ、
+ * コピー(⌘C)経路の受け入れは src/lib/copy-selection.acceptance.test.ts に移った。
+ * `resolveSelectionToMarkdown` と `buildAnchor` はマーク機能(ai-collab)の基盤と
+ * して存続する(要件#32 契約④)ため、本スイートはその基盤(原文スライスへの
+ * 解決・アンカー構築)の回帰ガードとして全件そのまま維持する。以下の契約記述は
+ * 基盤関数の返り値についてのもので、クリップボードに入る値の契約ではない。
  *
- * 契約(要件13 の①〜④に対応):
+ * 契約(旧・要件13 の①〜④に対応=基盤関数の現行契約):
  *
  * ① 同一ブロック内の部分選択 → コピー結果は選択範囲に対応するソース断片のみ。
  *    囲みブロック(段落)全体へ拡大しない。先頭接触・末尾接触・逆方向ドラッグ
@@ -29,15 +32,13 @@
  *    sel.toString() のまま。selectedMarkdown が選択範囲へ狭まるのは許容
  *    (=狭窄値/ノード単位値の二値で判定)。
  *
- * 赤/緑の設計(test-runner 向け): ①の部分選択系と②の部分選択系は、現行実装
- * (端点を [data-vellis-node-id] 祖先ノードの source range へ丸める)では赤に
- * なるのが正しい。①の全選択・②の装飾全体・③・④・回帰系は現行でも緑
- * (悪化防止・現行維持のガード)。
+ * 赤/緑の設計: 現在は全件緑が期待値(要件#13 実装済み・基盤の回帰ガード)。
+ * 赤になったらマーク基盤(resolveSelectionToMarkdown / buildAnchor)の回帰を疑う。
  *
- * スコープ外(このテストは扱わない): Viewer.svelte の oncopy 配線(reviewer 照合)・
- * 複数ブロックにまたがる部分選択の端点ナローイング(契約①は「同一ブロック内」
- * のみを規定)・装飾ノードの途中までしか覆わない選択(例: 「before **bo」相当)の
- * マーカー取り扱い(契約に規定なし=申し送り)。
+ * スコープ外(このテストは扱わない): Viewer.svelte の oncopy 配線(要件#32 で
+ * コピー経路は本基盤から切り離された)・複数ブロックにまたがる部分選択の端点
+ * ナローイング(旧契約①は「同一ブロック内」のみを規定)・装飾ノードの途中まで
+ * しか覆わない選択(例: 「before **bo」相当)のマーカー取り扱い(規定なし)。
  */
 import { beforeEach, describe, expect, test } from 'vitest';
 import { render } from './renderer';
