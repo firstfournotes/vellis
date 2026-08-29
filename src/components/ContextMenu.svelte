@@ -3,6 +3,9 @@
 	 * ツリーのコンテキストメニュー(要件#19)。ネイティブ popup_menu は使わず
 	 * 自前の div を絶対配置する(契約①)。開いているメニューは常に1つで、
 	 * 状態は `stores/context-menu.svelte` が持つ。
+	 *
+	 * アイテムを右クリックしたメニューと、ツリーの空白部分のメニュー(要件#34)の
+	 * どちらもここが描く。違いは項目だけ(空白部は entry を持たない)。
 	 */
 	import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 	import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -10,10 +13,22 @@
 		clampMenuPosition,
 		planContextAction,
 		planOpenWith,
+		type ContextAction,
 		type ContextMenuEntry,
 		type ContextMenuItemId
 	} from '$lib/context-menu';
 	import { contextMenu } from '../stores/context-menu.svelte';
+
+	let {
+		onDuplicateWindow
+	}: {
+		/**
+		 * 「ウィンドウを複製」(要件#34)。中身(root・文書・展開)を知っているのは
+		 * ページ側なので、複製の実行列はそちらに置いて呼ぶだけにする —
+		 * File メニューの Duplicate Window と同じ関数を通る。
+		 */
+		onDuplicateWindow: () => void;
+	} = $props();
 
 	let el = $state<HTMLDivElement | null>(null);
 	/**
@@ -42,24 +57,36 @@
 	 * 項目の実行。計画は純関数側が持ち、ここは呼ぶだけ。失敗しても警告に留めて
 	 * アプリは壊さない(Finder / 既定アプリが応えないことはある)。
 	 */
+	/**
+	 * 押された項目の実行計画。ツリーの空白部から開いたメニュー(要件#34)は
+	 * entry を持たないが、そこに並ぶのは entry を読まない窓操作だけなので、
+	 * アイテムから開いたときと同じ計画に落ちる。
+	 */
+	function planFor(id: ContextMenuItemId, entry: ContextMenuEntry | null): ContextAction | null {
+		if (entry !== null) return planContextAction(id, entry);
+		return id === 'duplicate-window' ? { command: 'duplicate-window' } : null;
+	}
+
 	async function activate(id: ContextMenuItemId) {
 		const entry = contextMenu.entry;
 		contextMenu.close();
-		if (!entry) return;
-		const action = planContextAction(id, entry);
+		const action = planFor(id, entry);
 		if (!action) return;
 		try {
-			if (action.command === 'reveal_item_in_dir') {
+			if (action.command === 'duplicate-window') {
+				onDuplicateWindow();
+			} else if (action.command === 'reveal_item_in_dir') {
 				await revealItemInDir(action.path);
 			} else if (action.command === 'open_path') {
 				await openPath(action.path);
 			} else if (action.command === 'pick-app') {
-				await openWithPickedApp(entry);
+				// pick-app は entry を読んだ計画なので、ここへ来るのは entry がある場合だけ。
+				if (entry) await openWithPickedApp(entry);
 			} else {
 				await navigator.clipboard.writeText(action.text);
 			}
 		} catch (err) {
-			console.warn(`context menu action ${id} failed for ${entry.uri}:`, err);
+			console.warn(`context menu action ${id} failed for ${entry?.uri ?? '(tree pane)'}:`, err);
 		}
 	}
 
@@ -106,7 +133,15 @@
 			: 'hidden'}"
 		oncontextmenu={(e) => e.preventDefault()}
 	>
-		{#each contextMenu.items as item (item.id)}
+		{#each contextMenu.items as item, i (item.id)}
+			{#if item.id === 'duplicate-window' && i > 0}
+				<!--
+					アイテムに効く項目と窓に効く項目の境目(要件#34③)。区切りは見た目
+					だけのものなので VM の項目には現れない。空白部のメニュー(項目が
+					これ1つ)では境目が無いので出さない。
+				-->
+				<div class="context-menu-separator" role="separator"></div>
+			{/if}
 			<button
 				class="context-menu-item"
 				role="menuitem"
@@ -148,6 +183,13 @@
 	.context-menu-item:hover:not(:disabled) {
 		background-color: var(--color-bg-hover);
 		color: var(--color-text-hover);
+	}
+
+	/* 「ウィンドウを複製」(要件#34)を他の項目から切る線。 */
+	.context-menu-separator {
+		height: 1px;
+		margin: 4px 0;
+		background-color: var(--color-border);
 	}
 
 	/* ssh リモートの「Finder で表示」「既定アプリで開く」= 出すが押せない(契約⑤)。 */

@@ -41,6 +41,12 @@ pub struct WindowArgs {
     /// (`vellis --changed`, `docs/ai-collab.md` §9.1).  Implies
     /// `show_marks = true`.
     pub show_changed: bool,
+    /// Directory URIs the source window had expanded when it was duplicated
+    /// (requirements.md #34).  Empty for every other route — a window that
+    /// was not duplicated starts with a collapsed tree, and `Default` never
+    /// invents an expansion.  Travels verbatim: the dedupe and the
+    /// first-seen ordering are the frontend's job (`planDuplicateWindow`).
+    pub expanded_dirs: Vec<String>,
 }
 
 impl WindowArgs {
@@ -201,6 +207,35 @@ impl<R: tauri::Runtime> WindowManager<R> {
     ///
     /// [`next_label`]: Self::next_label
     pub fn register_new_window(&mut self, path: Option<String>, root: Option<String>) -> String {
+        // No expansion to carry: only the duplicate route has one
+        // (requirements.md #34), and every other trigger opens a fresh tree.
+        self.register_new_window_with_dirs(path, root, Vec::new())
+    }
+
+    /// Register a new window that also inherits an expanded tree — the
+    /// duplicate route (File ▸ Duplicate Window and the tree's context menu,
+    /// requirements.md #34).
+    ///
+    /// Same seam as [`register_new_window`], with the third of the
+    /// "same contents" triple: `{root, path, expanded_dirs}`.  All three are
+    /// registered **verbatim** — no dedupe, no trailing-slash normalisation,
+    /// no "is it under the root" filter.  That shaping belongs to the window
+    /// being duplicated, which is the only side that knows what its tree
+    /// looked like, and it happens there (`planDuplicateWindow` in
+    /// `src/lib/duplicate-window.ts`).
+    ///
+    /// An empty `expanded_dirs` with two `None`s registers exactly what an
+    /// argument-less launch registers, so duplicating a window that never
+    /// picked a root opens another history picker (requirements.md #4) —
+    /// the "New Window 相当" contract for that case.
+    ///
+    /// [`register_new_window`]: Self::register_new_window
+    pub fn register_new_window_with_dirs(
+        &mut self,
+        path: Option<String>,
+        root: Option<String>,
+        expanded_dirs: Vec<String>,
+    ) -> String {
         let label = self.next_label();
         self.register_window(
             label.clone(),
@@ -209,6 +244,7 @@ impl<R: tauri::Runtime> WindowManager<R> {
                 root,
                 show_marks: false,
                 show_changed: false,
+                expanded_dirs,
             },
         );
         label
@@ -325,6 +361,9 @@ mod tests {
                 root: Some("/tmp".into()),
                 show_marks: false,
                 show_changed: false,
+                // requirements.md #34 のフィールド追加に伴うリテラル追記のみ
+                // (アサーション不変=要件側判断 2026-08-29)。
+                expanded_dirs: vec![],
             },
         );
         let state = wm.get("win-1").unwrap();

@@ -28,6 +28,16 @@
  * 本要件により #19 のファイル項目構成(3項目固定)ケースは 4項目へ**要件側更新**
  * (承認済み=#21⑦)。追加分の確定契約は下記に統合してある。
  *
+ * ## 要件#34 追補(requirements.md #34・2026-08-29 由谷決定)
+ * 「ウィンドウを複製」(Duplicate Window)をアイテムメニューの**末尾**に追加する —
+ * ファイル/フォルダ(symlink 含む)の全種に出し、**ssh でも常に enabled**
+ * (アイテムに依存しない窓操作のため=契約#34③)。末尾の区切り線は VM の項目では
+ * なく描画側の持ち場(reviewer 照合)。ツリーの空白部分の右クリックには同項目
+ * 1つだけのメニューを出す(buildTreePaneMenu)。クリック時の複製実行列
+ * (スナップショット → new_window)は duplicate-window.acceptance.test.ts の持ち場。
+ * 本要件により #19/#21 の項目数固定(ファイル4項目・フォルダ2項目)は
+ * ファイル5項目・フォルダ3項目へ**要件側更新**(承認済み=#34⑩)。
+ *
  * ## 確定契約(公開 API・implementer はこれに従う)
  *
  * ```ts
@@ -35,16 +45,19 @@
  * // モジュール単体でテストできるよう自身が型を持つ — re-export でも可)
  * export type ContextMenuEntry = { uri: string; name: string; kind: 'file' | 'dir' | 'symlink' };
  *
- * // メニュー1項目。id は下記4値固定・label は表示文言そのもの・enabled=false が
+ * // メニュー1項目。id は下記5値固定・label は表示文言そのもの・enabled=false が
  * // グレーアウト(項目は出すが実行不可=契約⑤)。追加フィールドは実装の自由。
  * export type ContextMenuItem = {
- *   id: 'reveal' | 'open' | 'open-with' | 'copy-path';
+ *   id: 'reveal' | 'open' | 'open-with' | 'copy-path' | 'duplicate-window';
  *   label: string;
  *   enabled: boolean;
  * };
  *
  * // 右クリックされたアイテム → メニュー項目リスト(表示順そのまま)。
  * export function buildContextMenu(entry: ContextMenuEntry): ContextMenuItem[];
+ *
+ * // 要件#34: ツリー空白部の右クリック用メニュー(duplicate-window 1項目のみ・enabled)。
+ * export function buildTreePaneMenu(): ContextMenuItem[];
  *
  * // URI → 実行・コピーに使う値の変換。
  * // - pathForCopy: file:// → OS パス(パーセントエンコードは復号)・ssh:// → URI 文字列のまま
@@ -60,9 +73,10 @@
  *   | { command: 'reveal_item_in_dir'; path: string }
  *   | { command: 'open_path'; path: string }
  *   | { command: 'copy'; text: string }
- *   | { command: 'pick-app'; path: string };  // 要件#21: アプリ選択ダイアログを開く計画
+ *   | { command: 'pick-app'; path: string }   // 要件#21: アプリ選択ダイアログを開く計画
+ *   | { command: 'duplicate-window' };        // 要件#34: ウィンドウ複製の起動(entry 非依存)
  * export function planContextAction(
- *   id: 'reveal' | 'open' | 'open-with' | 'copy-path',
+ *   id: 'reveal' | 'open' | 'open-with' | 'copy-path' | 'duplicate-window',
  *   entry: ContextMenuEntry
  * ): ContextAction | null;
  *
@@ -86,19 +100,27 @@
  * ```
  *
  * 意味論(本テストが固定する判定):
- * 1. local ファイル → [reveal, open, open-with, copy-path] の4項目・この順・すべて enabled
- *    (要件#21① により open-with を「既定アプリで開く」の直後へ追加=要件側更新)。
- * 2. local フォルダ → [reveal, copy-path] の2項目(open / open-with を出さない=契約②・#21①)。
- * 3. ssh ファイル → 4項目とも出すが reveal / open / open-with は enabled=false・copy-path は true。
- * 4. ssh フォルダ → [reveal, copy-path] で reveal は enabled=false・copy-path は true。
- * 5. symlink はファイルと同じ扱い(4項目)に固定=実装裁量の確定(本テストの設計判断)。
+ * 1. local ファイル → [reveal, open, open-with, copy-path, duplicate-window] の5項目・
+ *    この順・すべて enabled(要件#21① で open-with を「既定アプリで開く」の直後へ、
+ *    要件#34③ で duplicate-window を末尾へ追加=いずれも承認済みの要件側更新)。
+ * 2. local フォルダ → [reveal, copy-path, duplicate-window] の3項目
+ *    (open / open-with を出さない=契約②・#21①)。
+ * 3. ssh ファイル → 5項目とも出すが reveal / open / open-with は enabled=false・
+ *    copy-path / duplicate-window は true。
+ * 4. ssh フォルダ → [reveal, copy-path, duplicate-window] で reveal は enabled=false・
+ *    copy-path / duplicate-window は true。
+ * 5. symlink はファイルと同じ扱い(5項目)に固定=実装裁量の確定(本テストの設計判断)。
  *    理由: フロントは symlink の指し先種別を知らないため、項目を落とすより
  *    「Finder で表示」「既定アプリで開く」を出して OS に委ねるのが安全側。
  * 6. ラベル文言は要件の表記どおり「Finder で表示」「既定アプリで開く」
- *    「アプリを選択して開く…」「パスをコピー」。
+ *    「アプリを選択して開く…」「パスをコピー」「ウィンドウを複製」。
  * 7. 判別は URI スキームのみ(kind と組み合わせ、パス内容では分岐しない)。
  * 8. planContextAction('open-with', local ファイル) → { command: 'pick-app', path: OS パス }。
  *    ssh → null。planOpenWith は選択結果あり → open_path + with・キャンセル → null(要件#21)。
+ * 9. duplicate-window は全種・ssh でも enabled(要件#34③)。
+ *    planContextAction('duplicate-window', entry) は entry 非依存に
+ *    { command: 'duplicate-window' } を返し、ssh でも null にしない(disabled になる組が
+ *    存在しないため既存の null 家風の対象外)。buildTreePaneMenu は同項目1つだけを返す。
  *
  * ## reviewer 照合に委ねる配線(本テストの判定対象外)
  * - ExplorerItem の contextmenu イベント → メニュー表示(div 絶対配置・theme.css の
@@ -111,6 +133,10 @@
  *   (defaultPath=/Applications・filter=app 拡張子=要件#21②)と、その戻り値を
  *   planOpenWith へ渡して openPath(path, with) を呼ぶ配線。起動失敗は warn 止まり(#21④)
  * - Rust 変更なし(フロント+ capability のみ)=契約⑦・#21⑥
+ * - 要件#34: 末尾の区切り線の描画・ツリー空白部の contextmenu イベント →
+ *   buildTreePaneMenu の表示・{ command: 'duplicate-window' } → 複製実行列
+ *   (duplicate-window.ts の plan → invoke('new_window'))への合流。
+ *   Rust 側の受け皿は acceptance_req34.rs 参照
  *
  * ## 人間ゲート(acceptance/acceptance.md)
  * - 実機での右クリック表示・Finder 起動・既定アプリ起動・コピー結果・
@@ -123,6 +149,7 @@ import { describe, expect, test } from 'vitest';
 
 import {
 	buildContextMenu,
+	buildTreePaneMenu,
 	clampMenuPosition,
 	pathForCopy,
 	pathForReveal,
@@ -162,52 +189,77 @@ const sshDir: ContextMenuEntry = {
 // ---------------------------------------------------------------------------
 
 describe('buildContextMenu — local アイテムの項目構成', () => {
-	test('local ファイル → reveal・open・open-with・copy-path の4項目・この順・すべて有効', () => {
+	test('local ファイル → reveal・open・open-with・copy-path・duplicate-window の5項目・この順・すべて有効', () => {
 		const items = buildContextMenu(localFile);
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'open', 'open-with', 'copy-path']);
+		expect(items.map((i) => i.id)).toEqual([
+			'reveal',
+			'open',
+			'open-with',
+			'copy-path',
+			'duplicate-window',
+		]);
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('local フォルダ → reveal・copy-path の2項目(open は出さない)・すべて有効', () => {
+	test('local フォルダ → reveal・copy-path・duplicate-window の3項目(open は出さない)・すべて有効', () => {
 		const items = buildContextMenu(localDir);
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'copy-path']);
+		expect(items.map((i) => i.id)).toEqual(['reveal', 'copy-path', 'duplicate-window']);
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('ラベル文言は要件の表記どおり(local ファイルの4項目)', () => {
+	test('ラベル文言は要件の表記どおり(local ファイルの5項目)', () => {
 		const labels = buildContextMenu(localFile).map((i) => i.label);
 		expect(labels).toEqual([
 			'Finder で表示',
 			'既定アプリで開く',
 			'アプリを選択して開く…',
 			'パスをコピー',
+			'ウィンドウを複製',
 		]);
 	});
 
-	test('symlink はファイルと同じ4項目に固定(実装裁量の確定=一貫性)', () => {
+	test('symlink はファイルと同じ5項目に固定(実装裁量の確定=一貫性)', () => {
 		const items = buildContextMenu(localSymlink);
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'open', 'open-with', 'copy-path']);
+		expect(items.map((i) => i.id)).toEqual([
+			'reveal',
+			'open',
+			'open-with',
+			'copy-path',
+			'duplicate-window',
+		]);
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 });
 
 describe('buildContextMenu — ssh リモートは reveal / open をグレーアウト(契約⑤)', () => {
-	test('ssh ファイル → 4項目とも出すが reveal / open / open-with は disabled・copy-path は有効', () => {
+	test('ssh ファイル → 5項目とも出すが reveal / open / open-with は disabled・copy-path / duplicate-window は有効', () => {
 		const items = buildContextMenu(sshFile);
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'open', 'open-with', 'copy-path']);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true]);
+		expect(items.map((i) => i.id)).toEqual([
+			'reveal',
+			'open',
+			'open-with',
+			'copy-path',
+			'duplicate-window',
+		]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true]);
 	});
 
-	test('ssh フォルダ → reveal(disabled)+copy-path(有効)の2項目', () => {
+	test('ssh フォルダ → reveal(disabled)+copy-path・duplicate-window(有効)の3項目', () => {
 		const items = buildContextMenu(sshDir);
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'copy-path']);
-		expect(items.map((i) => i.enabled)).toEqual([false, true]);
+		expect(items.map((i) => i.id)).toEqual(['reveal', 'copy-path', 'duplicate-window']);
+		expect(items.map((i) => i.enabled)).toEqual([false, true, true]);
 	});
 
-	test('ssh symlink もファイル同等(4項目・reveal / open / open-with disabled)=一貫性', () => {
+	test('ssh symlink もファイル同等(5項目・reveal / open / open-with disabled)=一貫性', () => {
 		const items = buildContextMenu({ ...sshFile, kind: 'symlink' });
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'open', 'open-with', 'copy-path']);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true]);
+		expect(items.map((i) => i.id)).toEqual([
+			'reveal',
+			'open',
+			'open-with',
+			'copy-path',
+			'duplicate-window',
+		]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true]);
 	});
 
 	test('判別は URI スキーム(user なし・ポートなしの ssh URI でも disabled)', () => {
@@ -216,7 +268,7 @@ describe('buildContextMenu — ssh リモートは reveal / open をグレーア
 			name: 'plan.md',
 			kind: 'file',
 		});
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true]);
 	});
 });
 
@@ -383,6 +435,72 @@ describe('要件#21: planOpenWith — 選択結果 → open_path(path, with)(契
 
 	test('ssh エントリは appPath があっても null(グレーアウトの安全網)', () => {
 		expect(planOpenWith(sshFile, '/Applications/TextEdit.app')).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#34 — 「ウィンドウを複製」(末尾追加・常に enabled・空白部メニュー・実行計画)
+// ---------------------------------------------------------------------------
+
+describe('要件#34: buildContextMenu — 「ウィンドウを複製」は末尾・全種・ssh でも有効(契約#34③)', () => {
+	test('local ファイルでは末尾に置かれ、ラベルは「ウィンドウを複製」・enabled', () => {
+		const items = buildContextMenu(localFile);
+		expect(items[items.length - 1]).toMatchObject({
+			id: 'duplicate-window',
+			label: 'ウィンドウを複製',
+			enabled: true,
+		});
+	});
+
+	test('local フォルダでも末尾に enabled で出る(アイテム非依存の窓操作)', () => {
+		const items = buildContextMenu(localDir);
+		expect(items[items.length - 1]).toMatchObject({
+			id: 'duplicate-window',
+			label: 'ウィンドウを複製',
+			enabled: true,
+		});
+	});
+
+	test('ssh ファイル/フォルダでも enabled(グレーアウトしない=他項目と違う出し分け)', () => {
+		const fromFile = buildContextMenu(sshFile).find((i) => i.id === 'duplicate-window');
+		const fromDir = buildContextMenu(sshDir).find((i) => i.id === 'duplicate-window');
+		expect(fromFile).toMatchObject({ label: 'ウィンドウを複製', enabled: true });
+		expect(fromDir).toMatchObject({ label: 'ウィンドウを複製', enabled: true });
+	});
+});
+
+describe('要件#34: buildTreePaneMenu — ツリー空白部の右クリック(契約#34③)', () => {
+	test('duplicate-window 1項目のみ・ラベル「ウィンドウを複製」・enabled', () => {
+		const items = buildTreePaneMenu();
+		expect(items).toHaveLength(1);
+		expect(items[0]).toMatchObject({
+			id: 'duplicate-window',
+			label: 'ウィンドウを複製',
+			enabled: true,
+		});
+	});
+});
+
+describe('要件#34: planContextAction(duplicate-window)— entry 非依存の窓操作', () => {
+	test("local ファイル → { command: 'duplicate-window' }(パス等の entry 情報を持たない)", () => {
+		expect(planContextAction('duplicate-window', localFile)).toEqual({
+			command: 'duplicate-window',
+		});
+	});
+
+	test('local フォルダでも同じ計画(entry 非依存)', () => {
+		expect(planContextAction('duplicate-window', localDir)).toEqual({
+			command: 'duplicate-window',
+		});
+	});
+
+	test('ssh エントリでも null にしない(ssh でも有効=契約#34③。既存の remote null 家風の対象外)', () => {
+		expect(planContextAction('duplicate-window', sshFile)).toEqual({
+			command: 'duplicate-window',
+		});
+		expect(planContextAction('duplicate-window', sshDir)).toEqual({
+			command: 'duplicate-window',
+		});
 	});
 });
 

@@ -12,7 +12,13 @@
  */
 export type ContextMenuEntry = { uri: string; name: string; kind: 'file' | 'dir' | 'symlink' };
 
-export type ContextMenuItemId = 'reveal' | 'open' | 'open-with' | 'copy-path';
+export type ContextMenuItemId =
+	| 'reveal'
+	| 'open'
+	| 'open-with'
+	| 'copy-path'
+	/** ウィンドウの複製(要件#34)。アイテムではなく窓に効く唯一の項目。 */
+	| 'duplicate-window';
 
 export type ContextMenuItem = {
 	id: ContextMenuItemId;
@@ -25,7 +31,12 @@ export type ContextAction =
 	| { command: 'open_path'; path: string }
 	| { command: 'copy'; text: string }
 	/** アプリ選択ダイアログを開く計画(要件#21)。開く対象の OS パスを持つ。 */
-	| { command: 'pick-app'; path: string };
+	| { command: 'pick-app'; path: string }
+	/**
+	 * ウィンドウ複製の起動(要件#34)。右クリックしたアイテムは関係しない
+	 * (複製するのは窓の中身)ので、パスも URI も持たない。
+	 */
+	| { command: 'duplicate-window' };
 
 /** ダイアログで選んだ .app で開く計画(要件#21 第2段)。 */
 export type OpenWithAction = { command: 'open_path'; path: string; with: string };
@@ -34,7 +45,8 @@ const LABELS: Record<ContextMenuItemId, string> = {
 	reveal: 'Finder で表示',
 	open: '既定アプリで開く',
 	'open-with': 'アプリを選択して開く…',
-	'copy-path': 'パスをコピー'
+	'copy-path': 'パスをコピー',
+	'duplicate-window': 'ウィンドウを複製'
 };
 
 /** ssh リモートか(判別は URI スキームのみ・パス内容では分岐しない=契約⑤)。 */
@@ -56,17 +68,30 @@ function isDirEntry(entry: ContextMenuEntry): boolean {
  * - ファイル/symlink = Finder で表示・既定アプリで開く・アプリを選択して開く…・パスをコピー
  * - フォルダ = 既定アプリ系を出さない(Finder 表示と重複するため=契約②・#21①)
  * - ssh リモートは項目を出したまま Finder / 既定アプリ / アプリ選択を disabled(契約⑤)
+ * - 末尾のウィンドウ複製(要件#34)だけは種別にもリモートにも左右されない。
+ *   アイテムではなく窓に効く操作なので、無効になる状況が無い(契約#34③)。
+ *   区切り線を挟むかは描画側の持ち場で、項目の並びには現れない
  */
 export function buildContextMenu(entry: ContextMenuEntry): ContextMenuItem[] {
 	const local = !isRemote(entry.uri);
 	const ids: ContextMenuItemId[] = isDirEntry(entry)
-		? ['reveal', 'copy-path']
-		: ['reveal', 'open', 'open-with', 'copy-path'];
+		? ['reveal', 'copy-path', 'duplicate-window']
+		: ['reveal', 'open', 'open-with', 'copy-path', 'duplicate-window'];
 	return ids.map((id) => ({
 		id,
 		label: LABELS[id],
-		enabled: id === 'copy-path' ? true : local
+		enabled: id === 'copy-path' || id === 'duplicate-window' ? true : local
 	}));
+}
+
+/**
+ * ツリーの空白部分(アイテムの無いところ)を右クリックしたときのメニュー(要件#34③)。
+ *
+ * アイテムを指していないので、出せるのはアイテムに依存しない項目だけ —
+ * 今のところウィンドウの複製1つ。
+ */
+export function buildTreePaneMenu(): ContextMenuItem[] {
+	return [{ id: 'duplicate-window', label: LABELS['duplicate-window'], enabled: true }];
 }
 
 /**
@@ -99,11 +124,17 @@ export function pathForReveal(uri: string): string {
 /**
  * 項目を押したときにやることを決める。disabled な組(ssh の reveal / open)は
  * null =何もしない。
+ *
+ * ウィンドウの複製(要件#34)は entry を読まずに返す — 複製するのは窓の中身で、
+ * 右クリックしたアイテムは「どこで押したか」でしかない。ssh でも null にしないのは
+ * disabled になる組が存在しないため(null は「グレーアウトの安全網」であって、
+ * 有効な項目の受け皿ではない)。リモート判定より手前に置くのはそのため。
  */
 export function planContextAction(
 	id: ContextMenuItemId,
 	entry: ContextMenuEntry
 ): ContextAction | null {
+	if (id === 'duplicate-window') return { command: 'duplicate-window' };
 	if (id === 'copy-path') return { command: 'copy', text: pathForCopy(entry.uri) };
 	if (isRemote(entry.uri)) return null;
 	const path = pathForReveal(entry.uri);

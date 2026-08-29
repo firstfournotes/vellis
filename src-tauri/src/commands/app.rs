@@ -28,6 +28,11 @@ pub struct InitWindowResponse {
     /// sidebar opens with the drift filter active.  Implies
     /// `show_marks`.
     pub show_changed: bool,
+    /// Directories to open in the tree once the root is listed
+    /// (requirements.md #34).  Non-empty only for a window created by
+    /// duplicating another one; `[]` — never omitted — for every other
+    /// route, so the frontend can always read the field.
+    pub expanded_dirs: Vec<String>,
 }
 
 /// Called once when a window mounts. Returns root URI, directory entries, and
@@ -46,6 +51,9 @@ pub async fn init_window(
 
     let initial_path = win_state.initial_args.initial_path.clone();
     let root_arg = win_state.initial_args.root.clone();
+    // Only a duplicated window (requirements.md #34) carries one; the
+    // frontend expands these after the root and the initial document.
+    let expanded_dirs = win_state.initial_args.expanded_dirs.clone();
     let show_changed = win_state.initial_args.show_changed;
     // `--changed` implies the sidebar is open.
     let show_marks = win_state.initial_args.show_marks || show_changed;
@@ -155,6 +163,7 @@ pub async fn init_window(
         needs_root_selection,
         show_marks,
         show_changed,
+        expanded_dirs,
     })
 }
 
@@ -172,6 +181,9 @@ mod tests {
             needs_root_selection: false,
             show_marks: false,
             show_changed: false,
+            // requirements.md #34 のフィールド追加に伴うリテラル追記のみ
+            // (アサーション不変=要件側判断 2026-08-29)。
+            expanded_dirs: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("win-1"));

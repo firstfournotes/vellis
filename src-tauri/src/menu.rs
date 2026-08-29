@@ -16,6 +16,9 @@ pub const PRINT_ITEM_ID: &str = "print";
 /// Stable identifier for the "New Window" menu item (requirements.md #12).
 pub const NEW_WINDOW_ITEM_ID: &str = "new-window";
 
+/// Stable identifier for the "Duplicate Window" menu item (requirements.md #34).
+pub const DUPLICATE_WINDOW_ITEM_ID: &str = "duplicate-window";
+
 /// Stable identifier for the "Open…" menu item (requirements.md #11).
 pub const OPEN_FILE_ITEM_ID: &str = "open-file";
 
@@ -30,6 +33,16 @@ pub const OPEN_FOLDER_ITEM_ID: &str = "open-folder";
 /// `MENU_OPEN_FOLDER_EVENT` there.
 pub const MENU_OPEN_FILE_EVENT: &str = "menu_open_file";
 pub const MENU_OPEN_FOLDER_EVENT: &str = "menu_open_folder";
+
+/// Event emitted to the focused window when "Duplicate Window" is clicked
+/// (requirements.md #34).
+///
+/// Same shape as the Open events, and for the same reason: only the window
+/// itself knows what it is currently showing — root, document and expanded
+/// directories — so it is the one that collects that triple and asks for the
+/// new window (`src/lib/duplicate-window.ts`).  Name must stay in sync with
+/// `MENU_DUPLICATE_WINDOW_EVENT` there.
+pub const MENU_DUPLICATE_WINDOW_EVENT: &str = "menu_duplicate_window";
 
 /// Stable identifier for the Window submenu, so it can be found again after
 /// the menu is installed (see [`attach_windows_menu_to_nsapp`]).
@@ -96,6 +109,16 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         Some("CmdOrCtrl+N"),
     )?;
+    // Duplicate Window sits right after New Window (requirements.md #34): the
+    // two are the same gesture, one starting empty and one starting from what
+    // this window already shows.
+    let duplicate_window_item = MenuItem::with_id(
+        app,
+        DUPLICATE_WINDOW_ITEM_ID,
+        "Duplicate Window",
+        true,
+        Some("CmdOrCtrl+Shift+N"),
+    )?;
     let new_window_sep = PredefinedMenuItem::separator(app)?;
     let open_file_item = MenuItem::with_id(
         app,
@@ -125,6 +148,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         &[
             &new_window_item,
+            &duplicate_window_item,
             &new_window_sep,
             &open_file_item,
             &open_folder_item,
@@ -241,7 +265,8 @@ pub fn handle_print_click(app: &AppHandle<Wry>) {
     }
 }
 
-/// Handle the "Open…" / "Open Folder…" menu clicks (requirements.md #11) —
+/// Handle a menu click whose work belongs to the window itself
+/// (requirements.md #11 の Open… / Open Folder…、#34 の Duplicate Window) —
 /// notify the focused window and let the frontend do the rest.
 ///
 /// Nothing about the open happens here: `src/lib/menu-open.ts` shows the
@@ -250,6 +275,11 @@ pub fn handle_print_click(app: &AppHandle<Wry>) {
 /// one side means the "現在のウインドウで開き直す" contract — including the
 /// history record that `set_root` writes (requirements.md #3) — has a single
 /// implementation, shared with any other trigger we add later.
+///
+/// Duplicate Window rides the same seam for the mirror-image reason: the
+/// contents to copy (root, document, expanded directories) live only in the
+/// window, so it is the window that collects them and calls `new_window`
+/// (`src/lib/duplicate-window.ts`).
 ///
 /// Emitted with `emit_to` so only the window the user is looking at reacts;
 /// a plain `emit` would open a dialog in every window (`show_marks` in
@@ -283,7 +313,7 @@ pub fn handle_menu_open_click(app: &AppHandle<Wry>, event: &str) {
 pub fn handle_new_window_click(app: &AppHandle<Wry>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::commands::window::create_window(&app, None, None).await {
+        if let Err(e) = crate::commands::window::create_window(&app, None, None, Vec::new()).await {
             tracing::warn!("failed to open a new window from the menu: {}", e);
         }
     });

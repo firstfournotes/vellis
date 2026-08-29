@@ -201,6 +201,11 @@ pub fn run_with_args(initial_args: WindowArgs) {
                 id if id == menu::NEW_WINDOW_ITEM_ID => {
                     menu::handle_new_window_click(app_handle);
                 }
+                id if id == menu::DUPLICATE_WINDOW_ITEM_ID => {
+                    // 複製の中身(root・文書・展開)は窓しか知らないので、
+                    // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#34)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_DUPLICATE_WINDOW_EVENT);
+                }
                 id if id == menu::OPEN_FILE_ITEM_ID => {
                     menu::handle_menu_open_click(app_handle, menu::MENU_OPEN_FILE_EVENT);
                 }

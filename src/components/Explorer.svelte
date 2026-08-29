@@ -4,6 +4,7 @@
 	import { openForDisplay } from '$lib/open-document';
 	import { DEFAULT_PANE_WIDTH } from '$lib/pane-resize';
 	import { windowState, type Entry } from '../stores/window-state.svelte';
+	import { contextMenu } from '../stores/context-menu.svelte';
 	import ContextMenu from './ContextMenu.svelte';
 	import ExplorerItem from './ExplorerItem.svelte';
 
@@ -17,7 +18,8 @@
 		root,
 		entries,
 		selectedUri,
-		width = DEFAULT_PANE_WIDTH
+		width = DEFAULT_PANE_WIDTH,
+		onDuplicateWindow
 	}: {
 		root: string;
 		entries: Entry[];
@@ -27,6 +29,8 @@
 		 * `$lib/pane-resize` が持ち、ここは受け取った幅を反映するだけ。
 		 */
 		width?: number;
+		/** 「ウィンドウを複製」(要件#34)。ここは右クリックから呼ぶだけ。 */
+		onDuplicateWindow: () => void;
 	} = $props();
 
 	function parentUri(uri: string): string | null {
@@ -61,9 +65,22 @@
 			windowState.setDocument(await openForDisplay(entry.uri));
 		}
 	}
+
+	/**
+	 * ツリーの空白部分の右クリック(要件#34③)。アイテムを指していないので、
+	 * 出すのは窓に効く項目だけのメニュー。
+	 *
+	 * アイテムの上で押したときは ExplorerItem 側が先に受けて `preventDefault` する
+	 * ので、バブリングでここまで来ても割り込まない(既存のアイテムメニューが優先)。
+	 */
+	function handlePaneContextMenu(e: MouseEvent) {
+		if (e.defaultPrevented) return;
+		e.preventDefault();
+		contextMenu.openTreePaneAt(e.clientX, e.clientY);
+	}
 </script>
 
-<aside class="explorer" style="width: {width}px">
+<aside class="explorer" style="width: {width}px" oncontextmenu={handlePaneContextMenu}>
 	<div class="explorer-header">
 		<span class="explorer-title">Explorer</span>
 		<button
@@ -91,8 +108,9 @@
 <!--
 	コンテキストメニューはウインドウにつき1つ(要件#19)。position: fixed なので
 	Explorer の overflow には切られず、ツリーの外にもはみ出して表示できる。
+	アイテムのメニューも空白部のメニュー(要件#34)もこの1つが描く。
 -->
-<ContextMenu />
+<ContextMenu {onDuplicateWindow} />
 
 <style>
 	/*

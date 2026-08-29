@@ -42,6 +42,11 @@
 		shouldShowRootPicker
 	} from '$lib/reload-state';
 	import { registerMenuOpenListeners } from '$lib/menu-open';
+	import {
+		duplicateWindow,
+		registerDuplicateWindowListener,
+		type DuplicateSnapshot
+	} from '$lib/duplicate-window';
 	import type { BuiltAnchor } from '../markdown/selection';
 	import type { Mark } from '$lib/annotation';
 	import '../styles/theme.css';
@@ -175,6 +180,8 @@
 		needs_root_selection: boolean;
 		show_marks: boolean;
 		show_changed: boolean;
+		/** 複製元の展開ディレクトリ(要件#34)。複製で生まれた窓以外は空。 */
+		expanded_dirs: string[];
 	};
 
 	type MarkFilterMode = 'all' | 'drift';
@@ -284,6 +291,58 @@
 		};
 	});
 
+	// 要件#34: ウィンドウの複製。複製する内容(root・開いている文書・ツリー展開)は
+	// この窓にしかないので、ここで集めて `$lib/duplicate-window` の実行列へ渡す。
+	//
+	// 履歴選択画面が出ている間は root を null で渡す(契約④)。背後の root は
+	// init_window の cwd フォールバックであってユーザーが選んだものではないので、
+	// 複製しても意味を持たない — 引数なしの New Window 相当として、複製先でも
+	// 履歴選択画面を出す。スナップショット($effect)が同じ理由で書かないのと同じ判断。
+	function currentSnapshot(): DuplicateSnapshot {
+		return {
+			rootUri: rootPicker.open ? null : windowState.root,
+			docUri: windowState.currentDocument?.uri ?? null,
+			expandedDirs: windowState.expandedDirs
+		};
+	}
+
+	function reportDuplicateFailure(err: unknown) {
+		alert(`ウィンドウを複製できませんでした: ${err}`);
+	}
+
+	/**
+	 * ツリーの右クリックからの複製(要件#34③)。メニュー起点(下の購読)と
+	 * 同じ実行列を通る。新しい窓を作るだけなので、この窓の状態は何も動かない。
+	 */
+	async function duplicateCurrentWindow() {
+		try {
+			await duplicateWindow(currentSnapshot());
+		} catch (err) {
+			reportDuplicateFailure(err);
+		}
+	}
+
+	// メニュー起点の複製。Rust 側はフォーカス中の窓へイベントを投げるだけで、
+	// 集める・呼ぶはこちら側(menu-open と同じ分担)。購読の解除があるので
+	// await を挟まない専用の onMount に分けている。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void registerDuplicateWindowListener({
+			getSnapshot: currentSnapshot,
+			// 新しい窓が開くだけで、この窓には何も反映しない。
+			onOpened: () => {},
+			onError: reportDuplicateFailure
+		}).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
 	onMount(async () => {
 		// Populate the feature-flag store from the shared get_build_info()
 		// cache (single IPC). Fire-and-forget — fail-safe defaults hold
@@ -330,6 +389,11 @@
 			if (init.initial_path) {
 				windowState.setDocument(await openForDisplay(init.initial_path));
 			}
+
+			// 要件#34: 複製で生まれた窓は、複製元の展開ディレクトリを引き継いで開く。
+			// root と初期文書の後に渡すのは reload の復元と同じ順序 — 各ディレクトリの
+			// 子は ExplorerItem が list_dir で読み直す。複製以外の経路では空。
+			if (init.expanded_dirs.length > 0) windowState.setExpandedDirs(init.expanded_dirs);
 		}
 
 		// No CLI path or root was provided — show the history picker (要件#4).
@@ -483,6 +547,7 @@
 				entries={windowState.entries}
 				selectedUri={windowState.currentDocument?.uri}
 				width={explorerWidth}
+				onDuplicateWindow={duplicateCurrentWindow}
 			/>
 			<!--
 				Explorer と Viewer の仕切り(要件#9)。ドラッグ専用のハンドルで、

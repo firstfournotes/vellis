@@ -16,6 +16,10 @@ use crate::window::title::derive_window_title;
 /// in the same state as an argument-less launch, i.e. the history picker
 /// screen (requirements.md #4).
 ///
+/// `expanded_dirs` carries the third part of "the same contents" for the
+/// duplicate route (requirements.md #34); every other caller passes an empty
+/// `Vec` and gets exactly the window it got before.
+///
 /// Callable from the menu (which has only an `AppHandle`) as well as from
 /// the command, so `AppState` is looked up here rather than taken as an
 /// argument.
@@ -23,6 +27,7 @@ pub async fn create_window(
     app: &AppHandle,
     path: Option<String>,
     root: Option<String>,
+    expanded_dirs: Vec<String>,
 ) -> Result<String, String> {
     let state = app.state::<AppState>();
     // The title names the root folder (requirements.md #17); `root` itself is
@@ -31,7 +36,7 @@ pub async fn create_window(
     let root_for_title = root.clone();
     let label = {
         let mut wm = state.window_manager.lock().await;
-        wm.register_new_window(path, root)
+        wm.register_new_window_with_dirs(path, root, expanded_dirs)
     };
 
     // Build and show the new window. `inner_size` is the fallback used when
@@ -66,19 +71,25 @@ pub async fn create_window(
 /// when the window's frontend calls `init_window`, it can discover the root
 /// URI and initial document path.
 ///
-/// Both arguments are optional: omitting them opens a window with no target
-/// at all — the same state as launching `vellis` with no arguments, which
-/// shows the history picker (requirements.md #12).  Existing callers that
-/// pass `{ path, root }` are unaffected.
+/// All three arguments are optional: omitting them opens a window with no
+/// target at all — the same state as launching `vellis` with no arguments,
+/// which shows the history picker (requirements.md #12).  Existing callers
+/// that pass `{ path, root }` are unaffected.
+///
+/// `expandedDirs` (requirements.md #34) is what the duplicate route adds: the
+/// directories the source window had open in its tree, so the new window can
+/// come up showing the same thing.  Absent — every caller but the duplicate —
+/// means an empty expansion, i.e. exactly the previous behaviour.
 ///
 /// Returns the new window label.
 #[tauri::command]
 pub async fn new_window(
     path: Option<String>,
     root: Option<String>,
+    expanded_dirs: Option<Vec<String>>,
     app: AppHandle,
 ) -> Result<String, String> {
-    create_window(&app, path, root).await
+    create_window(&app, path, root, expanded_dirs.unwrap_or_default()).await
 }
 
 #[cfg(test)]
@@ -97,6 +108,9 @@ mod tests {
                 root: Some("/tmp".into()),
                 show_marks: false,
                 show_changed: false,
+                // requirements.md #34 のフィールド追加に伴うリテラル追記のみ
+                // (アサーション不変=要件側判断 2026-08-29)。
+                expanded_dirs: vec![],
             },
         );
         let state = wm.get(&label).unwrap();
