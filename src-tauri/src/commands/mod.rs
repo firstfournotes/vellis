@@ -6,9 +6,11 @@ pub mod dir_watch;
 pub mod document;
 pub mod history;
 pub mod list;
+pub mod print;
 pub mod root;
 #[cfg(feature = "webdriver")]
 pub mod test_helpers;
+pub mod video;
 pub mod window;
 
 use std::sync::{Arc, Mutex as StdMutex};

@@ -10,9 +10,11 @@ pub mod fs;
 pub mod history;
 pub mod ipc;
 pub mod menu;
+pub mod print;
 pub mod session;
 pub mod spacemouse;
 pub mod update_check;
+pub mod video_frames;
 pub mod watch;
 pub mod window;
 
@@ -37,13 +39,16 @@ use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
 use commands::document::{open_binary_document, open_document};
 use commands::history::list_history;
 use commands::list::list_dir;
+use commands::print::{print_current_window, print_html};
 use commands::root::set_root;
+use commands::video::get_video_frame_index;
 use commands::window::new_window;
 use commands::AppState;
 use fs::registry::FileProviderRegistry;
 use ipc::handler::spawn_command_handler;
 use ipc::lock::FileLock;
 use ipc::server::{default_lock_path, default_socket_path, IpcServer};
+use print::{handle_print_protocol, PrintDocumentStore, PRINT_SCHEME};
 use watch::hub::DocumentCoordinator;
 use window::manager::{WindowArgs, WindowManager};
 
@@ -88,7 +93,12 @@ pub fn run_with_args(initial_args: WindowArgs) {
     // E2E tests. The `debug_assertions` gate is a defence-in-depth: even
     // if someone passes `--release --features webdriver` the plugin is
     // not registered.  See `docs/implementation.md` §10 (E2E).
-    let builder = tauri::Builder::default().manage(app_state);
+    let builder = tauri::Builder::default()
+        .manage(app_state)
+        // 印刷文書のストア(要件#38)は AppState とは別に管理する。protocol
+        // ハンドラとコマンドの2箇所からしか触らないうえ、窓・監視・注釈と違って
+        // アプリの状態ではなく「いま印刷しようとしている1文書」の置き場なので。
+        .manage(PrintDocumentStore::new());
 
     #[cfg(all(feature = "webdriver", debug_assertions))]
     let builder = builder.plugin(tauri_plugin_webdriver::init());
@@ -123,7 +133,13 @@ pub fn run_with_args(initial_args: WindowArgs) {
                     responder.respond(response);
                 });
             },
-        );
+        )
+        // 印刷窓が読む one-shot 文書(要件#38)。読み出しはメモリ上の
+        // HashMap から1件取り出すだけなので同期ハンドラで足りる。
+        .register_uri_scheme_protocol(PRINT_SCHEME, |ctx, req| {
+            let store = ctx.app_handle().state::<PrintDocumentStore>();
+            handle_print_protocol(&store, &req.uri().to_string())
+        });
 
     // `invoke_handler` can only be called once per Builder — so the
     // `webdriver`-only test helpers (issue #22) need to be inlined into
@@ -151,6 +167,9 @@ pub fn run_with_args(initial_args: WindowArgs) {
         revert_to_snapshot,
         get_build_info,
         list_history,
+        get_video_frame_index,
+        print_current_window,
+        print_html,
         commands::test_helpers::__test_list_windows,
     ]);
     #[cfg(not(feature = "webdriver"))]
@@ -174,6 +193,9 @@ pub fn run_with_args(initial_args: WindowArgs) {
         revert_to_snapshot,
         get_build_info,
         list_history,
+        get_video_frame_index,
+        print_current_window,
+        print_html,
     ]);
 
     builder
@@ -205,6 +227,17 @@ pub fn run_with_args(initial_args: WindowArgs) {
                     // 複製の中身(root・文書・展開)は窓しか知らないので、
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#34)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_DUPLICATE_WINDOW_EVENT);
+                }
+                id if id == menu::ZOOM_IN_ITEM_ID => {
+                    // 倍率も対象ビューアの判定もフロント側にしかないので、
+                    // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#36)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_ZOOM_IN_EVENT);
+                }
+                id if id == menu::ZOOM_OUT_ITEM_ID => {
+                    menu::handle_menu_open_click(app_handle, menu::MENU_ZOOM_OUT_EVENT);
+                }
+                id if id == menu::ACTUAL_SIZE_ITEM_ID => {
+                    menu::handle_menu_open_click(app_handle, menu::MENU_ZOOM_RESET_EVENT);
                 }
                 id if id == menu::OPEN_FILE_ITEM_ID => {
                     menu::handle_menu_open_click(app_handle, menu::MENU_OPEN_FILE_EVENT);

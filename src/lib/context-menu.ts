@@ -41,12 +41,13 @@ export type ContextAction =
 /** ダイアログで選んだ .app で開く計画(要件#21 第2段)。 */
 export type OpenWithAction = { command: 'open_path'; path: string; with: string };
 
+/** ラベルは英語固定(要件#35 ①=macOS 標準用語。i18n 機構は持たない)。 */
 const LABELS: Record<ContextMenuItemId, string> = {
-	reveal: 'Finder で表示',
-	open: '既定アプリで開く',
-	'open-with': 'アプリを選択して開く…',
-	'copy-path': 'パスをコピー',
-	'duplicate-window': 'ウィンドウを複製'
+	reveal: 'Reveal in Finder',
+	open: 'Open with Default App',
+	'open-with': 'Open With…',
+	'copy-path': 'Copy Path',
+	'duplicate-window': 'Duplicate Window'
 };
 
 /** ssh リモートか(判別は URI スキームのみ・パス内容では分岐しない=契約⑤)。 */
@@ -65,7 +66,7 @@ function isDirEntry(entry: ContextMenuEntry): boolean {
 /**
  * 右クリックされたアイテムからメニュー項目を組む。
  *
- * - ファイル/symlink = Finder で表示・既定アプリで開く・アプリを選択して開く…・パスをコピー
+ * - ファイル/symlink = Reveal in Finder・Open with Default App・Open With…・Copy Path
  * - フォルダ = 既定アプリ系を出さない(Finder 表示と重複するため=契約②・#21①)
  * - ssh リモートは項目を出したまま Finder / 既定アプリ / アプリ選択を disabled(契約⑤)
  * - 末尾のウィンドウ複製(要件#34)だけは種別にもリモートにも左右されない。

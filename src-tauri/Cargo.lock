@@ -6548,7 +6548,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vellis"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6559,6 +6559,7 @@ dependencies = [
  "http",
  "libc",
  "mime_guess",
+ "muda",
  "notify",
  "percent-encoding",
  "reqwest",

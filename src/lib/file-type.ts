@@ -234,13 +234,21 @@ export interface DisplayResult {
  * iframe instead of the `{@html}` path, images are handed to `<img>` as an
  * asset URI, text is shown as-is, and binary content is withheld (never
  * thrown — the caller may still hold the payload).
+ *
+ * `zoom` only reaches HTML (要件#36 ⑥): the sandboxed preview can only be
+ * zoomed by rebuilding its `srcdoc`, while Markdown and plain text are zoomed
+ * by the viewer element itself and so do not depend on this render at all.
  */
-export async function renderForDisplay(uri: string, content: string): Promise<DisplayResult> {
+export async function renderForDisplay(
+	uri: string,
+	content: string,
+	zoom?: number,
+): Promise<DisplayResult> {
 	switch (detectFileType(uri)) {
 		case 'markdown':
 			return await render(content, uri);
 		case 'html':
-			return { html: '', index: null, srcdoc: buildSrcdoc(content, uri) };
+			return { html: '', index: null, srcdoc: buildSrcdoc(content, uri, zoom) };
 		case 'image':
 			// The body never carries the file itself: the protocol handler reads the
 			// bytes when `<img>` fetches the asset URI (要件#16 ②⑦). SVG source is

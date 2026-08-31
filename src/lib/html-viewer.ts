@@ -20,6 +20,7 @@
  * element inert, and a `<style>` restores the look of a link.
  */
 import { toAssetUri } from './uri';
+import { DEFAULT_ZOOM } from './zoom';
 
 /**
  * `sandbox` value for the preview iframe. The empty string is the strictest
@@ -35,6 +36,26 @@ export const SANDBOX_ATTRIBUTE: string = '';
  * very start of a bare fragment. `head\b` does not match `<header>`.
  */
 const INJECTION_ANCHORS = [/<head\b[^>]*>/i, /<html\b[^>]*>/i, /<!doctype\b[^>]*>/i];
+
+/**
+ * The offset in `document` at which an injection belongs — just past the first
+ * anchor above, or 0 for a bare fragment (where the parser lifts a `<meta>` /
+ * `<base>` into the head it synthesises).
+ *
+ * Exported because the print document (要件#38) splices its CSP `<meta>` in at
+ * the same place: it is built by re-splicing into what `buildSrcdoc` returned,
+ * so the two must agree on where "before the body" is without either of them
+ * keeping a second copy of the anchor list.
+ */
+export function injectionOffset(document: string): number {
+	for (const anchor of INJECTION_ANCHORS) {
+		const match = anchor.exec(document);
+		if (match !== null) {
+			return match.index + match[0].length;
+		}
+	}
+	return 0;
+}
 
 /**
  * Per element, the attributes that make it navigate and the inert name each is
@@ -227,27 +248,45 @@ function retargetLinks(content: string): string {
 }
 
 /**
+ * The zoom the preview is shown at, as a stylesheet to inject (要件#36 ⑥).
+ *
+ * The iframe is sandboxed with an empty `sandbox` attribute, so its document
+ * sits on an opaque origin and the parent cannot reach in to style it — any
+ * attempt is a `SecurityError`. Scaling the iframe element from outside is no
+ * good either: the layout viewport stays the unscaled size, so the document
+ * gets clipped instead of reflowed. What is left is to build the zoom into the
+ * document itself, which means rebuilding `srcdoc` on every ⌘± (the iframe
+ * remounts and loses its scroll position — accepted for the first version).
+ *
+ * `zoom` on the root element scales everything inside — text, images, tables,
+ * inline SVG — and shrinks the layout viewport to match, so the content
+ * reflows to the iframe's width instead of overflowing it.
+ *
+ * The default level injects nothing at all: `buildSrcdoc` then produces exactly
+ * the bytes it did before ズーム existed.
+ */
+export function zoomStyleTag(zoom: number): string {
+	if (zoom === DEFAULT_ZOOM) return '';
+	return `<style>:root{zoom:${zoom}%}</style>`;
+}
+
+/**
  * Build the iframe body for an HTML document: the source with a single `<base>`
  * inserted, so that relative images resolve to `vellis-asset:` the same way
  * Markdown images do (rewrite-uri: `resolveRelative` → `toAssetUri`), and with
  * links retargeted so a click cannot navigate the preview away. The link
- * stylesheet rides along only when there was a link to retarget.
+ * stylesheet rides along only when there was a link to retarget, and the zoom
+ * stylesheet only when the level is not the default (要件#36 ⑥).
  *
- * Both insertions are plain string splices — the document is never parsed and
+ * All insertions are plain string splices — the document is never parsed and
  * re-serialised, so everything around them survives verbatim. They land ahead
  * of any `<base>` the document carries itself, because the first one wins.
  */
-export function buildSrcdoc(content: string, docUri: string): string {
+export function buildSrcdoc(content: string, docUri: string, zoom: number = DEFAULT_ZOOM): string {
 	const body = retargetLinks(content);
 	// `URL` percent-encodes `"` in the path, so the href needs no escaping.
 	const base = `<base href="${toAssetUri(docUri)}">`;
-	const injection = body === content ? base : base + LINK_STYLE;
-	for (const anchor of INJECTION_ANCHORS) {
-		const match = anchor.exec(body);
-		if (match !== null) {
-			const at = match.index + match[0].length;
-			return body.slice(0, at) + injection + body.slice(at);
-		}
-	}
-	return injection + body;
+	const injection = (body === content ? base : base + LINK_STYLE) + zoomStyleTag(zoom);
+	const at = injectionOffset(body);
+	return body.slice(0, at) + injection + body.slice(at);
 }

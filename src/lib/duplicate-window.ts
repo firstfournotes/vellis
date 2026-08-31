@@ -81,6 +81,14 @@ export async function duplicateWindow<Label = string>(
 	return await invoke<Label>('new_window', planDuplicateWindow(snapshot));
 }
 
+/**
+ * 複製に失敗したことを伝える文言(要件#35 ③。エラー内容はそのまま挟む)。
+ * メニュー起点・右クリック起点のどちらも +page.svelte の合流点でこれを使う。
+ */
+export function duplicateWindowFailedMessage(err: unknown): string {
+	return `Could not duplicate window: ${err}`;
+}
+
 /** メニュー起点の複製を受け取る配線側のハンドラ。 */
 export type DuplicateWindowHandlers = {
 	/**

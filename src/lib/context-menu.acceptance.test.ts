@@ -38,6 +38,15 @@
  * 本要件により #19/#21 の項目数固定(ファイル4項目・フォルダ2項目)は
  * ファイル5項目・フォルダ3項目へ**要件側更新**(承認済み=#34⑩)。
  *
+ * ## 要件#35 追補(requirements.md #35・2026-08-30 由谷決定)
+ * ラベル5件の表示文言を英語へ置換(契約#35①の推奨文言=macOS 標準用語)—
+ * "Reveal in Finder"・"Open with Default App"・"Open With…"・"Copy Path"・
+ * "Duplicate Window"。本要件により本ファイルの日本語ラベル固定は英語へ
+ * **要件側更新**(承認済み=#35⑥)。id・項目の出し分け・順序・enabled の判定は
+ * 不変(英語化は label のみ)。要件#19/#21/#34 の契約文中の日本語ラベル表記は
+ * #35⑤ により英語表記へ読み替える(過去の記述は書き換えない=本追補が正)。
+ * メニュー体験全体の英語化の台帳は menu-language.acceptance.test.ts(要件#35)。
+ *
  * ## 確定契約(公開 API・implementer はこれに従う)
  *
  * ```ts
@@ -112,8 +121,8 @@
  * 5. symlink はファイルと同じ扱い(5項目)に固定=実装裁量の確定(本テストの設計判断)。
  *    理由: フロントは symlink の指し先種別を知らないため、項目を落とすより
  *    「Finder で表示」「既定アプリで開く」を出して OS に委ねるのが安全側。
- * 6. ラベル文言は要件の表記どおり「Finder で表示」「既定アプリで開く」
- *    「アプリを選択して開く…」「パスをコピー」「ウィンドウを複製」。
+ * 6. ラベル文言は "Reveal in Finder"・"Open with Default App"・"Open With…"・
+ *    "Copy Path"・"Duplicate Window"(要件#35 で日本語表記から英語へ要件側更新)。
  * 7. 判別は URI スキームのみ(kind と組み合わせ、パス内容では分岐しない)。
  * 8. planContextAction('open-with', local ファイル) → { command: 'pick-app', path: OS パス }。
  *    ssh → null。planOpenWith は選択結果あり → open_path + with・キャンセル → null(要件#21)。
@@ -207,14 +216,14 @@ describe('buildContextMenu — local アイテムの項目構成', () => {
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('ラベル文言は要件の表記どおり(local ファイルの5項目)', () => {
+	test('ラベル文言は英語の推奨文言(要件#35①=local ファイルの5項目)', () => {
 		const labels = buildContextMenu(localFile).map((i) => i.label);
 		expect(labels).toEqual([
-			'Finder で表示',
-			'既定アプリで開く',
-			'アプリを選択して開く…',
-			'パスをコピー',
-			'ウィンドウを複製',
+			'Reveal in Finder',
+			'Open with Default App',
+			'Open With…',
+			'Copy Path',
+			'Duplicate Window',
 		]);
 	});
 
@@ -380,9 +389,9 @@ describe('要件#21: buildContextMenu — 「アプリを選択して開く…�
 		expect(items[openIdx + 1]?.id).toBe('open-with');
 	});
 
-	test('ラベルは「アプリを選択して開く…」・local ファイルは enabled', () => {
+	test('ラベルは "Open With…"(要件#35)・local ファイルは enabled', () => {
 		const item = buildContextMenu(localFile).find((i) => i.id === 'open-with');
-		expect(item).toMatchObject({ label: 'アプリを選択して開く…', enabled: true });
+		expect(item).toMatchObject({ label: 'Open With…', enabled: true });
 	});
 
 	test('フォルダには出さない(local / ssh とも)', () => {
@@ -392,7 +401,7 @@ describe('要件#21: buildContextMenu — 「アプリを選択して開く…�
 
 	test('ssh ファイルでは項目は出すが disabled(#19 の出し分け踏襲)', () => {
 		const item = buildContextMenu(sshFile).find((i) => i.id === 'open-with');
-		expect(item).toMatchObject({ label: 'アプリを選択して開く…', enabled: false });
+		expect(item).toMatchObject({ label: 'Open With…', enabled: false });
 	});
 });
 
@@ -442,12 +451,12 @@ describe('要件#21: planOpenWith — 選択結果 → open_path(path, with)(契
 // 要件#34 — 「ウィンドウを複製」(末尾追加・常に enabled・空白部メニュー・実行計画)
 // ---------------------------------------------------------------------------
 
-describe('要件#34: buildContextMenu — 「ウィンドウを複製」は末尾・全種・ssh でも有効(契約#34③)', () => {
-	test('local ファイルでは末尾に置かれ、ラベルは「ウィンドウを複製」・enabled', () => {
+describe('要件#34: buildContextMenu — "Duplicate Window" は末尾・全種・ssh でも有効(契約#34③)', () => {
+	test('local ファイルでは末尾に置かれ、ラベルは "Duplicate Window"(要件#35)・enabled', () => {
 		const items = buildContextMenu(localFile);
 		expect(items[items.length - 1]).toMatchObject({
 			id: 'duplicate-window',
-			label: 'ウィンドウを複製',
+			label: 'Duplicate Window',
 			enabled: true,
 		});
 	});
@@ -456,7 +465,7 @@ describe('要件#34: buildContextMenu — 「ウィンドウを複製」は末�
 		const items = buildContextMenu(localDir);
 		expect(items[items.length - 1]).toMatchObject({
 			id: 'duplicate-window',
-			label: 'ウィンドウを複製',
+			label: 'Duplicate Window',
 			enabled: true,
 		});
 	});
@@ -464,18 +473,18 @@ describe('要件#34: buildContextMenu — 「ウィンドウを複製」は末�
 	test('ssh ファイル/フォルダでも enabled(グレーアウトしない=他項目と違う出し分け)', () => {
 		const fromFile = buildContextMenu(sshFile).find((i) => i.id === 'duplicate-window');
 		const fromDir = buildContextMenu(sshDir).find((i) => i.id === 'duplicate-window');
-		expect(fromFile).toMatchObject({ label: 'ウィンドウを複製', enabled: true });
-		expect(fromDir).toMatchObject({ label: 'ウィンドウを複製', enabled: true });
+		expect(fromFile).toMatchObject({ label: 'Duplicate Window', enabled: true });
+		expect(fromDir).toMatchObject({ label: 'Duplicate Window', enabled: true });
 	});
 });
 
 describe('要件#34: buildTreePaneMenu — ツリー空白部の右クリック(契約#34③)', () => {
-	test('duplicate-window 1項目のみ・ラベル「ウィンドウを複製」・enabled', () => {
+	test('duplicate-window 1項目のみ・ラベル "Duplicate Window"(要件#35)・enabled', () => {
 		const items = buildTreePaneMenu();
 		expect(items).toHaveLength(1);
 		expect(items[0]).toMatchObject({
 			id: 'duplicate-window',
-			label: 'ウィンドウを複製',
+			label: 'Duplicate Window',
 			enabled: true,
 		});
 	});

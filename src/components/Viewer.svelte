@@ -6,6 +6,7 @@
 	import { sha256 } from '$lib/annotation';
 	import { mountMermaid } from '$lib/mermaid-mounter';
 	import { planSelectionCopy } from '$lib/copy-selection';
+	import { DEFAULT_ZOOM } from '$lib/zoom';
 	import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
 	import type { SourceIndex } from '../markdown/types';
 	import { buildAnchor, type BuiltAnchor } from '../markdown/selection';
@@ -17,6 +18,7 @@
 		onRequestAddMark,
 		onToggleMarks,
 		marksOpen,
+		zoom = DEFAULT_ZOOM,
 	}: {
 		document: DocumentPayload;
 		html: string;
@@ -24,6 +26,11 @@
 		onRequestAddMark: (anchor: BuiltAnchor) => void;
 		onToggleMarks: () => void;
 		marksOpen: boolean;
+		/**
+		 * 本文の表示倍率(パーセント・要件#36)。非対象の表示(バイナリの
+		 * プレースホルダ)には既定=等倍が渡る。
+		 */
+		zoom?: number;
 	} = $props();
 
 	let copyLabel = $state('マークダウンをコピー');
@@ -145,7 +152,21 @@
 	</header>
 	<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div class="markdown-body" bind:this={bodyEl} onclick={handleClick} oncopy={handleCopy}>
+	<!--
+		要件#36: ズームは本文コンテナだけに掛ける。`zoom` は `transform: scale` と
+		違ってレイアウトごと拡大するので、本文中の画像・表・コードブロック・
+		mermaid 図が一体で拡縮しつつ、行はウインドウ幅で折り返し直される
+		(要件#20 の「幅はウインドウに追従」がそのまま生きる)。ツールバーは
+		外にあるので UI の大きさは変わらない。等倍のときは宣言そのものを出さない
+		— ズームを入れる前と同じ DOM に戻す(srcdoc 側の `zoomStyleTag` と同じ)。
+	-->
+	<div
+		class="markdown-body"
+		style:zoom={zoom === DEFAULT_ZOOM ? null : `${zoom}%`}
+		bind:this={bodyEl}
+		onclick={handleClick}
+		oncopy={handleCopy}
+	>
 		{@html html}
 	</div>
 </article>

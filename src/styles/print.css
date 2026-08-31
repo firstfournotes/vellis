@@ -58,6 +58,10 @@
 		overflow: visible;
 		font-size: 10pt;
 		line-height: 1.45;
+		/* 画面のズーム(要件#36)は紙に持ち込まない — 印刷の基準は上の 10pt 系
+		   だけで、⌘P の出力は画面の倍率に依存しない。Viewer が inline style で
+		   当てているので、!important でないと勝てない。 */
+		zoom: normal !important;
 	}
 
 	/* コードブロック / inline code は本文より少し小さく落として、印刷時の

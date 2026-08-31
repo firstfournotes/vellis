@@ -1,6 +1,6 @@
 [package]
 name = "vellis"
-version = "0.1.31"
+version = "0.1.32"
 description = "A read-only Markdown viewer for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"
@@ -83,4 +83,15 @@ dev-features = []
 [dev-dependencies]
 tempfile = "3"
 tauri = { version = "2", features = ["test"] }
+# 要件#36 acceptance (tests/acceptance_req36.rs) がメニューアクセラレータの
+# parse 妥当性を判定するための宣言。tauri はメニューの accelerator 文字列を
+# `s.parse::<muda::accelerator::Accelerator>().ok()` で解析し、失敗を黙って
+# 捨てる(ショートカットが消えるだけでエラーにならない)ため、「Ok を返す
+# 文字列であること」自体を tauri が委譲する当のパーサで固定する。muda は
+# 既に tauri 経由でツリー内にあり(0.17 系)、これはテストからの import を
+# 正直にする宣言のみ(percent-encoding と同じ家風・実行時依存は不変)。
+# default-features = false は必須: muda の default は libxdo(Linux 専用)を
+# 含み、素の宣言だと feature unification で Cargo.lock に新規クレートが入る
+# (tauri 自身も default features 無効で参照・パーサに feature は不要)。
+muda = { version = "0.17", default-features = false }
 

@@ -51,8 +51,12 @@
  *    `vellis-asset:` は維持(既存表示の回帰ガード)。
  *
  * ## reviewer 照合に委ねる配線(本テストの判定対象外)
- * - VideoViewer.svelte: `<video controls src>`・WebKit ネイティブ UI・自動再生なし=
- *   クリック再生(契約②)・プレースホルダ UI と「既定アプリで開く」ボタンの配線
+ * - VideoViewer.svelte: `<video src>` の表示・自動再生なし=クリック再生(契約②)・
+ *   プレースホルダ UI と「既定アプリで開く」ボタンの配線。操作 UI は当初の
+ *   ネイティブ `controls` から要件#37 契約⑤により自作コントロールバーへ全面置き換え
+ *   (2026-08-30 再スコープ=要件#37 契約⑩の承認範囲。本ファイルのアサーションは不変。
+ *   フレーム表示・コマ送りの受け入れは video-frame.acceptance.test.ts と
+ *   src-tauri/tests/acceptance_req37.rs)
  * - +page.svelte の videoSrc 分岐・binary_file_changed / file_removed の listen が
  *   動画にも効くこと・版数リセット
  *

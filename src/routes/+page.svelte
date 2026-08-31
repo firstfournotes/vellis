@@ -10,6 +10,7 @@
 	import StatusBar from '../components/StatusBar.svelte';
 	import InstructionDialog from '../components/InstructionDialog.svelte';
 	import MarkList from '../components/MarkList.svelte';
+	import ProvenancePanel from '../components/ProvenancePanel.svelte';
 	import DiffView from '../components/DiffView.svelte';
 	import RootPicker from '../components/RootPicker.svelte';
 	import UpdateBanner from '../components/UpdateBanner.svelte';
@@ -19,7 +20,7 @@
 	import { windowState, type DocumentPayload, type Entry } from '../stores/window-state.svelte';
 	import { marksStore } from '../stores/marks.svelte';
 	import { featureFlags } from '$lib/flags.svelte';
-	import { renderForDisplay } from '$lib/file-type';
+	import { detectFileType, renderForDisplay, type FileType } from '$lib/file-type';
 	import { openForDisplay } from '$lib/open-document';
 	import { imageSrcWithVersion } from '$lib/image-watch';
 	import {
@@ -41,12 +42,25 @@
 		saveSnapshot,
 		shouldShowRootPicker
 	} from '$lib/reload-state';
-	import { registerMenuOpenListeners } from '$lib/menu-open';
+	import {
+		SELECT_FOLDER_DIALOG_TITLE,
+		openFailedMessage,
+		registerMenuOpenListeners
+	} from '$lib/menu-open';
 	import {
 		duplicateWindow,
+		duplicateWindowFailedMessage,
 		registerDuplicateWindowListener,
 		type DuplicateSnapshot
 	} from '$lib/duplicate-window';
+	import { DEFAULT_ZOOM, isZoomTarget, loadZoom, registerZoomListeners } from '$lib/zoom';
+	import { printFailedMessage, registerPrintListener } from '$lib/print-html';
+	import { videoViewMode } from '$lib/video-viewing';
+	import {
+		loadProvenanceMap,
+		type ProvenanceLoad,
+		type ProvenanceSegment
+	} from '$lib/video-provenance';
 	import type { BuiltAnchor } from '../markdown/selection';
 	import type { Mark } from '$lib/annotation';
 	import '../styles/theme.css';
@@ -56,6 +70,19 @@
 
 	let showMarks = $state(false);
 	let markFilter = $state<MarkFilterMode>('all');
+	// 要件#40: 素材パネル(出所)の開閉と、パネルが要る材料。開閉は reload-state に
+	// 載せない=毎回閉じて始まる(契約⑪=Q26。マーク一覧と同じ扱い)。
+	let showProvenance = $state(false);
+	/** 再生位置(秒)。パネルが開いている間だけ VideoViewer から届く(契約⑪)。 */
+	let videoPosition = $state(0);
+	/** 動画の実尺(秒)。鮮度警告の突き合わせに使う(契約⑩)。 */
+	let videoDurationSec = $state<number | null>(null);
+	/** サイドカーの取得結果。null =まだ読んでいる途中。 */
+	let provenanceLoad = $state<ProvenanceLoad | null>(null);
+	// 区間クリックのシークは VideoViewer が持つ(吸着に使うフレーム索引があちらにある)。
+	let videoViewer = $state<{ seekToSegmentStart: (segment: ProvenanceSegment) => void } | null>(
+		null
+	);
 	let dialog = $state<{ open: boolean; anchor: BuiltAnchor | null }>({
 		open: false,
 		anchor: null,
@@ -131,6 +158,78 @@
 		};
 		window.addEventListener('resize', handleWindowResize);
 		return () => window.removeEventListener('resize', handleWindowResize);
+	});
+
+	// --- Viewer zoom (要件#36) --------------------------------------------
+	// 倍率の刻み・上下限・対象ビューアの別・保存と復元は `$lib/zoom` の持ち場。
+	// ここは「いつ読むか」と「どこへ当てるか」だけを持つ(要件#9 の幅と同じ整理)。
+	// 初期値は既定=等倍 — onMount で保存値(全窓共有のグローバル1値)に差し替わる。
+	let zoomLevel = $state(DEFAULT_ZOOM);
+
+	// いま表示しているのがズーム対象のビューアか(契約①⑧)。文書を開いていない
+	// (履歴選択画面・EmptyState)ときも対象外で、⌘+ / ⌘− / ⌘0 は何もしない。
+	let zoomTarget = $derived(
+		windowState.currentDocument !== null &&
+			isZoomTarget(detectFileType(windowState.currentDocument.uri))
+	);
+
+	// メニュー起点のズーム。Rust 側はフォーカス中の窓へイベントを投げるだけで、
+	// 倍率を持つのも保存するのもこちら側(menu-open・duplicate-window と同じ分担)。
+	// 購読の解除があるので await を挟まない専用の onMount に分けている。
+	onMount(() => {
+		zoomLevel = loadZoom();
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void registerZoomListeners({
+			isTarget: () => zoomTarget,
+			getLevel: () => zoomLevel,
+			onChange: (level) => (zoomLevel = level)
+		}).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
+	// --- Print (要件#38) ----------------------------------------------------
+	// ⌘P の経路(HTML だけ印刷専用ウィンドウ・他は従来のメインフレーム印刷)と
+	// 印刷文書の組み立ては `$lib/print-html` の持ち場。ここは「いま何を表示して
+	// いるか」を答えるだけ(zoom・duplicate-window と同じ分担)。
+	//
+	// 文書を開いていない(履歴選択画面・EmptyState)ときは `text` を返す —
+	// HTML 以外はどれも同じ従来経路なので、ここでの意味は「印刷窓には回さない」
+	// の一言に尽きる。`text` は file-type の未知拡張子のフォールバックでもある。
+	let printFileType: FileType = $derived(
+		windowState.currentDocument ? detectFileType(windowState.currentDocument.uri) : 'text'
+	);
+
+	// 印刷する HTML は画面と同じ材料(生テキストと文書 URI)から作る — 表示中の
+	// srcdoc を流用しないのは、紙が倍率非依存(契約⑤)なのに srcdoc には
+	// 表示中のズームが焼き込まれているため。ssh リモートでも同じ材料が渡る(契約⑥)。
+	function currentHtmlSource(): { content: string; docUri: string } {
+		const doc = windowState.currentDocument;
+		return { content: doc?.content ?? '', docUri: doc?.uri ?? '' };
+	}
+
+	// 購読の解除があるので await を挟まない専用の onMount に分けている。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void registerPrintListener({
+			getFileType: () => printFileType,
+			getHtmlSource: currentHtmlSource,
+			onError: (err) => alert(printFailedMessage(err))
+		}).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
 	});
 
 	function handleRequestAddMark(anchor: BuiltAnchor) {
@@ -234,7 +333,7 @@
 		const selected = await open({
 			directory: true,
 			multiple: false,
-			title: 'フォルダを選択'
+			title: SELECT_FOLDER_DIALOG_TITLE
 		});
 		if (typeof selected !== 'string') return; // cancelled
 
@@ -278,7 +377,7 @@
 				if (opened.document) windowState.setDocument(opened.document);
 			},
 			onError: (err) => {
-				alert(`開けませんでした: ${err}`);
+				alert(openFailedMessage(err));
 			}
 		}).then((off) => {
 			// 登録が終わる前に破棄されていたら、届いた解除関数をその場で使う。
@@ -307,7 +406,7 @@
 	}
 
 	function reportDuplicateFailure(err: unknown) {
-		alert(`ウィンドウを複製できませんでした: ${err}`);
+		alert(duplicateWindowFailedMessage(err));
 	}
 
 	/**
@@ -483,7 +582,11 @@
 		if (!doc) return;
 		const uri = doc.uri;
 		const content = doc.content;
-		renderForDisplay(uri, content).then((result) => {
+		// 要件#36 ⑥: HTML のズームは srcdoc に焼き込むしかない(sandbox の
+		// 不透明オリジンには外から style を差せない)ので、倍率が変われば作り直す。
+		// 他の型はここで倍率を読まない = 拡大縮小しても再レンダーは走らない。
+		const zoom = detectFileType(uri) === 'html' ? zoomLevel : undefined;
+		renderForDisplay(uri, content, zoom).then((result) => {
 			windowState.setRenderResult(uri, result);
 		});
 	});
@@ -502,6 +605,61 @@
 			content: doc.content,
 		});
 	});
+
+	// --- 素材パネル(要件#40) ------------------------------------------
+	// 動画を表示しているか、しているならどの URI と版数付き src か。src は
+	// `binary_file_changed` で進む版数を含むので、動画本体が差し替わるたびに別値になる。
+	let videoDisplay = $derived.by(() => {
+		const doc = windowState.currentDocument;
+		if (!doc || windowState.renderedUri !== doc.uri || windowState.renderedVideoSrc === null) {
+			return null;
+		}
+		const version = binaryVersion.uri === doc.uri ? binaryVersion.version : 0;
+		return { uri: doc.uri, src: imageSrcWithVersion(windowState.renderedVideoSrc, version) };
+	});
+
+	// 素材パネルの対象はインライン再生する動画だけ(契約①)。mkv/avi・ssh の
+	// プレースホルダにはボタンもパネルも出さない。
+	let provenanceTarget = $derived(
+		videoDisplay && videoViewMode(videoDisplay.uri) === 'inline' ? videoDisplay : null
+	);
+
+	// 要件#40 契約④⑧: サイドカー(`<動画>.map.json`)を asset 経由で読む。版数付きの
+	// src に反応させることで、動画本体の変更検知(要件#22)に連動してマップも読み直す
+	// — map.json 単独の監視は持たない(開き直しで拾う=Q16)。
+	// `open_document` 系は使わない(窓の DocumentSession を差し替えると、表示中の動画の
+	// 監視が外れる=契約④)。
+	$effect(() => {
+		const target = provenanceTarget;
+		if (!target) {
+			provenanceLoad = null;
+			return;
+		}
+		void target.src;
+
+		let cancelled = false;
+		provenanceLoad = null;
+		void loadProvenanceMap(target.uri).then((result) => {
+			if (!cancelled) provenanceLoad = result;
+		});
+		return () => {
+			cancelled = true;
+		};
+	});
+
+	/** 再生位置の受け口。パネルが開いているときだけ VideoViewer へ渡す(契約⑪)。 */
+	function handleVideoPosition(sec: number) {
+		videoPosition = sec;
+	}
+
+	function handleVideoDuration(sec: number | null) {
+		videoDurationSec = sec;
+	}
+
+	/** 区間クリック。吸着は VideoViewer 側(フレーム索引を持っているのはあちら)。 */
+	function seekToSegment(segment: ProvenanceSegment) {
+		videoViewer?.seekToSegmentStart(segment);
+	}
 
 	// 要件#10: root・開いている文書・ツリー展開のいずれかが変わるたび、
 	// reload をまたぐスナップショットを sessionStorage へ残す。3つとも
@@ -598,14 +756,49 @@
 					<!-- videoSrc がある=動画(要件#28)。imageSrc と同じ形の分岐で、版数も
 					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
 					     mkv/avi・ssh もこの経路を通る(出し分けは VideoViewer の中) -->
-				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedVideoSrc !== null}
-					<VideoViewer
-						uri={windowState.currentDocument.uri}
-						src={imageSrcWithVersion(
-							windowState.renderedVideoSrc,
-							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
-						)}
-					/>
+				{:else if videoDisplay}
+					<!--
+						要件#40 追補1(Q31): 素材パネルは動画ペインの**下**に敷く横帯。右に置くと
+						動画の表示幅が削られるので、ビューアとパネルを縦に積む。内側の `.video-main` は
+						VideoViewer を今までどおり「行方向 flex の子」のまま置くための一枚 —— 縦積みの
+						直下だと min-height:auto が効いて動画が縮まず、帯が下へ押し出される。
+					-->
+					<div class="video-stack">
+						<div class="video-main">
+							<!--
+								要件#40: 素材パネルのトグルと、パネルが要る材料(再生位置・実尺)の
+								受け口を足す。位置は**パネルが開いているときだけ**上げる(契約⑪)。
+								区間クリックのシークはインスタンス経由で呼ぶ — 吸着に使うフレーム索引を
+								持っているのは VideoViewer の側。
+							-->
+							<VideoViewer
+								bind:this={videoViewer}
+								uri={videoDisplay.uri}
+								src={videoDisplay.src}
+								provenanceOpen={showProvenance}
+								onToggleProvenance={provenanceTarget
+									? () => (showProvenance = !showProvenance)
+									: undefined}
+								onPositionChange={showProvenance ? handleVideoPosition : undefined}
+								onDurationChange={handleVideoDuration}
+							/>
+						</div>
+						<!--
+							素材パネル本体(契約②・追補1)。`provenanceTarget` は `videoDisplay` の絞り込み
+							なので、真になり得るのはこの枝の中だけ。マーク一覧とは排他にしない —— 並びは
+							左からビューア(下に素材)・マーク一覧。
+						-->
+						{#if showProvenance && provenanceTarget}
+							<ProvenancePanel
+								videoUri={provenanceTarget.uri}
+								load={provenanceLoad}
+								position={videoPosition}
+								actualDurationSec={videoDurationSec}
+								onSeekSegment={seekToSegment}
+								onClose={() => (showProvenance = false)}
+							/>
+						{/if}
+					</div>
 					<!-- pdfSrc がある=PDF(要件#29)。videoSrc と同じ形の分岐で、版数も
 					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
 					     ssh もこの経路を通る(出し分けは PdfViewer の中) -->
@@ -629,6 +822,7 @@
 						onRequestAddMark={handleRequestAddMark}
 						onToggleMarks={() => (showMarks = !showMarks)}
 						marksOpen={showMarks}
+						zoom={zoomTarget ? zoomLevel : DEFAULT_ZOOM}
 					/>
 				{/if}
 			{:else}
@@ -664,6 +858,27 @@
 />
 
 <style>
+	/*
+	 * 動画ビューアと素材パネルの縦積み(要件#40 追補1)。行の中では今までの
+	 * VideoViewer と同じ場所を占め(`flex: 1`)、その中を上下に割る。
+	 */
+	.video-stack {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/*
+	 * 動画側。行方向のままなので VideoViewer の `flex: 1` / `min-width: 0` は
+	 * これまでどおり効き、高さは帯を引いた残りに収まる(min-height: 0 = 縮める許可)。
+	 */
+	.video-main {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+	}
+
 	/*
 	 * ペインの仕切り(要件#9)。Explorer 側の border-right が見た目の線で、
 	 * この要素は掴みやすさのための当たり判定。掴んでいる間だけ色が付く。

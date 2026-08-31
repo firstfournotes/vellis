@@ -108,12 +108,26 @@ export function planMenuOpen(
 	return { rootUri: toUri(parentPath(selected)), docUri: toUri(selected) };
 }
 
+/**
+ * ダイアログ題(要件#35 ③=英語固定)。
+ *
+ * フォルダ側は履歴選択画面のフォルダ選択(+page.svelte の pickFolderAndSetRoot)と
+ * 同じ題を出すので、定数を1つ置いて両方から参照する — 同じ文言を2箇所に書かない。
+ */
+export const OPEN_FILE_DIALOG_TITLE = 'Open File';
+export const SELECT_FOLDER_DIALOG_TITLE = 'Select Folder';
+
+/** メニュー起点の失敗を伝える文言(要件#35 ③。エラー内容はそのまま挟む)。 */
+export function openFailedMessage(err: unknown): string {
+	return `Could not open: ${err}`;
+}
+
 /** ダイアログのオプション。file / folder の違いはここだけ。 */
 const DIALOG_OPTIONS: Record<MenuOpenKind, Record<string, unknown>> = {
 	// フィルタは付けない。Vellis は Markdown 以外(テキスト=要件#2・HTML=要件#8)も
 	// 表示するので、拡張子で選べる範囲を狭めない。
-	file: { directory: false, multiple: false, title: 'ファイルを開く' },
-	folder: { directory: true, multiple: false, title: 'フォルダを選択' },
+	file: { directory: false, multiple: false, title: OPEN_FILE_DIALOG_TITLE },
+	folder: { directory: true, multiple: false, title: SELECT_FOLDER_DIALOG_TITLE },
 };
 
 /**

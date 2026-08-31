@@ -1,5 +1,6 @@
 //! Native macOS menu bar for the Vellis app.
 
+use crate::cli_install::InstallCliResult;
 use tauri::menu::{AboutMetadataBuilder, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -43,6 +44,49 @@ pub const MENU_OPEN_FOLDER_EVENT: &str = "menu_open_folder";
 /// new window (`src/lib/duplicate-window.ts`).  Name must stay in sync with
 /// `MENU_DUPLICATE_WINDOW_EVENT` there.
 pub const MENU_DUPLICATE_WINDOW_EVENT: &str = "menu_duplicate_window";
+
+/// Event emitted to the focused window when "Print…" is clicked
+/// (requirements.md #38).
+///
+/// Same shape as the Open events, and for the same reason: the paper's contents
+/// depend on which viewer is on screen — Markdown and text print the window's
+/// main frame the way they always have, while the HTML viewer needs a print
+/// window of its own (its sandboxed iframe never reaches the main frame's print
+/// output, which is what made ⌘P over an HTML file produce a blank sheet —
+/// backlog #82). The choice lives in `src/lib/print-html.ts`; name must stay in
+/// sync with `MENU_PRINT_EVENT` there.
+pub const MENU_PRINT_EVENT: &str = "menu_print";
+
+/// Stable identifiers for the View menu's zoom items (requirements.md #36).
+pub const ZOOM_IN_ITEM_ID: &str = "zoom-in";
+pub const ZOOM_OUT_ITEM_ID: &str = "zoom-out";
+pub const ACTUAL_SIZE_ITEM_ID: &str = "actual-size";
+
+/// Events emitted to the focused window when the zoom items are clicked
+/// (requirements.md #36).
+///
+/// Same shape as the Open events: the menu only says "the user asked to zoom",
+/// and the whole notion of a zoom level — its steps, its bounds, which viewers
+/// it applies to and where it is persisted — lives in the frontend
+/// (`src/lib/zoom.ts`). Names must stay in sync with the same-named constants
+/// there. Actual Size emits `menu_zoom_reset` because it resets the *zoom
+/// level*; it is not the ImageViewer's "actual size" toggle (contract ⑧).
+pub const MENU_ZOOM_IN_EVENT: &str = "menu_zoom_in";
+pub const MENU_ZOOM_OUT_EVENT: &str = "menu_zoom_out";
+pub const MENU_ZOOM_RESET_EVENT: &str = "menu_zoom_reset";
+
+/// Accelerators for the zoom items (requirements.md #36 ②).
+///
+/// Zoom In is spelled `=`, not `Plus`: tauri parses an accelerator with
+/// `s.parse::<muda::accelerator::Accelerator>().ok()` and **drops a failure
+/// silently** (`tauri::menu::normal`), and muda 0.17 has no `PLUS` key — so
+/// "CmdOrCtrl+Plus" would leave the item with no shortcut at all and no error
+/// anywhere. `acceptance_req36.rs` pins both the spelling and the fact that it
+/// parses. The constants are passed to `MenuItem::with_id` rather than inline
+/// literals so that what the test checks is what the menu registers.
+pub const ZOOM_IN_ACCELERATOR: &str = "CmdOrCtrl+=";
+pub const ZOOM_OUT_ACCELERATOR: &str = "CmdOrCtrl+-";
+pub const ACTUAL_SIZE_ACCELERATOR: &str = "CmdOrCtrl+0";
 
 /// Stable identifier for the Window submenu, so it can be found again after
 /// the menu is installed (see [`attach_windows_menu_to_nsapp`]).
@@ -196,6 +240,33 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         &[&minimize, &close],
     )?;
 
+    // View menu — the zoom items (requirements.md #36) sit at the top, the way
+    // macOS browsers arrange them, with Toggle Developer Tools kept at the
+    // bottom behind a separator. All three are enabled unconditionally
+    // (contract ⑧): the menu does not know which viewer is on screen, and a
+    // non-text viewer simply ignores the event.
+    let zoom_in_item = MenuItem::with_id(
+        app,
+        ZOOM_IN_ITEM_ID,
+        "Zoom In",
+        true,
+        Some(ZOOM_IN_ACCELERATOR),
+    )?;
+    let zoom_out_item = MenuItem::with_id(
+        app,
+        ZOOM_OUT_ITEM_ID,
+        "Zoom Out",
+        true,
+        Some(ZOOM_OUT_ACCELERATOR),
+    )?;
+    let actual_size_item = MenuItem::with_id(
+        app,
+        ACTUAL_SIZE_ITEM_ID,
+        "Actual Size",
+        true,
+        Some(ACTUAL_SIZE_ACCELERATOR),
+    )?;
+    let view_sep = PredefinedMenuItem::separator(app)?;
     let toggle_devtools = MenuItem::with_id(
         app,
         TOGGLE_DEVTOOLS_ITEM_ID,
@@ -203,7 +274,18 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         Some("CmdOrCtrl+Alt+I"),
     )?;
-    let view_menu = Submenu::with_items(app, "View", true, &[&toggle_devtools])?;
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[
+            &zoom_in_item,
+            &zoom_out_item,
+            &actual_size_item,
+            &view_sep,
+            &toggle_devtools,
+        ],
+    )?;
 
     Menu::with_items(
         app,
@@ -239,30 +321,40 @@ pub fn attach_windows_menu_to_nsapp<R: Runtime>(menu: &Menu<R>) {
 /// goes to the window manager), and a failure is treated as "not focused"
 /// rather than aborting the click.
 ///
-/// Returns `None` only when the app has no webview windows at all.
+/// Print windows (requirements.md #38) are skipped in both passes. They are
+/// webview windows, so they would otherwise be eligible, but they carry a
+/// static document instead of the app — a menu event delivered to one is a
+/// click that silently does nothing.
+///
+/// Returns `None` only when the app has no document windows at all.
 fn focused_or_first_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
-    app.webview_windows()
-        .values()
+    let windows = app.webview_windows();
+    let document_windows = || {
+        windows
+            .values()
+            .filter(|w| !crate::print::is_print_window(w.label()))
+    };
+    document_windows()
         .find(|w| w.is_focused().unwrap_or(false))
+        .or_else(|| document_windows().next())
         .cloned()
-        .or_else(|| app.webview_windows().values().next().cloned())
 }
 
-/// Handle the "Print…" menu click — opens the native OS print dialog on
-/// the focused Webview. Uses Tauri's `Webview::print()` rather than
-/// JavaScript `window.print()`: WKWebView does **not** implement the JS
-/// API on macOS (known platform limitation, see issue #24), so eval'ing
-/// `window.print()` is a silent no-op. The native call wraps each
-/// platform's correct API (NSPrintInfo on macOS, etc.). The actual
-/// formatting is handled by `@media print` in `src/styles/print.css`
-/// (issue #21).
+/// Handle the "Print…" menu click (requirements.md #38) — notify the focused
+/// window and let the frontend pick the route.
+///
+/// This used to call `window.print()` here. That prints the window's main
+/// frame, which is right for Markdown and text but produced a blank sheet for
+/// the HTML viewer, whose document lives in a sandboxed iframe that WebKit does
+/// not expand into the print output (backlog #82). Only the window knows which
+/// viewer is on screen, so the choice moved to `src/lib/print-html.ts`, exactly
+/// like the Open items and the zoom items before it.
+///
+/// Neither route lost anything: `print_current_window` calls the same
+/// `Webview::print()` on the same window for every non-HTML viewer, and HTML
+/// goes to `print_html` and a print window of its own.
 pub fn handle_print_click(app: &AppHandle<Wry>) {
-    let Some(window) = focused_or_first_window(app) else {
-        return;
-    };
-    if let Err(e) = window.print() {
-        tracing::warn!("failed to open print dialog: {}", e);
-    }
+    handle_menu_open_click(app, MENU_PRINT_EVENT);
 }
 
 /// Handle a menu click whose work belongs to the window itself
@@ -280,6 +372,11 @@ pub fn handle_print_click(app: &AppHandle<Wry>) {
 /// contents to copy (root, document, expanded directories) live only in the
 /// window, so it is the window that collects them and calls `new_window`
 /// (`src/lib/duplicate-window.ts`).
+///
+/// The zoom items (requirements.md #36) ride it too: only the window knows
+/// which viewer is showing and what the current level is, and the zoom itself
+/// is applied by the frontend (`src/lib/zoom.ts`), never by the webview's own
+/// zoom — that would scale the Explorer along with the text.
 ///
 /// Emitted with `emit_to` so only the window the user is looking at reacts;
 /// a plain `emit` would open a dialog in every window (`show_marks` in
@@ -333,38 +430,48 @@ pub fn handle_toggle_devtools_click(app: &AppHandle<Wry>) {
     }
 }
 
+/// 成功ダイアログの本文(要件#35 ③=英語固定)。作られたリンクと指し先の2行に、
+/// インストール先が PATH 上かどうかで案内か警告(追記例つき)を続ける。
+pub fn install_cli_success_body(result: &InstallCliResult) -> String {
+    let paths = format!(
+        "Installed:\n  {}\n  → {}",
+        result.target_path.display(),
+        result.source_path.display(),
+    );
+    if result.target_dir_on_path {
+        format!("{}\n\nThe `vellis` command is now available in new shells.", paths)
+    } else {
+        format!(
+            "{}\n\n⚠ {} is not on your PATH.\nAdd the following to your ~/.zshrc or similar:\n\n  export PATH=\"$HOME/.local/bin:$PATH\"",
+            paths,
+            result
+                .target_path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        )
+    }
+}
+
+/// 失敗ダイアログの本文(要件#35 ③)。`install_cli()` の Err をそのまま挟む。
+pub fn install_cli_failure_body(err: &str) -> String {
+    format!("Failed to install the CLI:\n{}", err)
+}
+
 /// Handle the "Install 'vellis' Command in PATH" menu click — runs the shared
 /// install logic and displays a native dialog with the result.
 pub fn handle_install_cli_click(app: &AppHandle<Wry>) {
     match crate::cli_install::install_cli() {
         Ok(result) => {
-            let body = if result.target_dir_on_path {
-                format!(
-                    "インストール完了:\n  {}\n  → {}\n\n新しいシェルで `vellis` が使えます。",
-                    result.target_path.display(),
-                    result.source_path.display(),
-                )
-            } else {
-                format!(
-                    "インストール完了:\n  {}\n  → {}\n\n⚠ {} は PATH に含まれていません。\n以下を ~/.zshrc などに追加してください:\n\n  export PATH=\"$HOME/.local/bin:$PATH\"",
-                    result.target_path.display(),
-                    result.source_path.display(),
-                    result
-                        .target_path
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                )
-            };
             app.dialog()
-                .message(body)
+                .message(install_cli_success_body(&result))
                 .title("Vellis CLI")
                 .kind(MessageDialogKind::Info)
                 .blocking_show();
         }
         Err(e) => {
             app.dialog()
-                .message(format!("CLI のインストールに失敗しました:\n{}", e))
+                .message(install_cli_failure_body(&e))
                 .title("Vellis CLI")
                 .kind(MessageDialogKind::Error)
                 .blocking_show();
