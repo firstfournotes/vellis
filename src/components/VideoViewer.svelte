@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { openPath } from '@tauri-apps/plugin-opener';
 	import { planOpenVideoExternally, videoViewMode } from '$lib/video-viewing';
 	import {
@@ -17,6 +17,26 @@
 		type FrameIndex,
 	} from '$lib/video-frame';
 	import { segmentStartSeconds, type ProvenanceSegment } from '$lib/video-provenance';
+	import {
+		analyzeWaveform,
+		decodeWaveformAudio,
+		extractWaveformAudio,
+		laneBoxes,
+		peakRects,
+		positionToX,
+		waveformBandNote,
+		waveformSeekTime,
+		xToSeconds,
+		type WaveformPeaks,
+		type WaveformResult,
+	} from '$lib/audio-waveform';
+	import {
+		DEFAULT_WAVEFORM_HEIGHT,
+		clampWaveformHeight,
+		dragWaveformHeight,
+		loadWaveformHeight,
+		saveWaveformHeight,
+	} from '$lib/waveform-resize';
 
 	let {
 		uri,
@@ -50,6 +70,19 @@
 	/** 連射の間隔(ms)。フレーム送りが目で追える速さ。 */
 	const REPEAT_INTERVAL_MS = 80;
 
+	/**
+	 * 波形帯の高さ(px・要件#41 契約②/要件#42)。
+	 *
+	 * 山の形が読めて、かつバーと合わせても再生面を圧迫しない高さ。振幅は上下対称に
+	 * 描くので、片側の実効は半分になる。既定は 84px(要件#42 = 旧 56px の 1.5 倍)で、
+	 * 帯の上端をドラッグして変えられる。範囲と保存の判定は `$lib/waveform-resize` の
+	 * 純関数が唯一の持ち場で、ここは「いつ呼ぶか」だけを持つ(要件#9 の幅と同じ整理)。
+	 * 初期値は既定高 — onMount で保存値に差し替わる。
+	 */
+	let waveformHeight = $state(DEFAULT_WAVEFORM_HEIGHT);
+	/** 帯の上端ハンドルを掴んでいるか。掴んでいる間だけ仕切りに色が付く。 */
+	let resizingWaveform = $state(false);
+
 	// 再生の開始に失敗した(コーデック未対応・ファイル消滅・ssh 切断)。黒画面のまま
 	// 何も起きないより、表示できないことを文字で返す(ImageViewer の要件#16 ⑧と同じ整理)。
 	let loadFailed = $state(false);
@@ -61,6 +94,12 @@
 
 	let video: HTMLVideoElement | undefined = $state();
 	let pane: HTMLDivElement | undefined = $state();
+	/**
+	 * 中央寄せされる塊(要件#43 契約①)の実体。ドラッグ開始時の自由余白
+	 * (pane の高さ − 塊の高さ)を測るためだけに持つ。
+	 */
+	let stage: HTMLDivElement | undefined = $state();
+	let controls: HTMLDivElement | undefined = $state();
 
 	/** フレーム索引。null =この動画からは取れなかった(縮退・要件#37 契約⑦)。 */
 	let frameIndex = $state<FrameIndex | null>(null);
@@ -91,11 +130,58 @@
 	 */
 	let initialSeekPending = true;
 
+	/** 解析結果。null =まだ解析していない(src が変わった直後・解析中)。 */
+	let waveform = $state<WaveformResult | null>(null);
+	let waveformAnalyzing = $state(false);
+	/**
+	 * どの `src` の波形を持っているか(要件#44 契約③のキャッシュ)。
+	 *
+	 * 版数付きの `src` が鍵なので、同じ動画を見ている間の解析は1回きり・ディスク上の
+	 * ファイルが差し替われば作り直しになる。`$state` にしないのは、これが表示ではなく
+	 * 「済んだかどうか」の控えだから(解析の起動条件に自分が入ると回り続ける)。
+	 */
+	let analyzedSrc: string | null = null;
+	let waveformCanvas: HTMLCanvasElement | undefined = $state();
+	/** 帯の実幅(px)。シークバーと同じ幅の器に置くので、これが横軸の長さになる。 */
+	let waveformWidth = $state(0);
+	/**
+	 * ドラッグ開始時のキャプチャ(要件#43 契約④)。以後の高さは
+	 * この3値と移動量だけから `dragWaveformHeight` が決める ―― 中央寄せの下では
+	 * 帯の下端が動く(伸びた分の半分だけ下がる)ので、下端やその時々の高さを
+	 * 基準にすると指と上端の対応が崩れる。
+	 */
+	let dragStart: { height: number; y: number; freeSpace: number } | null = null;
+
 	let capabilities = $derived(barCapabilities(frameIndex));
 	/** 掴んでいる間は指の位置を、離していれば再生位置を映す。 */
 	let barPosition = $derived(scrubbing ?? position);
 	/** シークバーの範囲。索引があればそちらが正で、無い動画は `<video>` の申告に従う。 */
 	let barDuration = $derived(frameIndex?.duration ?? mediaDuration);
+	/**
+	 * 再生ヘッドの x(要件#41 契約②)。横軸はシークバーと同じ 0〜`barDuration` なので、
+	 * バーのつまみと帯のヘッドは常に同じ位置を指す。
+	 */
+	let waveformHeadX = $derived(positionToX(barPosition, barDuration, waveformWidth));
+	/**
+	 * 帯に出す文言(解析中・縮退の理由)。null のときだけ波形そのものを出す。
+	 *
+	 * 判定は `waveformBandNote`(要件#45 契約③)に委ねる ―― 文言と出し分けは DOM の要らない
+	 * 純関数側に置き、ここは状態を渡すだけにする。
+	 */
+	let waveformNote = $derived(waveformBandNote(waveform, waveformAnalyzing));
+	/**
+	 * ステレオのときだけ出す L/R ラベル(追補d)。縦位置はレーンの器と同じ値から取る。
+	 * 1段(mono・縮退)と縮退表示のときは出さない ―― 段が1つならラベルは何も足さない。
+	 */
+	let waveformLaneLabels = $derived(
+		waveform?.state === 'ready' && waveform.lanes.length === 2
+			? laneBoxes(2, waveformHeight).map((box, index) => ({
+					text: index === 0 ? 'L' : 'R',
+					y: box.y,
+				}))
+			: [],
+	);
+
 	/**
 	 * 3表記(契約①)。索引が無い動画でも時間だけは出す(契約⑦=フレーム系だけが落ちる)。
 	 */
@@ -122,6 +208,11 @@
 		requestedFrame = null;
 		initialSeekPending = true;
 		stopRepeat();
+		// 別ファイル(または版数の変わった同じファイル)の波形は別物。控えごと捨てる
+		// (要件#44 契約③)。捨てた直後に次の effect が解析し直す。
+		waveform = null;
+		waveformAnalyzing = false;
+		analyzedSrc = null;
 	});
 
 	// 連射タイマーはコンポーネントより長生きしうる(ボタンを押したまま別の文書へ
@@ -151,6 +242,252 @@
 			cancelled = true;
 		};
 	});
+
+	/**
+	 * 波形の解析(要件#44 契約②③)。
+	 *
+	 * 走るのは**この `src` をまだ解析していないとき**で、開閉の条件は無い ―― 波形は
+	 * 常時表示(契約①)なので、動画を開いた時点が解析の起点になる。追跡するのは
+	 * `src` と再生形式の2つだけ:尺や `<video>` の状態まで追うと、解析中に尺が判った
+	 * 瞬間に effect が再実行され、自分が始めた解析を巻き添えで打ち切ってしまう
+	 * (要件#41 実装備考の整理)。
+	 *
+	 * 音声トラックの事前判定にはメタデータが要るが、その到達を**依存には入れない** ――
+	 * 依存に入れると上と同じ自己打ち切りが起きる。代わりに effect 内の非同期フローで
+	 * `loadedmetadata` を待ち、届いてから `detectAudioTrack` を引く(契約②)。
+	 *
+	 * 途中で打ち切られたら控えを戻す(次の実行が解析をやり直せるように)。
+	 */
+	$effect(() => {
+		const key = src;
+		const inline = mode === 'inline';
+		if (!inline || analyzedSrc === key) return;
+
+		const target = untrack(() => uri);
+		const el = untrack(() => video);
+
+		analyzedSrc = key;
+		waveform = null;
+		waveformAnalyzing = true;
+
+		let settled = false;
+		let cancelled = false;
+		/** メタデータ待ちを途中で解く手。待っていないときは undefined。 */
+		let abortWait: (() => void) | undefined;
+
+		void (async () => {
+			await waitForMetadata(el, (abort) => (abortWait = abort));
+			abortWait = undefined;
+			if (cancelled) return;
+
+			// await をまたいだ読みは依存にならない(追跡は effect の同期実行の間だけ)。
+			// untrack はその意図を明示するためのもの。
+			const seconds = untrack(() => (barDuration > 0 ? barDuration : null));
+			const result = await analyzeWaveform(target, {
+				durationSeconds: seconds,
+				hasAudioTrack: detectAudioTrack(el),
+				decode: decodeWaveformAudio,
+				extract: extractWaveformAudio,
+			});
+			settled = true;
+			if (cancelled) return;
+			waveform = result;
+			waveformAnalyzing = false;
+		})();
+
+		return () => {
+			cancelled = true;
+			abortWait?.();
+			// 結果が届く前に打ち切られたぶんは控えを戻す ―― 次の実行が解析を
+			// やり直せるように。**`waveformAnalyzing` は降ろさない**:
+			// 降ろすと「結果なし・解析中でもない」という宙ぶらりんの帯が残り得る
+			// (契約⑤の「帯は必ず何かを語る」を状態機械の側でも守る)。
+			if (!settled) analyzedSrc = null;
+		};
+	});
+
+	/**
+	 * 帯の描画(契約②)。波形が変わったときと幅・高さが変わったときだけ描き直す ――
+	 * 再生ヘッドは別の要素なので、毎フレーム canvas を描き直す必要がない。
+	 *
+	 * 高さ(要件#42)は**この effect の本体で読んで引数で渡す**。`drawWaveform` の中で
+	 * モジュールスコープの値を読む形にすると Svelte の依存追跡から漏れ、ドラッグで
+	 * 高さを変えても canvas が古い高さのまま残る。
+	 */
+	$effect(() => {
+		const canvas = waveformCanvas;
+		const result = waveform;
+		const width = waveformWidth;
+		const height = waveformHeight;
+		if (!canvas || width <= 0) return;
+		// 解析中と縮退のときは消す ―― 前の動画の波形が残ったまま「解析中」と
+		// 出ていたら、どちらの音を見ているのか判らない。
+		drawWaveform(canvas, result?.state === 'ready' ? result.lanes : null, width, height);
+	});
+
+	/**
+	 * 帯の上端ハンドルのドラッグ(要件#42)。作法は要件#9 の `.pane-divider` と同じで、
+	 * ポインタを捕捉して window への購読を持たずに済ませる。
+	 */
+	function startWaveformResize(event: PointerEvent): void {
+		const handle = event.currentTarget as HTMLElement;
+		handle.setPointerCapture(event.pointerId);
+		// 塊(stage + controls)が pane に対して余らせている高さ。中央寄せなので
+		// この余白は上下へ半分ずつ配られており、帯を伸ばせる「ただの余地」がこれだけある。
+		const block = (stage?.offsetHeight ?? 0) + (controls?.offsetHeight ?? 0);
+		const freeSpace = Math.max(0, (pane?.clientHeight ?? 0) - block);
+		dragStart = { height: waveformHeight, y: event.clientY, freeSpace };
+		resizingWaveform = true;
+		event.preventDefault(); // ドラッグ中のテキスト選択を抑止
+	}
+
+	function moveWaveformResize(event: PointerEvent): void {
+		const start = dragStart;
+		if (!resizingWaveform || !start) return;
+		// d = 上向きの移動量。開始時キャプチャからの差分だけを渡す(契約④)。
+		const d = start.y - event.clientY;
+		waveformHeight = dragWaveformHeight(start.height, d, start.freeSpace, window.innerHeight);
+	}
+
+	function endWaveformResize(event: PointerEvent): void {
+		if (!resizingWaveform) return;
+		resizingWaveform = false;
+		dragStart = null;
+		const handle = event.currentTarget as HTMLElement;
+		if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+		// 保存はドラッグ確定時のみ(要件#9 と同じ理由 ―― 途中経過を保存値にしない)。
+		saveWaveformHeight(waveformHeight);
+	}
+
+	// 保存値の復元と、ウインドウ高の変化への追従(要件#42)。起動ごと(= 新規
+	// ウインドウごと)にこの onMount が走るので、再起動にも新規ウインドウにも同じ
+	// 保存値が効く。clamp をモジュールのトップで呼ばないのは、SSR / テストで
+	// window が居ないため。
+	onMount(() => {
+		waveformHeight = loadWaveformHeight(window.innerHeight);
+		const handleWindowResize = () => {
+			// ウインドウが縮んだときは上限40%に収め直す。保存はしない ――
+			// 保存値はユーザーが選んだ高さであって、ウインドウ都合の縮小ではない。
+			waveformHeight = clampWaveformHeight(waveformHeight, window.innerHeight);
+		};
+		window.addEventListener('resize', handleWindowResize);
+		return () => window.removeEventListener('resize', handleWindowResize);
+	});
+
+	/**
+	 * この動画に音声があるか(契約⑤の事前判定)。
+	 *
+	 * **判らないときは `null`** ―― `audioTracks` はメタデータが届く前は空なので、
+	 * 早すぎる問い合わせを「音声なし」と読むと、音のある動画の波形が出なくなる。
+	 * `audioTracks` を持たない環境も同じ扱いで、その先の解析に判断を委ねる。
+	 */
+	/**
+	 * メタデータの到達を待つ(要件#44 契約②)。
+	 *
+	 * 解析 effect の依存に `<video>` の状態を入れない代わりに、非同期フローの側で
+	 * 一度だけ待つ。**待ちは必ず解ける**ようにしてある ―― 既に届いていれば即座に、
+	 * 読み込みに失敗すれば `error` で。要素そのものが居ないときも待たない
+	 * (その先の `detectAudioTrack` が null =「判らない」を返し、解析の分岐に委ねる)。
+	 *
+	 * `onAbort` には「待ちを外から解く手」を預ける ―― effect が打ち切られたときに
+	 * 購読を残さないため。
+	 */
+	function waitForMetadata(
+		el: HTMLVideoElement | undefined,
+		onAbort: (abort: () => void) => void,
+	): Promise<void> {
+		if (!el || el.readyState >= el.HAVE_METADATA) return Promise.resolve();
+		return new Promise<void>((resolve) => {
+			const done = () => {
+				el.removeEventListener('loadedmetadata', done);
+				el.removeEventListener('error', done);
+				resolve();
+			};
+			el.addEventListener('loadedmetadata', done);
+			el.addEventListener('error', done);
+			onAbort(done);
+		});
+	}
+
+	function detectAudioTrack(el: HTMLVideoElement | undefined): boolean | null {
+		if (!el || el.readyState < el.HAVE_METADATA) return null;
+		const tracks = (el as HTMLVideoElement & { audioTracks?: { length: number } }).audioTracks;
+		// 空(length 0)は「音声なし」の証拠にならない ―― WebKit は audioTracks の充填が
+		// loadedmetadata より遅れることがあり、この時点の 0 を false と読むと音のある動画が
+		// 全部 no-audio 縮退になる(2026-09-02 実機=backlog 102)。真の no-audio 判定は
+		// 抽出コマンドの応答(mov/mp4 は Rust パーサ)に委ねる ―― 契約⑤の fail-open と同じ読み。
+		if (tracks && typeof tracks.length === 'number' && tracks.length > 0) return true;
+		return null;
+	}
+
+	/**
+	 * エンベロープ帯を描く(契約②・追補d)。
+	 *
+	 * レーンの縦の器は `laneBoxes`・その中の矩形は `peakRects` が決め、ここは器の
+	 * 高さで矩形を作って `y` だけずらして塗る ―― レーンが1本でも2本でも同じ道を
+	 * 通り、帯の総高は変わらない。
+	 *
+	 * 色はテーマ変数を CSS 側で canvas に載せ、その計算値を読む(`color` が波形・
+	 * `--color-border` が区切り線)―― canvas の中身はテーマの切り替えに自動では
+	 * 追従しないので、描き直しのたびに現在の色を引き直す。
+	 */
+	function drawWaveform(
+		canvas: HTMLCanvasElement,
+		lanes: WaveformPeaks[] | null,
+		width: number,
+		height: number,
+	): void {
+		const ratio = window.devicePixelRatio || 1;
+		canvas.width = Math.max(1, Math.round(width * ratio));
+		canvas.height = Math.max(1, Math.round(height * ratio));
+
+		const ctx = canvas.getContext('2d');
+		if (!ctx) return;
+		ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+		ctx.clearRect(0, 0, width, height);
+		if (!lanes || lanes.length === 0) return;
+
+		const style = getComputedStyle(canvas);
+		const waveColor = style.color;
+		const dividerColor = style.getPropertyValue('--color-border').trim() || waveColor;
+
+		const boxes = laneBoxes(lanes.length, height);
+		for (let i = 0; i < boxes.length; i++) {
+			const box = boxes[i];
+			ctx.fillStyle = waveColor;
+			for (const rect of peakRects(lanes[i], width, box.h)) {
+				// バケットが画素より細かいときでも隙間を作らない。無音(高さ0)も
+				// 中央線として1px 残す — 「音が無い区間」も形の一部。
+				ctx.fillRect(rect.x, box.y + rect.y, Math.max(rect.w, 1), Math.max(rect.h, 1));
+			}
+			// レーンの境目に細い線を1本。L と R が地続きに見えると、上下 どちらの
+			// 山を見ているのか判らなくなる。
+			if (i > 0) {
+				ctx.fillStyle = dividerColor;
+				ctx.fillRect(0, box.y, width, 1);
+			}
+		}
+	}
+
+	/**
+	 * 波形クリックでシーク(契約⑥)。跳び先は `waveformSeekTime` ―― 索引があれば
+	 * 要件#37 の吸着経路を通るので、シークバーを離したときと同じフレームに着く。
+	 * 控え(`requestedFrame`)と初期シークの扱いは `onScrubCommit` と同じ形。
+	 */
+	function onWaveformClick(event: MouseEvent & { currentTarget: HTMLCanvasElement }): void {
+		const el = video;
+		if (!el || barDuration <= 0) return;
+
+		const bounds = event.currentTarget.getBoundingClientRect();
+		const x = event.clientX - bounds.left;
+
+		initialSeekPending = false;
+		const index = frameIndex;
+		requestedFrame = index
+			? nearestFrame(index, xToSeconds(x, bounds.width, barDuration))
+			: null;
+		el.currentTime = waveformSeekTime(x, bounds.width, barDuration, index);
+	}
 
 	/**
 	 * 先頭フレームを静止表示させる初期シーク(要件#39 契約①③)。
@@ -415,6 +752,10 @@
 				素材
 			</button>
 		{/if}
+		<!--
+			波形のトグルは要件#44 で廃止 ―― 帯は常時表示で、音が無いことも読めない
+			ことも帯そのものが言う(押して初めて出るものではない)。
+		-->
 	</header>
 
 	<!--
@@ -436,7 +777,7 @@
 		onkeydown={onKeyDown}
 		onpointerdown={() => pane?.focus()}
 	>
-		<div class="video-stage">
+		<div class="video-stage" bind:this={stage}>
 			{#if mode === 'inline' && !loadFailed}
 				<!--
 					src が変われば(別ファイル・ディスク上の変更による版数更新)プレーヤーごと
@@ -494,7 +835,65 @@
 				自作コントロールバー(契約⑤)。音量スライダー・フルスクリーン・PiP・
 				AirPlay は置かない — 編集の下見に要るのは位置決めだけ。
 			-->
-			<div class="video-controls">
+			<div class="video-controls" bind:this={controls}>
+				<!--
+					エンベロープ帯(要件#41 契約②)。シークバーと同じ器(`.video-controls`
+					の内側)に同じ幅で置くので、横軸は自然に一致する。再生ヘッドは canvas
+					の外の要素で、位置だけを `translateX` で動かす ―― 波形そのものは
+					位置が変わるたびに描き直す必要がない。
+
+					要件#44 で**常時表示** ―― 帯もハンドルも条件なしで置く。中身が
+					まだ無い間は「解析中」の文言が入るので、無地の帯にはならない。
+				-->
+				<!--
+					帯の上端の仕切り(要件#42)。ドラッグ専用のハンドルで、既定高へ戻す
+					手段(ダブルクリック等)は設けない ―― 要件#9 の `.pane-divider` と
+					同じ整理を、縦向きに写したもの。
+				-->
+				<div
+					class="waveform-divider"
+					class:dragging={resizingWaveform}
+					role="separator"
+					aria-orientation="horizontal"
+					aria-label="波形の高さを変更"
+					title="ドラッグで波形の高さを変更"
+					onpointerdown={startWaveformResize}
+					onpointermove={moveWaveformResize}
+					onpointerup={endWaveformResize}
+					onpointercancel={endWaveformResize}
+				></div>
+				<div
+					class="video-waveform"
+					style="height: {waveformHeight}px"
+					bind:clientWidth={waveformWidth}
+				>
+					<!--
+						`bind:this` は描画 effect の生命線 ―― これが無いと canvas は
+						永遠に undefined で、解析は成功しているのに帯だけが無地になる
+						(2026-09-01 実機不具合)。VideoViewer.wiring.test.ts が
+						`getContext('2d')` の呼び出しでこの結線を見張っている。
+					-->
+					<canvas
+						class="waveform-canvas"
+						bind:this={waveformCanvas}
+						aria-label="音声波形(クリックでその位置へシーク)"
+						onclick={onWaveformClick}
+					></canvas>
+					{#if waveformNote}
+						<span class="waveform-note">{waveformNote}</span>
+					{:else}
+						<!--
+							ステレオの L/R ラベル(追補d)。レーンの器は laneBoxes が
+							決めるので、ラベルの縦位置も同じ値から取る(canvas の中に
+							焼き込まないのは、テーマ色と文字の描画を DOM に任せるため)。
+						-->
+						{#each waveformLaneLabels as label (label.text)}
+							<span class="waveform-lane-label" style="top: {label.y}px">{label.text}</span>
+						{/each}
+						<div class="waveform-head" style="transform: translateX({waveformHeadX}px)"></div>
+					{/if}
+				</div>
+
 				<input
 					class="video-seek"
 					type="range"
@@ -643,12 +1042,19 @@
 		white-space: nowrap;
 	}
 
-	/* 再生面とバーをまとめた操作単位。フォーカスリングはこの枠に出す。 */
+	/*
+	 * 再生面とバーをまとめた操作単位。フォーカスリングはこの枠に出す。
+	 *
+	 * `justify-content: center`(要件#43 契約①)で映像と操作部を**ひと塊**として
+	 * 縦中央へ置く ―― 余った高さは塊の上下へ均等に配られ、波形帯は画面最下部ではなく
+	 * 映像のすぐ下に見える。
+	 */
 	.video-pane {
 		flex: 1;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
+		justify-content: center;
 		overflow: hidden;
 		outline-offset: -2px;
 	}
@@ -656,25 +1062,37 @@
 	/*
 	 * 再生面。背景はテーマの単色(要件#16 ⑤の画像と同じ考え)で、レターボックスの
 	 * 帯もこの色になる。
+	 *
+	 * `flex: 0 1 auto`(要件#43 契約②)―― 中身の高さで立ち、pane に収まらないときだけ
+	 * 縮む。`flex: 1` で pane を埋めていた頃と違い、塊が pane より低ければそのぶんが
+	 * 中央寄せの余白になる。
 	 */
 	.video-stage {
-		flex: 1;
+		flex: 0 1 auto;
 		min-height: 0;
 		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
 		overflow: hidden;
 		padding: 16px;
 		background-color: var(--color-bg-primary);
 	}
 
-	/* 収まらない動画だけを縮める。小さい動画は原寸のまま(引き伸ばさない)。 */
+	/*
+	 * 収まらない動画だけを縮める。小さい動画は原寸のまま(引き伸ばさない)。
+	 *
+	 * 縮退は %高さではなく flex-shrink で表す(要件#43 契約②)―― ウインドウが低いとき
+	 * 縮むのは映像だけで、操作部(固定高)は削られない。`min-height: 0` が無いと flex は
+	 * 中身の最小寸法より下に縮めず、塊が pane からはみ出す。
+	 */
 	.video {
-		margin: auto;
+		flex: 0 1 auto;
+		min-height: 0;
 		max-width: 100%;
-		max-height: 100%;
 	}
 
 	.video-placeholder {
-		margin: auto;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -696,6 +1114,85 @@
 		padding: 8px 12px 10px;
 		border-top: 1px solid var(--color-border);
 		background-color: var(--color-bg-primary);
+	}
+
+	/*
+	 * 波形帯。シークバーの直上・同じ幅(要件#41 契約②)。`color` は canvas の塗り色を
+	 * テーマから拾うための置き場で、文字には使わない(描画側が getComputedStyle で読む)。
+	 */
+	/*
+	 * 帯の上端の掴みしろ(要件#42)。見た目の線は帯の border-top が持ち、この要素は
+	 * 掴みやすさのための当たり判定。掴んでいる間だけ色が付く(`.pane-divider` と同形)。
+	 */
+	.waveform-divider {
+		flex-shrink: 0;
+		height: 6px;
+		margin-bottom: -2px; /* 帯の枠線をまたいで置き、線の見た目を動かさない */
+		cursor: row-resize;
+		background-color: transparent;
+		touch-action: none; /* ドラッグがスクロールに取られないように */
+	}
+
+	.waveform-divider:hover,
+	.waveform-divider.dragging {
+		background-color: var(--color-border);
+	}
+
+	.video-waveform {
+		position: relative;
+		width: 100%;
+		flex-shrink: 0;
+		overflow: hidden;
+		border: 1px solid var(--color-border);
+		border-radius: 4px;
+		background-color: var(--color-bg-secondary);
+		color: var(--color-text-secondary);
+	}
+
+	.waveform-canvas {
+		display: block;
+		width: 100%;
+		height: 100%;
+		cursor: pointer;
+	}
+
+	/* 再生ヘッド。左端を基準に translateX だけで動かす(再描画を伴わない)。 */
+	.waveform-head {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: 1px;
+		height: 100%;
+		background-color: var(--color-text-primary);
+		pointer-events: none;
+	}
+
+	/*
+	 * L/R ラベル(追補d)。波形の上に小さく重ねるので、地の色を敷いて読めるようにする。
+	 * クリックはラベルを素通りして帯へ届く(帯全域でシークできる=契約⑥)。
+	 */
+	.waveform-lane-label {
+		position: absolute;
+		left: 3px;
+		padding: 1px 3px;
+		border-radius: 2px;
+		font-size: 10px;
+		line-height: 1.2;
+		color: var(--color-text-secondary);
+		background-color: var(--color-bg-secondary);
+		pointer-events: none;
+	}
+
+	/* 縮退の理由と解析中の表示。波形の代わりに帯の中央へ出す(契約⑤)。 */
+	.waveform-note {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 12px;
+		color: var(--color-text-secondary);
+		pointer-events: none;
 	}
 
 	.video-seek {

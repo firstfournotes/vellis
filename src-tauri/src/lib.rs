@@ -1,4 +1,5 @@
 pub mod annotation;
+pub mod audio_extract;
 pub mod channel;
 pub mod cli;
 pub mod features;
@@ -42,6 +43,7 @@ use commands::list::list_dir;
 use commands::print::{print_current_window, print_html};
 use commands::root::set_root;
 use commands::video::get_video_frame_index;
+use commands::waveform::extract_waveform_audio;
 use commands::window::new_window;
 use commands::AppState;
 use fs::registry::FileProviderRegistry;
@@ -168,6 +170,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         get_build_info,
         list_history,
         get_video_frame_index,
+        extract_waveform_audio,
         print_current_window,
         print_html,
         commands::test_helpers::__test_list_windows,
@@ -194,6 +197,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         get_build_info,
         list_history,
         get_video_frame_index,
+        extract_waveform_audio,
         print_current_window,
         print_html,
     ]);

@@ -1,6 +1,8 @@
-import { defineConfig, type Plugin } from 'vitest/config';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { svelteTesting } from '@testing-library/svelte/vite';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { configDefaults, defineConfig, type Plugin } from 'vitest/config';
 
 /**
  * テストファイル内の `import.meta.url` を、そのファイルの実体を指す URL 文字列に
@@ -32,28 +34,67 @@ function nodeImportMetaUrlInTests(): Plugin {
 	};
 }
 
+const alias = {
+	$lib: path.resolve(__dirname, 'src/lib'),
+};
+
+/**
+ * Node 25(.nvmrc / CI の NODE_VERSION が指す版)は Web Storage を組み込みで
+ * 持ち、`globalThis.localStorage` を自前で定義する。vitest の jsdom 環境は
+ * 「既に global にある名前」を上書きしない(getWindowKeys の
+ * `if (k in global) return keysArray.includes(k)` — localStorage は vitest の
+ * 既知キー一覧に無い)ため、jsdom の Storage が注入されず、テストからは
+ * Node 側の非機能スタブが見える(`--localstorage-file` 未指定のため
+ * setItem / getItem / clear すら生えていない)。組み込み Web Storage を切って
+ * jsdom の localStorage を使わせる。
+ *
+ * 置き場所に注意: vitest 4 の execArgv は test 直下(poolOptions.forks の下では
+ * 読まれない)。ワーカー(既定 pool = forks)の node 起動引数として渡る。
+ */
+const workerExecArgv = ['--no-experimental-webstorage'];
+
+/**
+ * プロジェクト分割(要件#41 第2周)。
+ *
+ * コンポーネントのスモーク(*.wiring.test.ts)だけが svelte プラグインと
+ * `resolve.conditions: ['browser']` を要る(Svelte 5 の `mount` は browser 条件の
+ * ビルドにしか無い)。この条件は **全モジュールの解決を変える**ので、既存の
+ * 純関数テストに波及させない ―― unit プロジェクトは従来のルート設定そのまま・
+ * component プロジェクトだけに svelte 系を足す、の2分割にする。
+ */
 export default defineConfig({
-	plugins: [nodeImportMetaUrlInTests()],
-	resolve: {
-		alias: {
-			$lib: path.resolve(__dirname, 'src/lib'),
-		},
-	},
 	test: {
-		environment: 'jsdom',
-		globals: false,
-		include: ['src/**/*.{test,spec}.ts'],
-		// Node 25(.nvmrc / CI の NODE_VERSION が指す版)は Web Storage を組み込みで
-		// 持ち、`globalThis.localStorage` を自前で定義する。vitest の jsdom 環境は
-		// 「既に global にある名前」を上書きしない(getWindowKeys の
-		// `if (k in global) return keysArray.includes(k)` — localStorage は vitest の
-		// 既知キー一覧に無い)ため、jsdom の Storage が注入されず、テストからは
-		// Node 側の非機能スタブが見える(`--localstorage-file` 未指定のため
-		// setItem / getItem / clear すら生えていない)。組み込み Web Storage を切って
-		// jsdom の localStorage を使わせる。
-		//
-		// 置き場所に注意: vitest 4 の execArgv は test 直下(poolOptions.forks の下では
-		// 読まれない)。ワーカー(既定 pool = forks)の node 起動引数として渡る。
-		execArgv: ['--no-experimental-webstorage'],
+		projects: [
+			{
+				// ── unit: 既存の純関数テスト(設定は分割前のルート設定と同一)──
+				plugins: [nodeImportMetaUrlInTests()],
+				resolve: {
+					alias,
+				},
+				test: {
+					name: 'unit',
+					environment: 'jsdom',
+					globals: false,
+					include: ['src/**/*.{test,spec}.ts'],
+					exclude: [...configDefaults.exclude, 'src/**/*.wiring.test.ts'],
+					execArgv: workerExecArgv,
+				},
+			},
+			{
+				// ── component: Svelte コンポーネントの配線スモーク(*.wiring.test.ts のみ)──
+				plugins: [svelte(), svelteTesting()],
+				resolve: {
+					alias,
+					conditions: ['browser'],
+				},
+				test: {
+					name: 'component',
+					environment: 'jsdom',
+					globals: false,
+					include: ['src/**/*.wiring.test.ts'],
+					execArgv: workerExecArgv,
+				},
+			},
+		],
 	},
 });

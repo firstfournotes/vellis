@@ -11,6 +11,7 @@ pub mod root;
 #[cfg(feature = "webdriver")]
 pub mod test_helpers;
 pub mod video;
+pub mod waveform;
 pub mod window;
 
 use std::sync::{Arc, Mutex as StdMutex};
