@@ -18,15 +18,13 @@
 	} from '$lib/video-frame';
 	import { segmentStartSeconds, type ProvenanceSegment } from '$lib/video-provenance';
 	import {
+		WAVEFORM_BUCKETS,
 		analyzeWaveform,
 		decodeWaveformAudio,
 		extractWaveformAudio,
 		laneBoxes,
 		peakRects,
-		positionToX,
 		waveformBandNote,
-		waveformSeekTime,
-		xToSeconds,
 		type WaveformPeaks,
 		type WaveformResult,
 	} from '$lib/audio-waveform';
@@ -37,6 +35,21 @@
 		loadWaveformHeight,
 		saveWaveformHeight,
 	} from '$lib/waveform-resize';
+	import {
+		followWaveformWindow,
+		normalizeWheelDelta,
+		scrollWaveformWindow,
+		waveformMinWindowSeconds,
+		waveformWindowIndicator,
+		waveformWindowSeconds,
+		waveformZoomHeadX,
+		waveformZoomSeekTime,
+		wheelZoomFactor,
+		windowPeaks,
+		windowPeaksFromCoarse,
+		windowXToTime,
+		zoomWaveformAtAnchor,
+	} from '$lib/waveform-zoom';
 
 	let {
 		uri,
@@ -145,6 +158,21 @@
 	/** 帯の実幅(px)。シークバーと同じ幅の器に置くので、これが横軸の長さになる。 */
 	let waveformWidth = $state(0);
 	/**
+	 * シークバーの器の実幅(px・要件#47 契約③)。窓指標の left/width をここへ写す。
+	 * 帯の幅とは別に測る ―― 見た目は同じ幅でも、指標はバー側の座標に乗るものだから。
+	 */
+	let seekWidth = $state(0);
+	/**
+	 * 波形の時間軸の倍率(要件#47 契約①②)。1 =全尺が帯幅に収まる状態。
+	 *
+	 * `windowStart` と対で「いま帯が映している窓」を表す。**`localStorage` には保存
+	 * しない** ―― 帯の高さ(要件#42)と違い、窓は特定のファイルの中の位置であって
+	 * 好みの設定ではない。`src` が変われば等倍・先頭へ戻る(契約①)。
+	 */
+	let waveformZoom = $state(1);
+	/** 窓の開始時刻(秒)。倍率 1 のときは常に 0。 */
+	let waveformWindowStart = $state(0);
+	/**
 	 * ドラッグ開始時のキャプチャ(要件#43 契約④)。以後の高さは
 	 * この3値と移動量だけから `dragWaveformHeight` が決める ―― 中央寄せの下では
 	 * 帯の下端が動く(伸びた分の半分だけ下がる)ので、下端やその時々の高さを
@@ -158,10 +186,36 @@
 	/** シークバーの範囲。索引があればそちらが正で、無い動画は `<video>` の申告に従う。 */
 	let barDuration = $derived(frameIndex?.duration ?? mediaDuration);
 	/**
-	 * 再生ヘッドの x(要件#41 契約②)。横軸はシークバーと同じ 0〜`barDuration` なので、
-	 * バーのつまみと帯のヘッドは常に同じ位置を指す。
+	 * いま帯が映している窓の実尺(秒・要件#47 契約②)。倍率 1 なら全尺そのもので、
+	 * このとき横軸はシークバーと一致する(要件#41 契約②の改訂=「倍率 1 のとき一致」)。
 	 */
-	let waveformHeadX = $derived(positionToX(barPosition, barDuration, waveformWidth));
+	let waveformSeconds = $derived(waveformWindowSeconds(waveformZoom, barDuration));
+	/**
+	 * この素材で許される窓の下限(秒・要件#47 契約②⑦)。生標本を捨てた素材
+	 * (保持上限超過)では粗レベルの刻みが底になり、上限倍率がそのぶん下がる。
+	 */
+	let waveformMinWindow = $derived(
+		waveformMinWindowSeconds(
+			waveform?.state === 'ready' && !waveform.samples,
+			waveform?.state === 'ready' ? (waveform.sampleRate ?? 0) : 0,
+		),
+	);
+	/**
+	 * 再生ヘッドの x、または `null` =窓の外(要件#47 契約⑥)。
+	 *
+	 * 窓の外を端へ clamp すると居ない場所にヘッドが立つので、そのときは描かない。
+	 * 倍率 1 では窓 = 全尺なので、従来どおり `barDuration` の線形写像になる。
+	 */
+	let waveformHeadX = $derived(
+		waveformZoomHeadX(barPosition, waveformWindowStart, waveformSeconds, waveformWidth),
+	);
+	/**
+	 * シークバーへ重ねる窓指標(要件#47 契約③・案B)。シークバーは全尺のまま据え置き、
+	 * 「全体のどこを見ているか」だけをこの枠が語る。倍率 1 では `null` =出さない。
+	 */
+	let waveformIndicator = $derived(
+		waveformWindowIndicator(waveformWindowStart, waveformSeconds, barDuration, seekWidth),
+	);
 	/**
 	 * 帯に出す文言(解析中・縮退の理由)。null のときだけ波形そのものを出す。
 	 *
@@ -213,6 +267,11 @@
 		waveform = null;
 		waveformAnalyzing = false;
 		analyzedSrc = null;
+		// 窓は特定の素材の中の位置なので、素材が変われば意味を失う(要件#47 契約①)。
+		// 等倍・先頭へ戻す ―― 前の動画の 40 倍の窓を次の動画に当てても、そこに何がある
+		// かは誰にも判らない。
+		waveformZoom = 1;
+		waveformWindowStart = 0;
 	});
 
 	// 連射タイマーはコンポーネントより長生きしうる(ボタンを押したまま別の文書へ
@@ -312,17 +371,23 @@
 	 *
 	 * 高さ(要件#42)は**この effect の本体で読んで引数で渡す**。`drawWaveform` の中で
 	 * モジュールスコープの値を読む形にすると Svelte の依存追跡から漏れ、ドラッグで
-	 * 高さを変えても canvas が古い高さのまま残る。
+	 * 高さを変えても canvas が古い高さのまま残る。倍率と窓(要件#47)も同じ理由で
+	 * ここで読む ―― canvas の実寸は据え置きのまま中身だけを描き替えるので(契約⑨)、
+	 * この effect が走り直すことが「拡大が画面に出る」唯一の経路になる。
 	 */
 	$effect(() => {
 		const canvas = waveformCanvas;
 		const result = waveform;
 		const width = waveformWidth;
 		const height = waveformHeight;
+		const zoom = waveformZoom;
+		const start = waveformWindowStart;
+		const seconds = waveformSeconds;
 		if (!canvas || width <= 0) return;
 		// 解析中と縮退のときは消す ―― 前の動画の波形が残ったまま「解析中」と
 		// 出ていたら、どちらの音を見ているのか判らない。
-		drawWaveform(canvas, result?.state === 'ready' ? result.lanes : null, width, height);
+		const lanes = result?.state === 'ready' ? windowLanes(result, zoom, start, seconds) : null;
+		drawWaveform(canvas, lanes, width, height);
 	});
 
 	/**
@@ -421,6 +486,133 @@
 	}
 
 	/**
+	 * いま描くべきレーンの包絡(要件#47 契約⑦⑨)。
+	 *
+	 * **等倍のときは解析済みの `lanes` をそのまま返す** ―― 再バケット化を通しても同じ絵に
+	 * なる(`windowPeaks` の等価性契約)が、通さないほうが速く、「拡大機能を足しても
+	 * 等倍の帯は一切変わらない」が構造で判る。
+	 *
+	 * 拡大時は生標本から窓を切り直す。生標本を持たない素材(保持上限超過=契約⑦の縮退)は
+	 * 粗レベルから作る ―― 包絡はやや太る(生由来を包含する)が、**山を実際より小さく
+	 * 見せない**向きの誤差なので、カット位置を探す用途では嘘にならない。材料がどちらも
+	 * 無ければ等倍の絵へ倒す(fail-open=帯が空白になるより古い倍率の絵のほうがまだ読める)。
+	 */
+	function windowLanes(
+		result: WaveformResult & { state: 'ready' },
+		zoom: number,
+		start: number,
+		seconds: number,
+	): WaveformPeaks[] {
+		if (zoom <= 1 || !(seconds > 0)) return result.lanes;
+
+		const rate = result.sampleRate ?? 0;
+		if (!(rate > 0)) return result.lanes;
+
+		const samples = result.samples;
+		if (samples) {
+			return samples.map((lane) => windowPeaks(lane, rate, start, seconds, WAVEFORM_BUCKETS));
+		}
+		const coarse = result.coarse;
+		if (coarse) {
+			return coarse.map((lane) =>
+				windowPeaksFromCoarse(lane, rate, start, seconds, WAVEFORM_BUCKETS),
+			);
+		}
+		return result.lanes;
+	}
+
+	/**
+	 * 倍率を変える(要件#47 契約④)。判定は `zoomWaveformAtAnchor` が全部持ち、ここは
+	 * 「どこを固定点にするか」だけを決める。
+	 *
+	 * ボタン(×2 / ÷2 / 等倍)のアンカーは**帯の中央** ―― 押した指はボタンの上にあって
+	 * 帯の上にないので、いま真ん中に見えているものが真ん中に残るのが素直。ホイールの
+	 * アンカーはポインタ位置(呼び出し側が渡す)。
+	 */
+	function applyWaveformZoom(nextZoom: number, anchorX: number): void {
+		const next = zoomWaveformAtAnchor(
+			waveformZoom,
+			waveformWindowStart,
+			nextZoom,
+			anchorX,
+			waveformWidth,
+			barDuration,
+			waveformMinWindow,
+		);
+		waveformZoom = next.zoom;
+		waveformWindowStart = next.windowStart;
+	}
+
+	/** ×2 / ÷2 / 等倍ボタン(契約④)。倍率の上下限と窓の解き直しは純関数側の仕事。 */
+	function zoomWaveformBy(factor: number): void {
+		applyWaveformZoom(waveformZoom * factor, waveformWidth / 2);
+	}
+
+	function resetWaveformZoom(): void {
+		applyWaveformZoom(1, waveformWidth / 2);
+	}
+
+	/**
+	 * 帯の上のホイール(要件#47 契約④)。
+	 *
+	 * - **Option+ホイール** = 倍率(追補a=2026-09-03 由谷指示。ctrl+ホイールは macOS の
+	 *   画面拡大に取られるため使わない)。アンカーはポインタの x ―― 摘まんだところが
+	 *   動かないのが体感の要
+	 * - **ctrl+ホイール** = 何もしない(`preventDefault` もせず OS の画面拡大に譲る)。
+	 *   トラックパッドのピンチは WebKit では ctrl+wheel として届くため v1 では拾わない(v2 候補)
+	 * - **Shift+ホイール / 横成分** = 窓の横送り
+	 *
+	 * 幅は `bind:clientWidth` で測った帯幅を使う。`getBoundingClientRect().width` は
+	 * ここでは使えない ―― x の起点(`rect.left`)だけをそこから取る。
+	 *
+	 * `preventDefault` は扱った操作にだけ掛ける(Option+ホイールは倍率変更そのもの、
+	 * 横成分は履歴の戻る/進むを止める)。ctrl+ホイールと素の縦回しには触らない。
+	 */
+	function onWaveformWheel(event: WheelEvent & { currentTarget: HTMLElement }): void {
+		if (barDuration <= 0) return;
+		if (event.ctrlKey) return;
+
+		if (event.altKey) {
+			event.preventDefault();
+			const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
+			const bounds = event.currentTarget.getBoundingClientRect();
+			applyWaveformZoom(waveformZoom * wheelZoomFactor(delta), event.clientX - bounds.left);
+			return;
+		}
+
+		// Shift+ホイールは環境によって横成分に載る場合と縦成分のままの場合がある
+		// (WebKit は前者・そうでない環境もある)ので、両方を横送りとして読む。
+		const raw = event.shiftKey && event.deltaX === 0 ? event.deltaY : event.deltaX;
+		if (raw === 0) return;
+
+		event.preventDefault();
+		waveformWindowStart = scrollWaveformWindow(
+			waveformWindowStart,
+			waveformSeconds,
+			barDuration,
+			normalizeWheelDelta(raw, event.deltaMode),
+			waveformWidth,
+		);
+	}
+
+	/**
+	 * 再生位置に窓を追従させる(要件#47 契約⑥)。
+	 *
+	 * 窓の中に居る間は動かさない ―― 毎フレーム窓が流れると波形の形が読めない。外へ
+	 * 出た瞬間だけ送る。等倍のときは窓の概念が無いので何もしない。追従のオン/オフ UI は
+	 * v1 では設けない(契約⑥)。
+	 */
+	function followWaveform(seconds: number): void {
+		if (waveformZoom <= 1) return;
+		waveformWindowStart = followWaveformWindow(
+			seconds,
+			waveformWindowStart,
+			waveformSeconds,
+			barDuration,
+		);
+	}
+
+	/**
 	 * エンベロープ帯を描く(契約②・追補d)。
 	 *
 	 * レーンの縦の器は `laneBoxes`・その中の矩形は `peakRects` が決め、ここは器の
@@ -470,8 +662,14 @@
 	}
 
 	/**
-	 * 波形クリックでシーク(契約⑥)。跳び先は `waveformSeekTime` ―― 索引があれば
-	 * 要件#37 の吸着経路を通るので、シークバーを離したときと同じフレームに着く。
+	 * 波形クリックでシーク(要件#41 契約⑥・要件#47 契約⑤)。
+	 *
+	 * 跳び先は `waveformZoomSeekTime` ―― 窓と倍率を通して時刻を出したあとは要件#37 の
+	 * 吸着経路(`nearestFrame` → `seekTimeForFrame`)なので、拡大していてもシークバーを
+	 * 離したときと同じフレームに着く。**等倍では従来の `waveformSeekTime` と完全に一致
+	 * する**(窓 = 全尺のときの等式契約)ので、拡大機能を足しても等倍の着地は動かない。
+	 * 映像が一緒に動くのは `currentTime` 代入の既存経路のまま(追加実装なし)。
+	 *
 	 * 控え(`requestedFrame`)と初期シークの扱いは `onScrubCommit` と同じ形。
 	 */
 	function onWaveformClick(event: MouseEvent & { currentTarget: HTMLCanvasElement }): void {
@@ -480,13 +678,17 @@
 
 		const bounds = event.currentTarget.getBoundingClientRect();
 		const x = event.clientX - bounds.left;
+		const start = waveformWindowStart;
+		const seconds = waveformSeconds;
 
 		initialSeekPending = false;
 		const index = frameIndex;
 		requestedFrame = index
-			? nearestFrame(index, xToSeconds(x, bounds.width, barDuration))
+			? nearestFrame(index, windowXToTime(x, bounds.width, start, seconds))
 			: null;
-		el.currentTime = waveformSeekTime(x, bounds.width, barDuration, index);
+		el.currentTime = waveformZoomSeekTime(x, bounds.width, start, seconds, index);
+		// クリックで窓の外へ跳んだときも窓が付いていく(契約⑥の追従規則は前後どちらも同じ)。
+		followWaveform(el.currentTime);
 	}
 
 	/**
@@ -600,6 +802,8 @@
 	function report(mediaTime: number): void {
 		position = mediaTime;
 		onPositionChange?.(mediaTime);
+		// 拡大中に再生が窓の外へ出たら窓を送る(要件#47 契約⑥)。
+		followWaveform(mediaTime);
 		if (
 			requestedFrame !== null &&
 			frameIndex &&
@@ -862,10 +1066,22 @@
 					onpointerup={endWaveformResize}
 					onpointercancel={endWaveformResize}
 				></div>
+				<!--
+					帯の上のホイールで拡大縮小と横送り(要件#47 契約④)。キーボード操作は
+					**設けない** ―― ⌘+/− は要件#36 のビューアズームと衝突し、ネイティブ
+					メニューのアクセラレータは WebView へ届かない(2026-09-03 由谷決定)。
+					拡大縮小の代わりの手は下の3ボタン。
+
+					`wheel` はここでしか受けないので、a11y 検査の「対話要素でない要素の
+					イベント」だけ黙らせる(帯そのものはクリックでシークできる面で、
+					その経路は canvas 側が持つ)。
+				-->
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 				<div
 					class="video-waveform"
 					style="height: {waveformHeight}px"
 					bind:clientWidth={waveformWidth}
+					onwheel={onWaveformWheel}
 				>
 					<!--
 						`bind:this` は描画 effect の生命線 ―― これが無いと canvas は
@@ -890,22 +1106,48 @@
 						{#each waveformLaneLabels as label (label.text)}
 							<span class="waveform-lane-label" style="top: {label.y}px">{label.text}</span>
 						{/each}
-						<div class="waveform-head" style="transform: translateX({waveformHeadX}px)"></div>
+						<!--
+							再生ヘッドは窓の中に居るときだけ(要件#47 契約⑥)。窓の外を端へ
+							clamp して描くと、居ない場所にヘッドが立つ ―― 拡大中は窓の外が
+							大半なので、その嘘は読み手を確実に迷わせる。
+						-->
+						{#if waveformHeadX !== null}
+							<div class="waveform-head" style="transform: translateX({waveformHeadX}px)"></div>
+						{/if}
 					{/if}
 				</div>
 
-				<input
-					class="video-seek"
-					type="range"
-					min="0"
-					max={barDuration}
-					step="0.001"
-					value={barPosition}
-					disabled={barDuration <= 0}
-					aria-label="再生位置"
-					oninput={onScrubInput}
-					onchange={onScrubCommit}
-				/>
+				<!--
+					シークバーは**全尺のまま据え置き**(要件#47 契約③=案B)。拡大しても
+					バーの目盛りは動かず、帯だけが窓を映す ―― 両方が一緒に伸び縮みすると
+					「全体のどこを見ているか」を語るものが無くなる。その役目をこの器に
+					重ねた窓指標が持つ。
+				-->
+				<div class="video-seek-track" bind:clientWidth={seekWidth}>
+					<input
+						class="video-seek"
+						type="range"
+						min="0"
+						max={barDuration}
+						step="0.001"
+						value={barPosition}
+						disabled={barDuration <= 0}
+						aria-label="再生位置"
+						oninput={onScrubInput}
+						onchange={onScrubCommit}
+					/>
+					{#if waveformIndicator}
+						<!--
+							窓指標。`pointer-events: none` でつまみの操作を妨げない(契約③)。
+							倍率 1 では `waveformWindowIndicator` が null =出さないので、
+							枠が見えていること自体が「拡大中」の合図になる。
+						-->
+						<div
+							class="seek-window-indicator"
+							style="left: {waveformIndicator.left}px; width: {waveformIndicator.width}px"
+						></div>
+					{/if}
+				</div>
 
 				<div class="video-buttons">
 					<button
@@ -974,6 +1216,43 @@
 						{#if capabilities.smpteReadout && readout.smpteText}
 							<span class="video-smpte">{readout.smpteText}</span>
 						{/if}
+					</span>
+
+					<!--
+						波形の時間軸ズーム(要件#47 契約④)。キーボードは割り当てないので、
+						**この3つがマウスだけで拡大縮小できる唯一の手**(帯上の Option+ホイールと
+						並ぶ)。押した指はボタンの上にあって帯の上にないので、アンカーは帯の中央
+						―― いま真ん中に見えているものが真ん中に残る。
+						表示は記号だけにして、読み上げ用の名前は aria-label が持つ。
+					-->
+					<span class="video-zoom-group">
+						<button
+							type="button"
+							class="video-button video-zoom"
+							title="波形を拡大(×2)"
+							aria-label="波形を拡大"
+							onclick={() => zoomWaveformBy(2)}
+						>
+							＋
+						</button>
+						<button
+							type="button"
+							class="video-button video-zoom"
+							title="波形を縮小(÷2)"
+							aria-label="波形を縮小"
+							onclick={() => zoomWaveformBy(0.5)}
+						>
+							−
+						</button>
+						<button
+							type="button"
+							class="video-button video-zoom"
+							title="波形を等倍に戻す"
+							aria-label="波形を等倍に戻す"
+							onclick={resetWaveformZoom}
+						>
+							等倍
+						</button>
 					</span>
 
 					<button
@@ -1195,7 +1474,17 @@
 		pointer-events: none;
 	}
 
+	/*
+	 * シークバーの器(要件#47 契約③)。窓指標を重ねるための位置基準で、幅は
+	 * `bind:clientWidth` で測って指標の px 座標に使う。
+	 */
+	.video-seek-track {
+		position: relative;
+		width: 100%;
+	}
+
 	.video-seek {
+		display: block;
 		width: 100%;
 		margin: 0;
 		accent-color: var(--color-text-secondary);
@@ -1204,6 +1493,23 @@
 
 	.video-seek:disabled {
 		cursor: default;
+	}
+
+	/*
+	 * 窓指標(要件#47 契約③)。バーの上に薄い枠を重ねるだけで、つまみの操作は
+	 * `pointer-events: none` で素通りさせる。色はテーマ変数から取る ―― 目立たせすぎると
+	 * バーそのものが読めなくなり、薄すぎると拡大中かどうかが判らない。
+	 */
+	.seek-window-indicator {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		box-sizing: border-box;
+		border: 1px solid var(--color-text-secondary);
+		border-radius: 3px;
+		background-color: var(--color-bg-hover);
+		opacity: 0.5;
+		pointer-events: none;
 	}
 
 	.video-buttons {
@@ -1230,6 +1536,22 @@
 	.video-step {
 		min-width: 44px;
 		font-variant-numeric: tabular-nums;
+	}
+
+	/*
+	 * 波形ズームの3ボタン(要件#47 契約④)。ひと組に見えるよう間を詰めて置く ――
+	 * コマ送りの歩幅ボタンとは役割が違う(横軸の縮尺であって位置ではない)ので、
+	 * 塊として分かれて見えるほうが押し間違えない。
+	 */
+	.video-zoom-group {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		margin-left: 8px;
+	}
+
+	.video-zoom {
+		min-width: 32px;
 	}
 
 	/* 消音トグルは残りを右へ押しやる位置に置く。 */

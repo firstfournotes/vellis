@@ -1386,9 +1386,13 @@ describe('素材 URI 解決と導線計画(要件#40 契約⑦)', () => {
 	const MAP_URI = 'file:///a/b/final.mp4.map.json';
 
 	it('inputUriFor は resolveRelative(map の URI, inputs[].path) と同値(spec 実例の全 inputs)', () => {
-		const inputs: ProvenanceInput[] = Object.values(specMap().inputs);
-		for (const input of inputs) {
-			expect(inputUriFor(MAP_URI, input.path)).toBe(resolveRelative(MAP_URI, input.path));
+		// 要件#46 追補a=型の絞り込みのみ(ProvenanceInput.path の string | null 化に伴う。
+		// spec 実例に null path は無いので実行時の意味は不変)。
+		const paths: string[] = Object.values(specMap().inputs)
+			.map((input: ProvenanceInput) => input.path)
+			.filter((p): p is string => p !== null);
+		for (const path of paths) {
+			expect(inputUriFor(MAP_URI, path)).toBe(resolveRelative(MAP_URI, path));
 		}
 		expect(inputUriFor(MAP_URI, '../media/raw.mov')).toBe('file:///a/media/raw.mov');
 	});
@@ -1473,5 +1477,236 @@ describe('provenanceWarnings — 鮮度警告(要件#40 契約⑩)', () => {
 		expect(provenanceWarnings(map, 'file:///a/%E5%8B%95%E7%94%BB2.mp4', 5.5)).toEqual([
 			'video-name-mismatch',
 		]);
+	});
+});
+
+// ===========================================================================
+// 要件#46 — プレースホルダー入力(vedit spec 2026-09-01 拡張)の受理と合成素材の扱い
+// ===========================================================================
+/*
+ * 要件#46 の受け入れテスト(requirements.md #46)
+ * 「素材パネル(要件#40)が vedit のプレースホルダー入力を含む素材マップを読めるように
+ *  する。プレースホルダー入力は `inputs[].path` / `scenario_path` を null で書き、
+ *  読み手は path が null の入力を合成素材とみなす(tool-video-editor/docs/spec.md:669
+ *  の読み手契約=v1 スキーマへのキー追加なしの 2026-09-01 拡張)」
+ *
+ * ## 本ファイル追加分の判定範囲(要件#46 の機械判定分)
+ * - 契約①: `parseProvenanceMap` がプレースホルダー入り map を ok で受理する
+ *   (`normalizeInput` の path / scenario_path を `asNullableString` へ緩める=
+ *   overlays 側 :386-388 と同型の寛容さ。片方だけ null も型としては受理・
+ *   文字列でも null でもない値は従来どおり malformed)
+ * - 契約③: 通常入力(path は文字列)の既存挙動は不変(spec 実例の parse 結果が
+ *   SPEC_MAP_EXPECTED と一致・SourceCard の既存フィールドは従来の値のまま)
+ * - 合成素材の印は `card.path === null`(要件②の文言そのもの):
+ *   `describeSourceAt` が null path の input で throw せず、`path` / `scenarioPath` を
+ *   null のまま SourceCard へ通す。パネル(ProvenancePanel.svelte)は
+ *   `source.path === null` で「Finder で表示」「パスをコピー」の非活性と合成素材表示を
+ *   切り替える**配線だけ**を持つ(要件#40 契約⑪と同じ家風。配線は reviewer 照合・
+ *   見た目は人間ゲート)
+ * - path を使わない関数(segmentIndexAt / provenanceWarnings)はプレースホルダー
+ *   入りでも既存どおり(代表ケースのみ)・同じテキストの parse は決定的
+ *
+ * ## 確定契約(implementer はこれに従う)
+ * - `ProvenanceInput.path: string | null`・`ProvenanceInput.scenarioPath: string | null`
+ *   (`normalizeInput` は `asNullableString(raw.path)` / `asNullableString(raw.scenario_path)`)
+ * - `SourceCard.path: string | null`・`SourceCard.scenarioPath: string | null` 化
+ *   (**フィールドの追加はしない**=既存カードの完全一致比較と両立させる。
+ *   合成素材の判定は `path === null` で足りる)。
+ *   `fileName` は null path でも空文字でない表示用文字列(値は実装裁量=
+ *   テストは型と非空だけを固定)。他フィールドの計算(inputSec・inputFrame・
+ *   from/to の表示=map の値そのまま)は path と無関係に従来どおり
+ * - 依存追加なし・Rust 無変更(契約⑤)
+ *
+ * ## フィクスチャの前提(オーケストレーター判断 2026-09-03)
+ * spec.md には null path を含む JSON 実例が存在しない(spec.md:669 の散文契約のみ。
+ * vedit 側 tests/test_req16_placeholder.py AC-16-9 が「キー集合・並び=
+ * ["path","scenario_path","fps","duration"]・path/scenario_path=None・
+ * fps/duration=宣言値」を固定している)。よって契約④「spec 2026-09-01 拡張の実例と
+ * 一字一句一致」は、既存の SPEC_MAP_JSON(spec 実例・一字一句)への `jsonWith` patch で
+ * プレースホルダー入力エントリをキー集合・並びとも spec 表どおり
+ * `{"path": null, "scenario_path": null, "fps": {…}, "duration": {…}}` の形で追加する、
+ * と解釈する。既存の spec 実例エントリ(raw / broll)には触れない。
+ */
+
+/**
+ * プレースホルダー入力 `ph` を持つ変種(要件#46)。
+ *
+ * inputs へ `ph` を spec 表のキー集合・並びどおりに追加し(path / scenario_path は
+ * null・fps / duration は宣言値=常に CFR なので frame も定義される)、末尾 clip 区間の
+ * source が `ph` を指すようにする。raw / broll のエントリ自体は無傷
+ * (broll が未参照になるが、parse の整合検査は「参照先が inputs にあること」だけを見る)。
+ */
+function placeholderJson(): string {
+	return jsonWith((raw) => {
+		raw.inputs.ph = {
+			path: null,
+			scenario_path: null,
+			fps: { num: 30, den: 1 },
+			duration: { sec: 10.0, frame: 300 },
+		};
+		raw.segments[2].sources[0].input = 'ph';
+	});
+}
+
+let cachedPlaceholderMap: ProvenanceMap | null = null;
+/** 共有のプレースホルダー入り map(deep freeze 済み)。 */
+function placeholderMap(): ProvenanceMap {
+	if (!cachedPlaceholderMap) cachedPlaceholderMap = deepFreeze(parseOk(placeholderJson()));
+	return cachedPlaceholderMap;
+}
+
+// ---------------------------------------------------------------------------
+// parseProvenanceMap — プレースホルダー入力の受理(要件#46 契約①③)
+// ---------------------------------------------------------------------------
+
+describe('parseProvenanceMap — プレースホルダー入力の受理(要件#46 契約①)', () => {
+	it('path / scenario_path が null の入力を含む map を ok で受理し、正規化形は null を保持する', () => {
+		const parsed = parseProvenanceMap(placeholderJson());
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		expect(parsed.map.inputs.ph).toEqual({
+			path: null,
+			scenarioPath: null,
+			fps: { num: 30, den: 1 },
+			duration: { sec: 10.0, frame: 300 },
+		});
+	});
+
+	it('path だけ null(scenario_path は文字列)も型としては受理する(asNullableString の同型=overlays 側と同じ寛容さ)', () => {
+		const map = parseOk(
+			jsonWith((raw) => {
+				raw.inputs.ph = {
+					path: null,
+					scenario_path: 'gap',
+					fps: { num: 30, den: 1 },
+					duration: { sec: 10.0, frame: 300 },
+				};
+			}),
+		);
+		expect(map.inputs.ph.path).toBeNull();
+		expect(map.inputs.ph.scenarioPath).toBe('gap');
+	});
+
+	it('scenario_path だけ null(path は文字列)も型としては受理する', () => {
+		const map = parseOk(
+			jsonWith((raw) => {
+				raw.inputs.ph = {
+					path: '../media/gap.mp4',
+					scenario_path: null,
+					fps: { num: 30, den: 1 },
+					duration: { sec: 10.0, frame: 300 },
+				};
+			}),
+		);
+		expect(map.inputs.ph.path).toBe('../media/gap.mp4');
+		expect(map.inputs.ph.scenarioPath).toBeNull();
+	});
+
+	it('path が文字列でも null でもない(数値)は従来どおり malformed', () => {
+		const text = jsonWith((raw) => {
+			raw.inputs.raw.path = 123;
+		});
+		expect(parseProvenanceMap(text)).toMatchObject({ ok: false, error: 'malformed' });
+	});
+
+	it('scenario_path が文字列でも null でもない(数値)は従来どおり malformed', () => {
+		const text = jsonWith((raw) => {
+			raw.inputs.raw.scenario_path = 123;
+		});
+		expect(parseProvenanceMap(text)).toMatchObject({ ok: false, error: 'malformed' });
+	});
+
+	it('既存の spec 実例の parse 結果は不変(契約③=既存挙動の不変)', () => {
+		expect(parseProvenanceMap(SPEC_MAP_JSON)).toEqual({ ok: true, map: SPEC_MAP_EXPECTED });
+	});
+
+	it('決定性: 同じテキストを2回 parse して同じ結果', () => {
+		const text = placeholderJson();
+		expect(parseProvenanceMap(text)).toEqual(parseProvenanceMap(text));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// describeSourceAt / describeSegment — 合成素材フラグと null 安全(要件#46)
+// ---------------------------------------------------------------------------
+
+describe('describeSourceAt — 合成素材の SourceCard(要件#46)', () => {
+	it('null path の input で throw せず、path/scenarioPath は null(=合成素材の印)・fileName は空でない表示用文字列', () => {
+		const map = placeholderMap();
+		const segment = map.segments[2];
+		const card = describeSourceAt(segment, segment.sources[0], map.inputs.ph, 4.0);
+		expect(card.path).toBeNull();
+		expect(card.scenarioPath).toBeNull();
+		expect(typeof card.fileName).toBe('string');
+		expect(card.fileName.length).toBeGreaterThan(0);
+	});
+
+	it('合成素材でも path 以外の計算は従来どおり(逆写像・参考フレーム・map の値そのままの表示)', () => {
+		const map = placeholderMap();
+		const segment = map.segments[2];
+		const source = segment.sources[0];
+		const card = describeSourceAt(segment, source, map.inputs.ph, 4.0);
+		// t=4.0: inputSec = 1.5 + (4.0 − 3.0) × 1 = 2.5・frame = floor(2.5 × 30) = 75
+		expect(card.inputSec).toBe(sourceTimeAt(segment, source, 4.0));
+		expect(card.inputSec).toBeCloseTo(2.5, 10);
+		expect(card.inputFrame).toBe(sourceFrameAt(map.inputs.ph.fps, card.inputSec));
+		expect(card.inputFrame).toBe(75);
+		expect(card.inputTimeText).toBe(formatMapTime(card.inputSec));
+		expect(card.fromText).toBe(formatMapTime(1.5));
+		expect(card.toText).toBe(formatMapTime(4.0));
+		expect(card.fromFrameText).toBe('#45');
+		expect(card.toFrameText).toBe('#120');
+		expect(card.inputKey).toBe('ph');
+	});
+
+	it('通常入力のカードは従来の値と同一(契約③=既存挙動の不変。フィールドの追加もない=完全一致)', () => {
+		const map = specMap();
+		const segment = map.segments[0];
+		const card = describeSourceAt(segment, segment.sources[0], map.inputs.raw, 1.0);
+		expect(card).toEqual({
+			role: null,
+			inputKey: 'raw',
+			fileName: 'raw.mov',
+			clip: 'opening',
+			mode: 'extract',
+			speedText: null,
+			fromText: formatMapTime(2.0),
+			toText: formatMapTime(4.5),
+			fromFrameText: '#60',
+			toFrameText: '#135',
+			path: '../media/raw.mov',
+			scenarioPath: 'media/raw.mov',
+			inputSec: 3.0,
+			inputTimeText: formatMapTime(3.0),
+			inputFrame: 90,
+		});
+	});
+});
+
+describe('describeSegment — プレースホルダーを指す区間(要件#46)', () => {
+	it('ph を指す区間の表引きが正常に動き、カードの path は null(=合成素材の印)', () => {
+		const card = describeSegment(placeholderMap(), 2, 4.0);
+		expect(card.kind).toBe('clip');
+		expect(card.sources).toHaveLength(1);
+		expect(card.sources[0].inputKey).toBe('ph');
+		expect(card.sources[0].path).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// path を使わない関数 — プレースホルダー入りでも既存どおり(要件#46 契約③)
+// ---------------------------------------------------------------------------
+
+describe('path 非依存の関数はプレースホルダー入りでも既存どおり(要件#46 契約③)', () => {
+	it('segmentIndexAt の表引きは変わらない(境界の半開・端 clamp の代表点)', () => {
+		const segments = placeholderMap().segments;
+		expect(segmentIndexAt(segments, 0)).toBe(0);
+		expect(segmentIndexAt(segments, 2.75)).toBe(1);
+		expect(segmentIndexAt(segments, 3.0)).toBe(2);
+		expect(segmentIndexAt(segments, 5.5)).toBe(2);
+	});
+
+	it('provenanceWarnings の鮮度判定は変わらない(名前一致・尺一致で警告なし)', () => {
+		expect(provenanceWarnings(placeholderMap(), VIDEO, 5.5)).toEqual([]);
 	});
 });

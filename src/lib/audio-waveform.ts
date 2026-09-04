@@ -30,6 +30,11 @@
 import { invoke } from './ipc';
 import { toAssetUri } from './uri';
 import { nearestFrame, seekTimeForFrame, type FrameIndex } from './video-frame';
+// 要件#47 契約⑦。`waveform-zoom.ts` は逆にこちらの `extractPeaks` /
+// `WAVEFORM_BUCKETS` を使うので2モジュールは相互参照になるが、**参照はどちらも
+// 関数本体の中だけ**(モジュール評価時に相手の束縛を読まない)なので、
+// どちらから先に読み込まれても TDZ に当たらない。
+import { WAVEFORM_MAX_RETAINED_SAMPLES, buildCoarsePeaks } from './waveform-zoom';
 
 // ---------------------------------------------------------------------------
 // 定数(契約③④)
@@ -120,9 +125,23 @@ export type WaveformSource =
  *
  * `lanes` は上から並べるレーンの列(追補d)。ステレオは `[L, R]` の2本・それ以外は
  * 1本で、構成は `waveformLanes` が決める。
+ *
+ * 要件#47 契約⑦で3つ増えた ―― `samples`(レーンと 1:1 のデコード済み標本)・
+ * `coarse`(レーンごとの粗レベル)・`sampleRate`。窓の再バケット化(拡大表示)は
+ * この3つだけを材料にする。`samples` が `null` なのは保持上限を超えた素材で、
+ * そのときは粗レベルから描いて上限倍率を下げる(縮退=fail-open)。
+ *
+ * **省略可にしてある**のは、`{ state: 'ready', lanes }` だけを組み立てる既存の
+ * 呼び出し(テストのリテラル)を壊さないため。`analyzeWaveform` の戻り値では常に埋まる。
  */
 export type WaveformResult =
-	| { state: 'ready'; lanes: WaveformPeaks[] }
+	| {
+			state: 'ready';
+			lanes: WaveformPeaks[];
+			samples?: Float32Array[] | null;
+			coarse?: WaveformPeaks[];
+			sampleRate?: number;
+	  }
 	| { state: 'no-audio' }
 	| { state: 'too-large' }
 	| { state: 'unreadable' }
@@ -369,6 +388,28 @@ export function waveformLanes(
 }
 
 /**
+ * レーンに対応する標本列(要件#47 契約⑦)。
+ *
+ * **`waveformLanes` と同じ分け方**をするのが唯一の約束 ―― レーンと標本が 1:1 で
+ * 対応していないと、拡大時に「上の段の絵が下の段の音」になる。分岐が2箇所に散る形に
+ * なるが、`waveformLanes` は既存の判定(バケット化まで済ませて返す)で、こちらは
+ * 生の標本を返す ―― 戻り値の型が違うので統合するとかえって読めなくなる。
+ *
+ * 2ch までは `AudioBuffer` の内部バッファを**そのまま参照**する(写しを作らない)。
+ * 10 分の動画で1レーン 38MB あり、二重に持つ理由がない。呼び出し側は読むだけ。
+ */
+function laneSamples(buffer: WaveformAudioBuffer): Float32Array[] {
+	const channels = buffer.numberOfChannels;
+	if (channels < 1) return [];
+	if (channels === 2) return [buffer.getChannelData(0), buffer.getChannelData(1)];
+	if (channels === 1) return [buffer.getChannelData(0)];
+
+	const all: Float32Array[] = [];
+	for (let c = 0; c < channels; c++) all.push(buffer.getChannelData(c));
+	return [mixToMono(all)];
+}
+
+/**
  * レーンの縦配置(追補d)。帯の総高を**隙間なく等分割**する。
  *
  * 実数のまま等分割する(`y = height×i/n`)ので、レーン数や奇数高でも上端 0・下端が
@@ -551,6 +592,12 @@ export async function analyzeWaveform(
 		decode: WaveformDecode;
 		extract: WaveformExtract;
 		buckets?: number;
+		/**
+		 * 生標本を保持してよい総数(要件#47 契約⑦)。既定は
+		 * `WAVEFORM_MAX_RETAINED_SAMPLES`。テストの注入 seam(`buckets` と同型)で、
+		 * 実サイズ 256MiB を作らずに縮退の規則だけを判定できるようにしてある。
+		 */
+		maxRetainedSamples?: number;
 	},
 ): Promise<WaveformResult> {
 	const plan = waveformPlan(videoUri, input.durationSeconds, input.hasAudioTrack);
@@ -585,8 +632,18 @@ export async function analyzeWaveform(
 	if (!decoded || decoded.numberOfChannels < 1 || decoded.length < 1) {
 		return { state: 'no-audio' };
 	}
+	// 拡大表示の材料(要件#47 契約⑦)。粗レベルは**常に**作る ―― 生標本を捨てた
+	// 素材でも帯そのものは描けなければならない(縮退で失うのは深い倍率だけ)。
+	const samples = laneSamples(decoded);
+	const coarse = samples.map(buildCoarsePeaks);
+	const retained = samples.reduce((sum, lane) => sum + lane.length, 0);
+	const limit = input.maxRetainedSamples ?? WAVEFORM_MAX_RETAINED_SAMPLES;
+
 	return {
 		state: 'ready',
 		lanes: waveformLanes(decoded, input.buckets ?? WAVEFORM_BUCKETS),
+		samples: retained > limit ? null : samples,
+		coarse,
+		sampleRate: decoded.sampleRate,
 	};
 }

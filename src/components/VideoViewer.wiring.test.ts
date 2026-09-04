@@ -195,3 +195,116 @@ describe('VideoViewer 配線スモーク(要件#41 第2周・要件#44 常時表
 		});
 	});
 });
+
+/**
+ * 要件#47(音声波形帯の時間軸ズーム)の配線スモーク。
+ *
+ * ## 確定契約(implementer はこれに従う)
+ * - 操作部(シークバーの並び)に3ボタン: aria-label「波形を拡大」(×2)・
+ *   「波形を縮小」(÷2)・「波形を等倍に戻す」(=1)(契約④)
+ * - シークバーへ重ねる窓指標は `.seek-window-indicator`。位置は inline style の
+ *   left/width(px)で持つ。**倍率 1 では出さない**(waveformWindowIndicator が
+ *   null=契約③)ので、指標の有無が「拡大中かどうか」の DOM 観測点になる
+ * - 帯(`.video-waveform`)上の Option(alt)+wheel で倍率変更(追補a=2026-09-03 由谷指示。
+ *   ctrl+wheel は macOS の画面拡大と衝突するため倍率を変えない)・Shift+wheel(または deltaX)で
+ *   窓の横スクロール(契約④)。幅は bind:clientWidth の帯幅を使う
+ *   (getBoundingClientRect は jsdom で常に 0 のため、実装が rect 幅に依存すると
+ *   ここが赤のまま残る=幅の供給源も契約)
+ * - 倍率変更で描画 effect が走り直す(canvas 据え置きで窓の内容を描き替える=契約⑨。
+ *   観測は既存作法どおり getContext('2d') の呼び出し回数)
+ * - src が変われば等倍・先頭へ戻る(契約①=要件#44 のリセット effect に相乗り)
+ *
+ * jsdom の `<video>` は duration を持たない(NaN)ので、duration getter を被せて
+ * durationchange を dispatch し、barDuration=60 秒の「ズーム可能な状態」を作る
+ * (readyState/audioTracks を被せる既存ケースと同じ作法)。
+ */
+describe('VideoViewer 配線スモーク(要件#47 波形の時間軸ズーム)', () => {
+	/** ズーム可能な状態(尺 60 秒)を作ってマウントする。 */
+	async function renderZoomable() {
+		const utils = render(VideoViewer, { props: PROPS });
+		const video = document.querySelector('video.video') as HTMLVideoElement;
+		expect(video).not.toBeNull();
+		Object.defineProperty(video, 'duration', { configurable: true, get: () => 60 });
+		await fireEvent(video, new Event('durationchange'));
+		return { ...utils, video };
+	}
+
+	const indicator = () =>
+		document.querySelector('.seek-window-indicator') as HTMLElement | null;
+
+	it('「＋」「−」「等倍」の3ボタンが出る・等倍では窓指標が無い(契約③④)', async () => {
+		await renderZoomable();
+
+		expect(screen.getByRole('button', { name: '波形を拡大' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: '波形を縮小' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: '波形を等倍に戻す' })).toBeTruthy();
+
+		// 倍率 1 では指標を出さない(契約③=waveformWindowIndicator が null)。
+		expect(indicator()).toBeNull();
+	});
+
+	it('「＋」で倍率が上がり(指標が出る)描画 effect が走り直す・「等倍」で戻る(契約④⑨)', async () => {
+		await renderZoomable();
+
+		// マウント時の描画が済んでから、ズームによる描き替えの「増分」を数える。
+		await vi.waitFor(() => {
+			expect(getContextSpy).toHaveBeenCalledWith('2d');
+		});
+		const before = getContextSpy.mock.calls.length;
+
+		await fireEvent.click(screen.getByRole('button', { name: '波形を拡大' }));
+		await vi.waitFor(() => {
+			expect(indicator()).not.toBeNull();
+		});
+		// 倍率変更は canvas の描き替えを伴う(据え置き canvas に窓の内容を描く=契約⑨)。
+		await vi.waitFor(() => {
+			expect(getContextSpy.mock.calls.length).toBeGreaterThan(before);
+		});
+
+		await fireEvent.click(screen.getByRole('button', { name: '波形を等倍に戻す' }));
+		await vi.waitFor(() => {
+			expect(indicator()).toBeNull();
+		});
+	});
+
+	it('帯上の Option+wheel で拡大・Shift+wheel で窓が横に動く(契約④・追補a)', async () => {
+		await renderZoomable();
+		const band = document.querySelector('.video-waveform') as HTMLElement;
+		expect(band).not.toBeNull();
+
+		// ctrl+wheel は倍率を変えない(画面拡大に譲る=追補a)。
+		await fireEvent.wheel(band, { ctrlKey: true, deltaY: -240, deltaMode: 0 });
+		expect(indicator()).toBeNull();
+
+		// Option(alt)+wheel の上回し(deltaY<0)=拡大。−240px は指数写像でちょうど2倍。
+		await fireEvent.wheel(band, { altKey: true, deltaY: -240, deltaMode: 0 });
+		await vi.waitFor(() => {
+			expect(indicator()).not.toBeNull();
+		});
+		const leftBefore = Number.parseFloat(indicator()?.style.left ?? '0');
+
+		// Shift+wheel(縦成分を横に読み替え)=窓を後ろへ送る → 指標の left が増える。
+		await fireEvent.wheel(band, { shiftKey: true, deltaY: 120, deltaMode: 0 });
+		await vi.waitFor(() => {
+			expect(Number.parseFloat(indicator()?.style.left ?? '0')).toBeGreaterThan(leftBefore);
+		});
+	});
+
+	it('src が変わると等倍・先頭へ戻る(指標が消える=契約①)', async () => {
+		const { rerender } = await renderZoomable();
+
+		await fireEvent.click(screen.getByRole('button', { name: '波形を拡大' }));
+		await vi.waitFor(() => {
+			expect(indicator()).not.toBeNull();
+		});
+
+		// 別素材へ差し替え(要件#44 契約③のリセット effect に相乗り=契約①)。
+		await rerender({
+			uri: 'file:///Users/a/movies/other.webm',
+			src: 'vellis-asset://local/Users/a/movies/other.webm',
+		});
+		await vi.waitFor(() => {
+			expect(indicator()).toBeNull();
+		});
+	});
+});

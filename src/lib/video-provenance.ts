@@ -46,10 +46,19 @@ export type MapTime = { sec: number; frame: number | null };
 
 /** 素材1つぶんの情報(`inputs` の値)。 */
 export type ProvenanceInput = {
-	/** マップ置き場基準の相対 POSIX パス(`..` を含んでよい)。 */
-	path: string;
-	/** シナリオに書かれた生の文字列(表示専用。相対の基準が違うので `path` とは一致しない)。 */
-	scenarioPath: string;
+	/**
+	 * マップ置き場基準の相対 POSIX パス(`..` を含んでよい)。
+	 *
+	 * **プレースホルダー入力は `null`**(vedit spec 2026-09-01 拡張)。読み手は `path` が
+	 * null の入力を合成素材(実ファイルがまだ無い穴埋め)とみなす=spec.md:669 の読み手契約。
+	 * v1 スキーマへのキー追加ではないので、バージョンは上がらない。
+	 */
+	path: string | null;
+	/**
+	 * シナリオに書かれた生の文字列(表示専用。相対の基準が違うので `path` とは一致しない)。
+	 * プレースホルダー入力は `null`。
+	 */
+	scenarioPath: string | null;
 	/** その素材のフレームレート。VFR は null。 */
 	fps: Rational | null;
 	duration: MapTime;
@@ -153,9 +162,15 @@ export type SourceCard = {
 	toText: string;
 	fromFrameText: string;
 	toFrameText: string;
-	/** title 属性用の素材データ(組み立ては配線側)。 */
-	path: string;
-	scenarioPath: string;
+	/**
+	 * title 属性用の素材データ(組み立ては配線側)。
+	 *
+	 * **`path === null` が合成素材(プレースホルダー入力)の印**(spec.md:669 の読み手契約)。
+	 * 実ファイルが無いので、パネルはこの条件で素材への導線(Finder で表示・パスをコピー)を
+	 * 非活性にする。別フラグは持たない ―― 印が2つあると食い違いうる。
+	 */
+	path: string | null;
+	scenarioPath: string | null;
 	/** 逆写像で求めた現在位置の素材時刻(秒)。 */
 	inputSec: number;
 	inputTimeText: string;
@@ -201,6 +216,14 @@ const SECOND_SCALE = 1_000_000;
 
 /** 鮮度警告を出す尺の差(秒・§4.7。生成側の受け入れ許容と同値)。 */
 const DURATION_TOLERANCE_SECONDS = 0.05;
+
+/**
+ * 合成素材(プレースホルダー入力)のファイル名欄に出す文字列。
+ *
+ * ファイル名の位置を空にすると「取得に失敗した」ように見えるので、実ファイルが無い
+ * ことを名前の場所で言う。
+ */
+const SYNTHETIC_FILE_NAME = '(合成素材)';
 
 // ---------------------------------------------------------------------------
 // サイドカーの位置と取得(第1〜3段)
@@ -395,8 +418,10 @@ function normalizeOverlay(value: unknown): ProvenanceOverlay {
 function normalizeInput(value: unknown): ProvenanceInput {
 	const raw = asObject(value);
 	return {
-		path: asString(raw.path),
-		scenarioPath: asString(raw.scenario_path),
+		// プレースホルダー入力は null で書かれる(spec 2026-09-01 拡張)。overlays 側と
+		// 同型の寛容さで受ける ―― 文字列でも null でもない値は従来どおり malformed。
+		path: asNullableString(raw.path),
+		scenarioPath: asNullableString(raw.scenario_path),
 		fps: normalizeRational(raw.fps),
 		duration: normalizeMapTime(raw.duration),
 	};
@@ -615,6 +640,10 @@ function baseName(path: string): string {
  * 使用範囲(`from` / `to`)の表示は**マップの値そのまま**で、fps から計算し直さない
  * (契約⑤)。計算し直すと丸め規則が生成側と二重定義になり、生成側の受け入れ基準が
  * 見張っているはずの食い違いを Vellis 側が黙って隠してしまう。
+ *
+ * プレースホルダー入力(`input.path === null`)でも投げない。ファイル名の代わりに
+ * 合成素材である旨を置き、`path` は null のまま配線側へ渡す ―― 素材が無いことは
+ * 表示の欠落ではなくマップが言っている事実なので、カードは通常どおり組み立てる。
  */
 export function describeSourceAt(
 	segment: ProvenanceSegment,
@@ -626,7 +655,7 @@ export function describeSourceAt(
 	return {
 		role: source.role,
 		inputKey: source.input,
-		fileName: baseName(input.path),
+		fileName: input.path === null ? SYNTHETIC_FILE_NAME : baseName(input.path),
 		clip: source.clip,
 		mode: source.mode,
 		speedText: formatSpeed(source.speed),

@@ -137,9 +137,18 @@
 		}
 	}
 
+	/**
+	 * 合成素材(プレースホルダー入力)の説明。バッジの title と、非活性にした導線の
+	 * 理由表示を兼ねる ―― 押せないボタンは、なぜ押せないかを言わないと故障に見える。
+	 */
+	const SYNTHETIC_TITLE =
+		'合成素材(vedit のプレースホルダー入力)。実ファイルがまだ無いので、Finder で表示・パスをコピーは使えません。';
+
 	/** 素材の素性を title に集める(主=入力キー・副=ファイル名なので、原文はここ)。 */
-	function sourceTitle(path: string, scenarioPath: string): string {
-		return `マップからの相対パス: ${path}\nシナリオの記述: ${scenarioPath}`;
+	function sourceTitle(path: string | null, scenarioPath: string | null): string {
+		// path が null =合成素材(spec.md:669 の読み手契約)。出すべきパスがそもそも無い。
+		if (path === null) return SYNTHETIC_TITLE;
+		return `マップからの相対パス: ${path}\nシナリオの記述: ${scenarioPath ?? '(記述なし)'}`;
 	}
 </script>
 
@@ -187,6 +196,9 @@
 							<span class="input-key" title={sourceTitle(source.path, source.scenarioPath)}>
 								{source.inputKey}
 							</span>
+							{#if source.path === null}
+								<span class="synthetic" title={SYNTHETIC_TITLE}>プレースホルダー</span>
+							{/if}
 							<span class="file-name" title={sourceTitle(source.path, source.scenarioPath)}>
 								{source.fileName}
 							</span>
@@ -214,8 +226,26 @@
 							</dd>
 						</dl>
 						<div class="actions">
-							<button type="button" onclick={() => revealInput(source.path)}>Finder で表示</button>
-							<button type="button" onclick={() => copyInputPath(source.path)}>パスをコピー</button>
+							<button
+								type="button"
+								disabled={source.path === null}
+								title={source.path === null ? SYNTHETIC_TITLE : undefined}
+								onclick={() => {
+									if (source.path !== null) void revealInput(source.path);
+								}}
+							>
+								Finder で表示
+							</button>
+							<button
+								type="button"
+								disabled={source.path === null}
+								title={source.path === null ? SYNTHETIC_TITLE : undefined}
+								onclick={() => {
+									if (source.path !== null) void copyInputPath(source.path);
+								}}
+							>
+								パスをコピー
+							</button>
 						</div>
 					</article>
 				{/each}
@@ -461,6 +491,16 @@
 		font-weight: 600;
 	}
 
+	/* 合成素材の印。.role と同じ寸法で、破線と弱い色で「実体が無い」ことを示す。 */
+	.synthetic {
+		flex-shrink: 0;
+		font-size: 10px;
+		padding: 1px 6px;
+		border: 1px dashed var(--color-border);
+		border-radius: 3px;
+		color: var(--color-text-muted);
+	}
+
 	.file-name {
 		flex: 1;
 		min-width: 0;
@@ -525,6 +565,14 @@
 
 	.actions button:hover {
 		background-color: var(--color-bg-hover);
+	}
+
+	/* 実ファイルの無い素材(合成素材)では導線を押せるように見せない。 */
+	.actions button:disabled,
+	.actions button:disabled:hover {
+		background-color: var(--color-bg-primary);
+		color: var(--color-text-muted);
+		cursor: default;
 	}
 
 	ul {
