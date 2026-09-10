@@ -1,25 +1,21 @@
 # Vellis
 
-A desktop Markdown viewer for AI-generated documents.
+Vellis is a desktop file viewer for Markdown, HTML, images, 3D models, video, audio, and PDF — with in-place text editing.
 
-Vellis pairs a tree file explorer with a Markdown viewer and re-renders as files change on disk. It is built for the case where an AI agent is writing the documents and you are reading them: open a folder, watch the rendered output update as the agent edits, copy the *source* Markdown back out, and hand review instructions to the agent without leaving the app.
-
-Vellis reads first and writes only when you say so. Double-click the body to edit a plain-text file in place — or the Markdown or HTML source behind a rendered page — and press ⌘S to save. Nothing is written automatically, every save takes a snapshot under `<root>/.vellis/` first so one click restores what was there, and Vellis never deletes, renames or moves a file. Remote (`ssh://`) roots stay read-only.
+AI tools now work with a wide range of files. Vellis brings those files into one place for you to browse and inspect, whether you're preparing inputs, reviewing outputs, or simply opening files yourself.
 
 ## Features
 
-### Viewing
+### What it opens
 
-- **GitHub Flavored Markdown + Shiki** — tables, task lists, footnotes and strikethrough, with syntax-highlighted code blocks (11 languages preloaded: TypeScript, JavaScript, Rust, Python, Bash, JSON, YAML, HTML, CSS, Markdown, TOML).
-- **Alerts and diagrams** — `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]` and `> [!CAUTION]` blockquotes render as coloured callouts, and fenced blocks tagged `mermaid` render as diagrams. Mermaid is loaded on first use, so documents without diagrams never pay for it.
-- **HTML rendered, never run** — `.html` / `.htm` open rendered rather than as source, inside a sandboxed iframe. Scripts never run and links are inert, which makes self-contained AI-generated reports safe to read in place.
-- **Images and SVG** — the default is fit-to-window (never upscaled past actual size) with a toggle for actual size; SVG additionally toggles between the rendered image and its XML source.
-- **3D models** — STL (ASCII and binary) and 3MF open as an interactive scene: left-drag rotates, right-drag pans, the wheel zooms, a reset button restores the opening framing, and the toolbar shows the triangle count. Rotation is a screen-relative trackball rather than a fixed-axis orbit, so the drag direction and the way the model turns agree however far it has already been turned.
-- **SpaceMouse** — a 3Dconnexion 6DoF device drives that same camera: tilt to rotate, slide to pan, push or pull to zoom. It works with or without the vendor driver installed (the official `3DconnexionClient` framework when 3DxWare is present, raw HID otherwise) and follows window focus. Nothing is bundled and no device is required.
+- **Markdown** — GitHub Flavored Markdown, so tables, task lists, footnotes, strikethrough and `> [!NOTE]`-style alert callouts all render as they do on GitHub. Code blocks are syntax-highlighted by Shiki, with 11 languages preloaded (TypeScript, JavaScript, Rust, Python, Bash, JSON, YAML, HTML, CSS, Markdown, TOML).
+- **Diagrams** — fenced blocks tagged `mermaid` render as diagrams. Mermaid is loaded on first use, so documents without diagrams never pay for it.
+- **HTML** — `.html` / `.htm` open rendered rather than as source, inside a sandboxed iframe. Scripts never run and links are inert, which makes self-contained AI-generated reports safe to read in place.
+- **Images** — the default is fit-to-window (never upscaled past actual size) with a toggle for actual size. SVG opens here too, with a further toggle between the rendered image and its XML source.
+- **3D models** — STL (ASCII and binary) and 3MF open as an interactive scene you can rotate, pan and zoom, with the triangle count shown in the toolbar.
 - **Video** — plays inline with the system player controls, streamed a range at a time as you seek rather than read whole before it starts. See [Supported formats](#supported-formats) for containers and codecs.
+- **Audio** — `.wav`, `.mp3` and `.m4a` play inline, with the waveform of the audio drawn above the transport: a stereo file is split into two lanes, left on top and right below, so you can see which channel a sound is in. Files of around two hours are handled.
 - **PDF** — opens in the WebView's built-in PDF viewer, so scrolling, zooming, text selection and copying work as they do in Safari. A file that turns out not to be a PDF shows a placeholder offering to open it in the default application instead.
-- **Remote viewing over SSH/SFTP** — `vellis ssh://user@host/path`, including `~/.ssh/config` host aliases (`vellis ssh://myhost/path`). Authentication falls back from `ssh-agent` to `IdentityFile` (unencrypted keys only), and hosts are verified against `~/.ssh/known_hosts` (trust on first use). Remote files are polled every 2 seconds for changes.
-- **Quality-of-life** — live reload (the open file re-renders when it changes on disk and the tree follows), a resizable explorer pane, reload restoring the root and open file and expanded folders, a recent-folder picker, printing (`⌘P`), a Window menu of the open windows, a tree context menu (reveal in the Finder, open with, copy path), single-instance launch, and an update banner that tells you about a new release without ever installing it.
 
 ### Supported formats
 
@@ -32,11 +28,23 @@ Vellis reads first and writes only when you say so. Double-click the body to edi
 | 3D models | `.stl` `.3mf` | Interactive scene, mouse or SpaceMouse |
 | Video | `.mp4` `.mov` `.webm` | Inline playback, system controls |
 | Video (other containers) | `.mkv` `.avi` | Placeholder offering the default application |
+| Audio | `.wav` `.mp3` `.m4a` | Inline playback with a stereo waveform |
 | PDF | `.pdf` | Built-in PDF viewer, inline |
-| Plain text | any other extension | Shown verbatim, no Markdown parsing |
-| Other binaries | archives, audio, fonts, TIFF, HEIC, … | Listed in the tree, not opened |
+| Plain text | any other extension | Shown verbatim, editable in place |
+| Other binaries | archives, `.flac`, `.ogg`, fonts, TIFF, HEIC, … | Listed in the tree, not opened |
 
-Video decoding is the system WebView's, so H.264, HEVC and ProRes play, AV1 needs an M3-generation Mac or newer, and WebM has to be VP8/Opus — VP9 does not decode. Video and PDF on an ssh remote are not opened in place either; they show the placeholder without the opener, as the context menu does for remote entries. A file with an unlisted extension is read as text; the reader has the final say and refuses anything that is not UTF-8 or is larger than 50 MB.
+Video and audio decoding is the system WebView's, so H.264, HEVC and ProRes play, AV1 needs an M3-generation Mac or newer, and WebM has to be VP8/Opus — VP9 does not decode. `.flac` and `.ogg` are deliberately left out rather than opened and silently failing, because WebKit's support for them varies by version. Video, audio and PDF on an ssh remote are not opened in place either; they show the placeholder without the opener, as the context menu does for remote entries. A file with an unlisted extension is read as text; the reader has the final say and refuses anything that is not UTF-8 or is larger than 50 MB.
+
+### Editing
+
+Vellis started as a viewer and still behaves like one until you ask it to do otherwise. Nothing is written unless you press save.
+
+- **Edit mode** — double-click the body of a plain-text file, or use **Edit → Edit** (`⌘E`). Markdown and HTML files open the same way into a *source* editing mode showing the raw text behind the rendered page; an HTML page is rendered inside a sandboxed iframe, so `⌘E` is the way in there.
+- **Saving** — `⌘S` or **File → Save**. There is no autosave, and the file is written by an atomic replace rather than in place.
+- **Snapshots** — every save copies the previous contents to `<root>/.vellis/snapshots/` beforehand, so the diff view's "revert to snapshot" brings back what was there.
+- **Unsaved changes** — closing a window, opening another file, changing the root, or leaving edit mode with `Esc` / "Done" while there are unsaved changes asks whether to save, discard or cancel.
+- **External changes** — if the file changes on disk while you are editing it, Vellis says so instead of throwing your work away, and lets you either overwrite the file or reload the external version.
+- **Off limits** — Vellis never deletes, renames or moves a file, and remote (`ssh://`) roots stay read-only.
 
 ### Copying source Markdown
 
@@ -51,13 +59,22 @@ Extraction uses the source offsets recorded by the render pipeline for each node
 
 Review instructions are saved as **marks** on the document, handed to an AI coding agent (Claude Code, Codex CLI, aider, …), and the result is reviewed as a diff:
 
-- **Add a mark** — select a range, write an instruction, and it is persisted to `<root>/.vellis/marks.jsonl`.
-- **Generate an agent briefing** — `<root>/.vellis/agent-inbox.md` is written as an LLM-facing prompt, one section per mark, with file path, line range, selected source and heading path captured automatically.
+- **Marks** — select a range, write an instruction, and it is persisted to `<root>/.vellis/marks.jsonl`.
+- **Agent briefing** — `<root>/.vellis/agent-inbox.md` is written as an LLM-facing prompt, one section per mark, with file path, line range, selected source and heading path captured automatically.
 - **Snapshots** — generating the inbox also copies the affected files to `<root>/.vellis/snapshots/<timestamp>/` (the 20 most recent are kept).
-- **Launch an agent** — `vellis --fix <agent>` spawns an agent defined in `~/.config/vellis/agents.toml`. Templates are expanded by plain string substitution without a shell.
+- **Agent launch** — `vellis --fix <agent>` spawns an agent defined in `~/.config/vellis/agents.toml`. Templates are expanded by plain string substitution without a shell.
 - **Drift detection** — after the agent edits, each mark is re-anchored through a five-step ladder (unchanged → moved position → moved section → fuzzy match → stale) and marks that changed or went stale are badged in the sidebar.
 - **Diff view** — the diff button next to a mark compares against the snapshot, inline or side-by-side, with hunks overlapping the mark highlighted. One click reverts the file to the snapshot.
-- **CLI entry points** — `vellis --marks` opens the sidebar, `vellis --changed` filters it to drifted marks only.
+- **CLI flags** — `vellis --marks` opens the sidebar, `vellis --changed` filters it to drifted marks only.
+
+### Devices and remotes
+
+- **SpaceMouse** — a 3Dconnexion 6DoF device drives the 3D camera in place of the mouse. It works with or without the vendor driver installed (the official `3DconnexionClient` framework when 3DxWare is present, raw HID otherwise) and follows window focus. Nothing is bundled and no device is required.
+- **SSH remotes** — a root can live on another machine: `vellis ssh://user@host/path`, including `~/.ssh/config` host aliases. Authentication falls back from `ssh-agent` to `IdentityFile` (unencrypted keys only), hosts are verified against `~/.ssh/known_hosts` (trust on first use), and remote files are polled every 2 seconds for changes.
+
+### Everything else
+
+Live reload (the open file re-renders when it changes on disk and the tree follows), a resizable explorer pane, reload restoring the root and open file and expanded folders, a recent-folder picker, printing (`⌘P`), a Window menu of the open windows, a tree context menu (reveal in the Finder, open with, copy path), single-instance launch, and an update banner that tells you about a new release without ever installing it.
 
 ## Installation
 
@@ -111,9 +128,15 @@ Run `vellis --help` for the full flag list.
 | `⌘N` | New window |
 | `⌘O` | Open a file (the root switches to its parent folder) |
 | `⇧⌘O` | Open a folder as the new root |
+| `⌘E` | Edit the current file (or leave edit mode) |
+| `⌘S` | Save |
+| `Esc` | Leave edit mode (asks first if there are unsaved changes) |
 | `⌘P` | Print |
 | `⌘C` | Copy the selection as Markdown source |
+| `⌘=` / `⌘-` / `⌘0` | Zoom the text in, out, back to actual size |
 | `⌘⏎` | Save the instruction in the mark dialog (`Esc` cancels) |
+
+In a video or audio player: `Space` plays and pauses, `←` / `→` step 5 seconds (1 second with `Shift`), and Option+wheel over the waveform zooms its time axis.
 
 ### Using Vellis with Claude Code
 
@@ -199,7 +222,8 @@ Releases are cut in the development repository: pushing a `v*` tag builds the `.
 - **Frontend** — SvelteKit (Svelte 5 runes) + TypeScript
 - **Desktop shell** — Tauri 2 (Rust)
 - **Markdown** — a unified pipeline (remark-parse → remark-gfm → alerts → source map → remark-rehype → rehype-raw → mermaid → Shiki → URI rewrite → rehype-sanitize → rehype-stringify) with custom plugins for source mapping and asset URI rewriting
-- **Assets** — images, 3D models, video and PDFs reach the WebView through a custom `vellis-asset://` protocol that answers HTTP range requests with `206` slices, so a large file streams instead of being read whole into memory
+- **Assets** — images, 3D models, video, audio and PDFs reach the WebView through a custom `vellis-asset://` protocol that answers HTTP range requests with `206` slices, so a large file streams instead of being read whole into memory
+- **Waveforms** — an `.mp4` or `.mov` has its audio track extracted in Rust, a `.wav` is decimated to 8 kHz peaks by a streaming RIFF reader that never holds more than a few megabytes, and everything else is decoded in the WebView; the three routes converge on the same peak-and-envelope structures, so zooming, lane splitting and the seek geometry are one set of pure functions
 - **3D** — three.js with its STL and 3MF loaders, driving a camera state machine of plain functions that both mouse events and SpaceMouse axes map onto, so the viewer itself carries no per-input-source branching
 - **Persistence** — JSON Lines (`marks.jsonl`) written by atomic rename, with a per-store mutex serializing concurrent IPC
 
