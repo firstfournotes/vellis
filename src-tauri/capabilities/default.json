@@ -20,6 +20,7 @@
       "allow": [{ "path": "**", "app": true }]
     },
     "dialog:default",
-    "window-state:default"
+    "window-state:default",
+    "core:window:allow-destroy"
   ]
 }

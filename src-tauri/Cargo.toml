@@ -1,7 +1,7 @@
 [package]
 name = "vellis"
-version = "0.1.35"
-description = "A viewer for AI-generated documents that edits text in place"
+version = "0.1.36"
+description = "A desktop viewer and text editor for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"
 

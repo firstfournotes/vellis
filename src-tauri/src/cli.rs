@@ -6,7 +6,7 @@ use clap::Parser;
 #[command(
     name = "vellis",
     version,
-    about = "A Markdown, HTML, image, video and audio viewer that edits text in place"
+    about = "A viewer and text editor for Markdown, HTML, images, 3D models, video, audio and PDF"
 )]
 pub struct Cli {
     /// Target path or URI (file, directory, ssh://..., et://...)

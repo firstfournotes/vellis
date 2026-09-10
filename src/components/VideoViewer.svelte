@@ -753,9 +753,20 @@
 		};
 		handle = el.requestVideoFrameCallback(onFrame);
 
+		// 停止中のシークは新しいフレームの提示を伴わない=rVFC が鳴らないので、
+		// そのままだと `position` が動かない(スライダーを離した瞬間に古い位置へ
+		// 戻る=「停止中はシークできない」)。読み直しの一手を `seeked` に足す
+		// (rVFC の置き換えではなく併設 — 再生中の精度は rVFC のまま)。
+		// `loadedmetadata` は初回の位置合わせ(索引前の縮退値でも先頭を指す)。
+		const onSeeked = () => report(el.currentTime);
+		el.addEventListener('seeked', onSeeked);
+		el.addEventListener('loadedmetadata', onSeeked);
+
 		return () => {
 			cancelled = true;
 			el.cancelVideoFrameCallback(handle);
+			el.removeEventListener('seeked', onSeeked);
+			el.removeEventListener('loadedmetadata', onSeeked);
 		};
 	});
 

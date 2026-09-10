@@ -308,3 +308,102 @@ describe('VideoViewer 配線スモーク(要件#47 波形の時間軸ズーム)'
 		});
 	});
 });
+
+/**
+ * backlog 141: 動画が停止中はシーク位置を変更できない(要件#37 契約③の抜け)。
+ *
+ * 表示位置の駆動 $effect は、`requestVideoFrameCallback`(rVFC)を持つ環境では
+ * **rVFC だけ**で `position` を進める。rVFC は新しいフレームが提示されたときに
+ * しか鳴らないので、停止中にシークしても `position` が動かず、スライダーを
+ * 離すと `onScrubCommit` が `scrubbing = null` にして古い `position` へ戻る
+ * (=「動かない」)。rVFC の無い環境向けフォールバックには `seeked` リスナが
+ * あるのに、rVFC 経路には無いのが抜け。
+ *
+ * ## 判定するもの
+ * - **rVFC を持つ環境**(prototype に生やして再現)で、停止中に `currentTime` を
+ *   変えて `seeked` を発火させたら `position`(シークバー value = barPosition)が
+ *   追従すること。**rVFC は一度も鳴らさない**(停止中なので鳴らないのが正)
+ * - rVFC の提示時刻でも従来どおり追従すること(seeked の追加が rVFC 経路の
+ *   **置き換え**にならないための回帰ガード。既存挙動の固定なので実装前から緑)
+ *
+ * ## スタブの設計(本ファイル既存の家風)
+ * - rVFC/cancel: prototype へ configurable に定義し afterEach で外す。登録された
+ *   コールバックは配列に控えるだけで、テストから明示的に呼ばない限り鳴らない
+ *   =「停止中」の再現。**render 前に定義する**こと(effect は最初の実行で
+ *   rVFC の有無を見て経路を選ぶため、後付けだと fallback 経路に落ちて
+ *   誤って緑になる)。登録が起きたこと自体も判定し、経路の取り違えを塞ぐ
+ * - duration / currentTime: jsdom の <video> は実装を持たないので getter を
+ *   被せる(readyState/audioTracks を被せる既存ケースと同じ作法)
+ */
+describe('VideoViewer 配線スモーク(backlog 141: 停止中シークの位置追従・要件#37 契約③)', () => {
+	let rvfcCallbacks: Array<(now: number, metadata: { mediaTime: number }) => void>;
+
+	beforeEach(() => {
+		rvfcCallbacks = [];
+		Object.defineProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback', {
+			configurable: true,
+			value: (callback: (now: number, metadata: { mediaTime: number }) => void) => {
+				rvfcCallbacks.push(callback);
+				return rvfcCallbacks.length;
+			},
+		});
+		Object.defineProperty(HTMLVideoElement.prototype, 'cancelVideoFrameCallback', {
+			configurable: true,
+			value: () => {},
+		});
+	});
+
+	afterEach(() => {
+		// 先にアンマウントを済ませる ―― effect の teardown が cancelVideoFrameCallback を
+		// 呼ぶので、prototype から外すのはその後(外側 afterEach の cleanup より前に
+		// この内側 afterEach が走るため、ここで自前に呼ぶ。cleanup は冪等)。
+		cleanup();
+		Reflect.deleteProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback');
+		Reflect.deleteProperty(HTMLVideoElement.prototype, 'cancelVideoFrameCallback');
+	});
+
+	/** 尺 60 秒・rVFC 経路が選ばれた状態でマウントする。 */
+	async function renderWithRvfc() {
+		render(VideoViewer, { props: PROPS });
+		const video = document.querySelector('video.video') as HTMLVideoElement;
+		expect(video).not.toBeNull();
+		Object.defineProperty(video, 'duration', { configurable: true, get: () => 60 });
+		await fireEvent(video, new Event('durationchange'));
+		// 表示位置の effect が rVFC 経路を選んだことの確認 ―― ここが 0 のままなら
+		// fallback(timeupdate/seeked)経路に落ちていて、以降の判定が意味を失う。
+		await vi.waitFor(() => {
+			expect(rvfcCallbacks.length).toBeGreaterThan(0);
+		});
+		return video;
+	}
+
+	const seekSlider = () => document.querySelector('input.video-seek') as HTMLInputElement;
+
+	it('停止中の seeked で position(シークバー)が追従する ―― rVFC は鳴らさない', async () => {
+		const video = await renderWithRvfc();
+		// 停止中のシーク: currentTime だけが動き、新フレームの提示(rVFC)は起きない。
+		Object.defineProperty(video, 'currentTime', {
+			configurable: true,
+			get: () => 12.5,
+			set: () => {},
+		});
+
+		await fireEvent(video, new Event('seeked'));
+
+		// rVFC 経路に seeked の読み直しが無い現状では position=0 のまま
+		// =ここがタイムアウトで落ちる(backlog 141 の症状そのもの)。
+		await vi.waitFor(() => {
+			expect(Number.parseFloat(seekSlider().value)).toBeCloseTo(12.5, 3);
+		});
+	});
+
+	it('rVFC の提示時刻でも従来どおり追従する(seeked 追加で rVFC 経路を置き換えない=回帰ガード)', async () => {
+		await renderWithRvfc();
+
+		rvfcCallbacks[rvfcCallbacks.length - 1](0, { mediaTime: 3.25 });
+
+		await vi.waitFor(() => {
+			expect(Number.parseFloat(seekSlider().value)).toBeCloseTo(3.25, 3);
+		});
+	});
+});

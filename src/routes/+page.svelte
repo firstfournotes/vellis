@@ -57,6 +57,7 @@
 	} from '$lib/duplicate-window';
 	import { MENU_EDIT_EVENT } from '$lib/document-edit';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
+	import { handleCloseRequested } from '$lib/close-window';
 	import { MENU_SAVE_EVENT, saveDocument } from '$lib/save-document';
 	import { DEFAULT_ZOOM, isZoomTarget, loadZoom, registerZoomListeners } from '$lib/zoom';
 	import { printFailedMessage, registerPrintListener } from '$lib/print-html';
@@ -299,19 +300,14 @@
 		};
 	});
 
-	// 要件#48 契約④: dirty のまま閉じようとしたら聞く。閉窓は取り消せないので、
-	// いったん止めて(preventDefault)から確認し、進んでよいと決まったときだけ
-	// 改めて閉じる。確認と保存の実体は `$lib/edit-guard`。
+	// 要件#48 契約④: dirty のまま閉じようとしたら聞く。判断の実体は
+	// `$lib/close-window` の `handleCloseRequested`(ここは購読の管理だけ)。
 	onMount(() => {
 		let unlisten: (() => void) | null = null;
 		let disposed = false;
 		const appWindow = getCurrentWindow();
 		void appWindow
-			.onCloseRequested(async (event) => {
-				if (!windowState.dirty) return;
-				event.preventDefault();
-				if (await confirmDiscardEdits()) await appWindow.destroy();
-			})
+			.onCloseRequested((event) => handleCloseRequested(event, appWindow))
 			.then((off) => {
 				if (disposed) off();
 				else unlisten = off;
