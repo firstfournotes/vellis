@@ -38,9 +38,12 @@ impl WatchHandle {
     }
 }
 
-/// Read-only file-system provider.
+/// File-system provider.
 ///
-/// **No write, delete, create, or rename methods exist by design** (FR-02).
+/// Reading is the bulk of the surface. The single write method is
+/// `write_text` (要件#48 契約①), added when FR-02 (viewer-only) was
+/// withdrawn; **delete, create and rename still do not exist by design** —
+/// Vellis replaces a file's text in place or does nothing at all.
 #[async_trait]
 pub trait FileProvider: Send + Sync {
     /// URI scheme this provider handles (e.g. `"file"`, `"ssh"`).
@@ -82,6 +85,31 @@ pub trait FileProvider: Send + Sync {
     async fn read_text(&self, uri: &Uri) -> Result<String, FsError> {
         let bytes = self.read_bytes(uri).await?;
         String::from_utf8(bytes).map_err(|_| FsError::InvalidUtf8)
+    }
+
+    /// Replace the file at `uri` with `content`, encoded as UTF-8
+    /// (要件#48 契約①). The only write in the whole trait.
+    ///
+    /// Takes the raw URI string rather than a parsed `Uri`: the caller that
+    /// decides *whether* a write is allowed (`commands::document::save_document`)
+    /// works in URIs, and re-parsing here keeps the check and the write from
+    /// drifting apart on a partially-parsed path.
+    ///
+    /// Implementations must reject paths carrying `..` components before
+    /// touching the disk. They are **not** the place where the root
+    /// containment check lives — `LocalProvider` holds no root (要件#48 追補a);
+    /// that check is the command layer's, through
+    /// [`crate::fs::local::ensure_within_root`].
+    ///
+    /// Default implementation: `Unsupported`. A provider that can write says
+    /// so by overriding — read-only is what a provider gets for free, never
+    /// the other way round.
+    async fn write_text(&self, uri: &str, _content: &str) -> Result<(), FsError> {
+        Err(FsError::Unsupported(format!(
+            "{} provider cannot write: {}",
+            self.scheme(),
+            uri
+        )))
     }
 
     /// Start watching a URI for changes. Events are sent to `tx`.

@@ -137,8 +137,8 @@ describe('detectFileType — pdf を pdf と判定する(要件#29)', () => {
 		expect(detectFileType('file:///home/user.pdf/Makefile')).toBe('text');
 	});
 
-	test('pdf 以外の既存 binary は不変(zip/gz/exe/dll/woff2/mp3=要件#2 の代表例)', () => {
-		expectAll(['a.zip', 'a.gz', 'a.exe', 'a.dll', 'font.woff2', 'a.mp3'], 'binary');
+	test('pdf 以外の既存 binary は不変(zip/gz/exe/dll/woff2=要件#2 の代表例)', () => {
+		expectAll(['a.zip', 'a.gz', 'a.exe', 'a.dll', 'font.woff2'], 'binary');
 	});
 
 	test('pdf 以外の文書・プラットフォーム依存画像・ディスクイメージも binary のまま(doc/docx/xls/tiff/heic/dmg)', () => {

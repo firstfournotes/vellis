@@ -34,7 +34,12 @@ import { nearestFrame, seekTimeForFrame, type FrameIndex } from './video-frame';
 // `WAVEFORM_BUCKETS` を使うので2モジュールは相互参照になるが、**参照はどちらも
 // 関数本体の中だけ**(モジュール評価時に相手の束縛を読まない)なので、
 // どちらから先に読み込まれても TDZ に当たらない。
-import { WAVEFORM_MAX_RETAINED_SAMPLES, buildCoarsePeaks } from './waveform-zoom';
+import {
+	WAVEFORM_COARSE_STEP,
+	WAVEFORM_MAX_RETAINED_SAMPLES,
+	buildCoarsePeaks,
+	windowPeaksFromCoarse,
+} from './waveform-zoom';
 
 // ---------------------------------------------------------------------------
 // 定数(契約③④)
@@ -52,6 +57,17 @@ import { WAVEFORM_MAX_RETAINED_SAMPLES, buildCoarsePeaks } from './waveform-zoom
  * `too-large` に落ちていた ―― 要件#45 はそれを「音声バイトだけを見る」に置き換える。
  */
 export const WAVEFORM_MAX_SOURCE_BYTES = 256 * 1024 * 1024;
+
+/**
+ * fetch 経路(ファイル全量)の上限(512MiB・要件#50 契約⑬(b))。
+ *
+ * 抽出側と分けてあるのは、当たる対象の大きさが桁で違うから ―― 抽出側に来るのは音声
+ * バイトだけだが、fetch 経路はファイルそのものを丸ごとメモリに載せる。2時間の音声を
+ * 扱う要求(2026-09-10 由谷)に対し、mp3/m4a 320kbps の2時間=275MiB は旧 256MiB の門に
+ * 引っかかっていた。512MiB なら約3時間43分まで届く。この引き上げは fetch 経路全体に
+ * 効くので webm も同じ門を受ける(緩む方向のみ=要件#45 契約④のこの一点の明示改訂)。
+ */
+export const WAVEFORM_MAX_FETCH_BYTES = 512 * 1024 * 1024;
 
 /**
  * エンベロープのバケット本数の既定値(契約②)。
@@ -97,6 +113,18 @@ export type WaveformExtraction =
 /** 動画 URI → mov の抽出結果(実体は Tauri コマンドの invoke)。 */
 export type WaveformExtract = (videoUri: string) => Promise<WaveformExtraction>;
 
+/**
+ * wav の解析応答(要件#50 契約⑯)。
+ *
+ * `WaveformExtraction` と同型に見えるが、`ok` が運ぶのは**音声バイトではなく解析結果**
+ * ―― wav は無圧縮で、2時間の 44.1kHz ステレオは 1.27GB ある。Rust 側で 8kHz の包絡まで
+ * 落としたものが raw バイトで届く。縮退の語彙は抽出経路と同じ。
+ */
+export type WavWaveformAnalysis = WaveformExtraction;
+
+/** wav の URI → 解析結果(実体は Tauri コマンドの invoke)。 */
+export type WaveformAnalyzeWav = (uri: string) => Promise<WavWaveformAnalysis>;
+
 /** バケットごとの最小値・最大値(同じ長さ)。 */
 export type WaveformPeaks = { mins: Float32Array; maxs: Float32Array };
 
@@ -112,6 +140,12 @@ export type PeakRect = { x: number; y: number; w: number; h: number };
 export type WaveformPlan =
 	| { route: 'fetch' }
 	| { route: 'extract' }
+	/**
+	 * wav 専用の Rust 経路(要件#50 契約⑤⑯)。**サイズにも尺にも依らず常に**ここへ寄せる
+	 * ―― サイズで分けると閾値をまたいだ瞬間に波形の細かさが変わる(要件#45 が mp4 を
+	 * 抽出経路へ寄せたのと同じ判断)。
+	 */
+	| { route: 'wav' }
 	| { route: 'skip'; reason: 'no-audio' };
 
 /** fetch 経路の取得結果。 */
@@ -141,6 +175,14 @@ export type WaveformResult =
 			samples?: Float32Array[] | null;
 			coarse?: WaveformPeaks[];
 			sampleRate?: number;
+			/**
+			 * 解析尺(秒・要件#50 契約④(a))= `decoded.length / decoded.sampleRate`。
+			 *
+			 * **保持量の縮退(`samples: null`)とは独立に必ず埋まる** ―― `samples` は
+			 * レーンの配列であってその `length` はレーン数なので、尺はここでしか判らない。
+			 * `<audio>` が尺を言えないとき(NaN / Infinity)の横軸の受け皿になる(契約④(b))。
+			 */
+			durationSeconds?: number;
 	  }
 	| { state: 'no-audio' }
 	| { state: 'too-large' }
@@ -209,11 +251,24 @@ function lastSegment(uri: string): string {
  * デコードしなくても末尾は読める。
  */
 function isIsoBmffUri(videoUri: string): boolean {
-	const name = lastSegment(videoUri);
+	return lastExtension(videoUri) === 'mov' || lastExtension(videoUri) === 'mp4';
+}
+
+/** 末尾セグメントの最後の拡張子(小文字・無ければ空文字)。 */
+function lastExtension(uri: string): string {
+	const name = lastSegment(uri);
 	const dot = name.lastIndexOf('.');
-	if (dot < 0) return false;
-	const ext = name.slice(dot + 1).toLowerCase();
-	return ext === 'mov' || ext === 'mp4';
+	if (dot < 0) return '';
+	return name.slice(dot + 1).toLowerCase();
+}
+
+/**
+ * RIFF/WAVE か ―― ISO BMFF と同じく**末尾セグメントの拡張子**だけで見る(要件#50 契約⑤)。
+ *
+ * パス途中の `.wav`(`file:///a.wav/clip.mp3`)に引っ張られないのは同じ理由。
+ */
+function isWavUri(uri: string): boolean {
+	return lastExtension(uri) === 'wav';
 }
 
 /**
@@ -235,7 +290,11 @@ export function waveformPlan(
 	hasAudioTrack: boolean | null,
 ): WaveformPlan {
 	if (hasAudioTrack === false) return { route: 'skip', reason: 'no-audio' };
-	return isIsoBmffUri(videoUri) ? { route: 'extract' } : { route: 'fetch' };
+	if (isIsoBmffUri(videoUri)) return { route: 'extract' };
+	// wav はファイル全量を WebView に載せられない(2時間 1.27GB)ので、fetch より先に
+	// 専用経路へ分ける(要件#50 契約⑤⑬(c)=どちらの門も当てない)。
+	if (isWavUri(videoUri)) return { route: 'wav' };
+	return { route: 'fetch' };
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +309,8 @@ export function waveformPlan(
  *
  * 上限は**二重に**見る(契約④・要件#40 の 8MiB キャップと同型)。`content-length` の
  * 申告で落とせるものは本文を読む前に落とし、申告が無い/嘘のときは実測で落とす ――
- * 256MiB を超える動画の本文を読み始めてしまったら、上限がある意味が無い。
+ * 上限超のファイルの本文を読み始めてしまったら、上限がある意味が無い。門は fetch 側の
+ * `WAVEFORM_MAX_FETCH_BYTES`(要件#50 契約⑬(b) で抽出側と分離)。
  *
  * **throw しない**(契約⑤ fail-open)。404 は「無い」ではなく `unreadable` ―― 再生中の
  * 動画の実体が読めないのは異常事態で、サイドカーの不在(要件#40)とは層が違う。
@@ -267,13 +327,13 @@ export async function loadWaveformSource(videoUri: string): Promise<WaveformSour
 
 	// ヘッダ無しは `Number(null)` = 0 で素通りし、実測側の判定に委ねる。
 	const declared = Number(response.headers.get('content-length'));
-	if (Number.isFinite(declared) && declared > WAVEFORM_MAX_SOURCE_BYTES) {
+	if (Number.isFinite(declared) && declared > WAVEFORM_MAX_FETCH_BYTES) {
 		return { state: 'too-large' };
 	}
 
 	try {
 		const bytes = await response.arrayBuffer();
-		if (bytes.byteLength > WAVEFORM_MAX_SOURCE_BYTES) return { state: 'too-large' };
+		if (bytes.byteLength > WAVEFORM_MAX_FETCH_BYTES) return { state: 'too-large' };
 		return { state: 'ok', bytes };
 	} catch {
 		return { state: 'unreadable' };
@@ -538,16 +598,20 @@ export async function decodeWaveformAudio(bytes: ArrayBuffer): Promise<WaveformA
 }
 
 /**
- * Rust コマンドの応答を `WaveformExtraction` へ写す(契約③改訂の配線)。
+ * raw バイトを返す Rust コマンドの応答を `WaveformExtraction` へ写す(契約③改訂・⑯共通)。
  *
  * 応答は raw バイト(`tauri::ipc::Response`)で、フロントには `ArrayBuffer` として届く
  * ―― 256MiB 級のバイト列を JSON の数値配列にすると実用にならない。縮退の理由は
  * 拒否のメッセージが運び、**知らない理由はすべて `unreadable`** に倒す(fail-open)。
+ * 抽出(mov)と解析(wav)で写し方が同じなので、受け取りはここ1箇所に閉じる。
  */
-export async function extractWaveformAudio(videoUri: string): Promise<WaveformExtraction> {
-	let raw: unknown;
+async function invokeWaveformBytes(
+	command: string,
+	args: Record<string, string>,
+): Promise<WaveformExtraction> {
+	let raw: ArrayBuffer | ArrayBufferView;
 	try {
-		raw = await invoke<ArrayBuffer>('extract_waveform_audio', { uri: videoUri });
+		raw = await invoke<ArrayBuffer | ArrayBufferView>(command, args);
 	} catch (err) {
 		const reason = String(err ?? '');
 		if (reason.includes('no-audio')) return { state: 'no-audio' };
@@ -559,11 +623,89 @@ export async function extractWaveformAudio(videoUri: string): Promise<WaveformEx
 	// 落とさない(バイト列の受け取り方を1箇所に閉じる)。
 	if (raw instanceof ArrayBuffer) return { state: 'ok', bytes: raw };
 	if (ArrayBuffer.isView(raw)) {
-		const view = raw as ArrayBufferView;
-		const bytes = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+		const bytes = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
 		return { state: 'ok', bytes: bytes as ArrayBuffer };
 	}
 	return { state: 'unreadable' };
+}
+
+/** mov の音声抽出(契約③改訂の配線)。 */
+export async function extractWaveformAudio(videoUri: string): Promise<WaveformExtraction> {
+	return await invokeWaveformBytes('extract_waveform_audio', { uri: videoUri });
+}
+
+/** wav の解析(要件#50 契約⑯の配線)。写し方は抽出経路と同じ。 */
+export async function analyzeWavWaveform(uri: string): Promise<WavWaveformAnalysis> {
+	return await invokeWaveformBytes('analyze_wav_waveform', { uri });
+}
+
+/**
+ * wav の raw 応答を `WaveformResult` へ読み解く(要件#50 契約⑯(a))。
+ *
+ * レイアウトは Rust 側(`wav_waveform.rs`)と同一の正本で、全て little-endian:
+ * `channels` / `sampleRate` / `frames` / `coarseStep` / `coarseLen` / `hasSamples` の
+ * u32 6本 + `durationSeconds` の f64 + (hasSamples なら)レーン順の標本 +
+ * レーン順の「mins → maxs」。
+ *
+ * 要点は2つ。
+ *
+ * - **粗レベルは再計算しない**。Rust は生標本から直接採っているので包絡が広い側に
+ *   あり、間引き後の標本から作り直すとその広さを失う(拡大時に山が痩せる)
+ * - **壊れた raw は `unreadable`**(throw しない)。ヘッダの申告と実長が合わない
+ *   応答は、そこから先を読んでも意味のある値にならない
+ */
+function readWavAnalysis(bytes: ArrayBuffer, buckets: number): WaveformResult {
+	if (bytes.byteLength < 32) return { state: 'unreadable' };
+	const header = new DataView(bytes);
+	const channels = header.getUint32(0, true);
+	const sampleRate = header.getUint32(4, true);
+	const frames = header.getUint32(8, true);
+	const coarseLen = header.getUint32(16, true);
+	const hasSamples = header.getUint32(20, true) === 1;
+	const durationSeconds = header.getFloat64(24, true);
+
+	// レーン数の規則は `waveformLanes` と同じ(ステレオだけ2本)。
+	const laneCount = channels === 2 ? 2 : 1;
+	const sampleBytes = hasSamples ? laneCount * frames * 4 : 0;
+	if (bytes.byteLength !== 32 + sampleBytes + laneCount * coarseLen * 8) {
+		return { state: 'unreadable' };
+	}
+
+	// 標本は**写さずに view で持つ**(2時間の素材で 230MB あり、二重に持つ理由がない)。
+	// Rust が little-endian で書き、対象プラットフォームも little-endian なので、
+	// Float32Array を被せるだけでそのまま読める。
+	let at = 32;
+	const samples: Float32Array[] = [];
+	if (hasSamples) {
+		for (let lane = 0; lane < laneCount; lane++) {
+			samples.push(new Float32Array(bytes, at, frames));
+			at += frames * 4;
+		}
+	}
+	const coarse: WaveformPeaks[] = [];
+	for (let lane = 0; lane < laneCount; lane++) {
+		const mins = new Float32Array(bytes, at, coarseLen);
+		at += coarseLen * 4;
+		const maxs = new Float32Array(bytes, at, coarseLen);
+		at += coarseLen * 4;
+		coarse.push({ mins, maxs });
+	}
+
+	// 生標本を捨てた素材(長尺)でも帯は描けなければならないので、そのときは
+	// 粗レベルから全尺の窓を合成する(要件#47 契約⑦の縮退経路と同じ道具)。
+	const windowSeconds = sampleRate > 0 ? (coarseLen * WAVEFORM_COARSE_STEP) / sampleRate : 0;
+	const lanes = hasSamples
+		? samples.map((lane) => extractPeaks(lane, buckets))
+		: coarse.map((lane) => windowPeaksFromCoarse(lane, sampleRate, 0, windowSeconds, buckets));
+
+	return {
+		state: 'ready',
+		lanes,
+		samples: hasSamples ? samples : null,
+		coarse,
+		sampleRate,
+		durationSeconds,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +733,12 @@ export async function analyzeWaveform(
 		hasAudioTrack: boolean | null;
 		decode: WaveformDecode;
 		extract: WaveformExtract;
+		/**
+		 * wav の解析(要件#50 契約⑯)。**省略可** ―― 注入が無ければ wav は
+		 * `unreadable` へ縮退する(fetch へ倒すと 1.27GB を WebView に載せることになり、
+		 * 専用経路へ寄せた意味が消える)。
+		 */
+		analyzeWav?: WaveformAnalyzeWav;
 		buckets?: number;
 		/**
 		 * 生標本を保持してよい総数(要件#47 契約⑦)。既定は
@@ -602,6 +750,20 @@ export async function analyzeWaveform(
 ): Promise<WaveformResult> {
 	const plan = waveformPlan(videoUri, input.durationSeconds, input.hasAudioTrack);
 	if (plan.route === 'skip') return { state: plan.reason };
+	// wav の受け口(要件#50 契約⑤(ii)⑯)。Rust が 8kHz の包絡まで落として返すので、
+	// この経路では fetch も decode も通らない ―― 通せば 1.27GB を WebView に載せる
+	// ことになり、専用経路へ寄せた意味が消える(seam 未注入・失敗は fail-open)。
+	if (plan.route === 'wav') {
+		if (!input.analyzeWav) return { state: 'unreadable' };
+		let analysis: WavWaveformAnalysis;
+		try {
+			analysis = await input.analyzeWav(videoUri);
+		} catch {
+			return { state: 'unreadable' };
+		}
+		if (analysis.state !== 'ok') return { state: analysis.state };
+		return readWavAnalysis(analysis.bytes, input.buckets ?? WAVEFORM_BUCKETS);
+	}
 
 	let bytes: ArrayBuffer;
 	if (plan.route === 'extract') {
@@ -632,6 +794,9 @@ export async function analyzeWaveform(
 	if (!decoded || decoded.numberOfChannels < 1 || decoded.length < 1) {
 		return { state: 'no-audio' };
 	}
+	// 解析尺は**保持量の判定より前**に出す(要件#50 契約④(a))―― 縮退の分岐の中に
+	// 置くと、長尺(samples を捨てる素材)でだけ尺が欠ける。
+	const durationSeconds = decoded.sampleRate > 0 ? decoded.length / decoded.sampleRate : 0;
 	// 拡大表示の材料(要件#47 契約⑦)。粗レベルは**常に**作る ―― 生標本を捨てた
 	// 素材でも帯そのものは描けなければならない(縮退で失うのは深い倍率だけ)。
 	const samples = laneSamples(decoded);
@@ -645,5 +810,6 @@ export async function analyzeWaveform(
 		samples: retained > limit ? null : samples,
 		coarse,
 		sampleRate: decoded.sampleRate,
+		durationSeconds,
 	};
 }

@@ -3,7 +3,11 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "vellis", version, about = "A read-only Markdown viewer")]
+#[command(
+    name = "vellis",
+    version,
+    about = "A Markdown, HTML, image, video and audio viewer that edits text in place"
+)]
 pub struct Cli {
     /// Target path or URI (file, directory, ssh://..., et://...)
     pub path: Option<String>,

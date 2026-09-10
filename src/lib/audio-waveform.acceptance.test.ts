@@ -7,8 +7,9 @@
  * ## 本ファイルの判定範囲(要件の機械判定分=契約⑧の列挙に対応)
  * 経路判定(mp4/webm=fetch+decode 経路・mov=Rust 抽出経路=契約③改訂)・
  * バケット化(エンベロープの本数・境界・min/max の値=契約②③)・上限判定
- * (バイト数 256MiB・実尺60分=契約④。content-length 事前判定+実測の二重判定=
- * video-provenance.ts の 8MiB キャップと同型)・縮退分岐(音声なし・mov の
+ * (経路別の門=要件#50 契約⑬(b) で分離: fetch 側 `WAVEFORM_MAX_FETCH_BYTES` 512MiB・
+ * 抽出側 `WAVEFORM_MAX_SOURCE_BYTES` 256MiB 据え置き。content-length 事前判定+実測の
+ * 二重判定= video-provenance.ts の 8MiB キャップと同型)・縮退分岐(音声なし・mov の
  * 未対応コーデック・上限超過・読取失敗=契約⑤。fetch モック)・クリック位置→時刻→
  * フレーム吸着のシーク先計算(契約⑥=要件#37 の nearestFrame/seekTimeForFrame との
  * 等式契約)・**レーン分解とレーン縦配置(追補d=第2周: 2ch は L/R 上下2段・
@@ -36,6 +37,15 @@
  * mp4=fetch・60分上限)はこの追補で読み替えること。新契約の判定は本ファイル末尾の
  * 「要件#45」セクションが固定する。
  *
+ * ## 【要件#50(2026-09-10)追補=音声ファイルの波形】
+ * requirements.md #50 契約⑤⑬(b) がさらに一部を改訂する(追補a に列挙された範囲のみ):
+ * **fetch 経路の上限は新設 `WAVEFORM_MAX_FETCH_BYTES = 512MiB` へ分離**
+ * (`loadWaveformSource` の二重判定はこちらを見る。webm もこの引き上げを受ける=
+ * #45 契約④「webm は現状維持」のこの一点に限る明示改訂・緩む方向のみ)、
+ * `WAVEFORM_MAX_SOURCE_BYTES = 256MiB` は**抽出経路の門として値も名前も据え置き**。
+ * `waveformPlan` は **wav → 新設 `wav` 経路**を加えた3枝になる(wav は fetch も
+ * extract も通らない)。新契約の判定は本ファイル末尾の「要件#50」セクションが固定する。
+ *
  * 実 decode(OfflineAudioContext(mono/8kHz)の decodeAudioData=契約③)は jsdom に
  * 存在しないため、モジュールは decode と mov 抽出(extract)を注入引数で受け、
  * AudioBuffer は構造的型(WaveformAudioBuffer)で扱う(契約⑦)。本テストは
@@ -54,8 +64,10 @@
  * コンポーネントは配線だけ=契約⑦・video-frame.ts / video-provenance.ts と同じ家風)
  *
  * ### 定数(契約③④。値は初期値として acceptance で固定=調整は要件側の改定)
- * - `WAVEFORM_MAX_SOURCE_BYTES = 256 * 1024 * 1024` — 適用先は経路で異なる:
- *   fetch 経路=ファイル全量・extract 経路=**抽出後の音声バイト列**(契約④改訂)
+ * - `WAVEFORM_MAX_SOURCE_BYTES = 256 * 1024 * 1024` — **抽出経路(抽出後の音声
+ *   バイト列)専用の門**(要件#50 契約⑬(b) で fetch 側と分離・値も名前も据え置き)
+ * - `WAVEFORM_MAX_FETCH_BYTES = 512 * 1024 * 1024` — **fetch 経路(ファイル全量)の
+ *   門**(要件#50 契約⑬(b) 新設。mp3/m4a/webm に当たる・wav はどちらの門も通らない)
  * - `WAVEFORM_MAX_DURATION_SECONDS = 3600`(実尺上限60分・両経路共通)
  * - `WAVEFORM_BUCKETS = 2000`(「約2000バケット」の既定本数)
  *
@@ -325,10 +337,14 @@ function cfrIndex(fpsNum: number, fpsDen: number, frameCount: number): FrameInde
 // 定数 — 上限とバケット数の初期値(契約③④)
 // ---------------------------------------------------------------------------
 
-describe('定数 — 上限とバケット数(要件#41 契約③④・実尺上限は要件#45 契約②で撤廃)', () => {
-	it('WAVEFORM_MAX_SOURCE_BYTES=256MiB・既定バケット=2000(WAVEFORM_MAX_DURATION_SECONDS は撤廃)', () => {
+describe('定数 — 上限とバケット数(要件#41 契約③④・実尺上限は要件#45 契約②で撤廃・fetch 上限は要件#50 契約⑬(b) で分離)', () => {
+	it('WAVEFORM_MAX_SOURCE_BYTES=256MiB(抽出側の門として存置)・既定バケット=2000(WAVEFORM_MAX_DURATION_SECONDS は撤廃)', () => {
 		expect(WAVEFORM_MAX_SOURCE_BYTES).toBe(256 * 1024 * 1024);
 		expect(WAVEFORM_BUCKETS).toBe(2000);
+	});
+
+	it('WAVEFORM_MAX_FETCH_BYTES=512MiB(fetch 側の門=要件#50 契約⑬(b) 新設。2時間の mp3/m4a 320kbps=275MiB が通る)', () => {
+		expect(fetchLimitBytes()).toBe(512 * 1024 * 1024);
 	});
 });
 
@@ -425,8 +441,12 @@ describe('loadWaveformSource — fetch 経路の取得と上限の二重判定(�
 		expect(await loadWaveformSource(VIDEO)).toMatchObject({ state: 'unreadable' });
 	});
 
+	// 上限4件の参照定数は要件#50 契約⑬(b) で fetch 側の門(WAVEFORM_MAX_FETCH_BYTES=
+	// 512MiB)へ差し替え(2026-09-10 追補a)。「超」だけを弾く・ちょうどは通す・
+	// 事前判定+実測の二重判定、という判定の意味は不変。
+
 	it('content-length 申告が上限超 → too-large・本文は読まない(契約④の事前判定)', async () => {
-		const response = fakeResponse(200, new Uint8Array([1, 2, 3]), WAVEFORM_MAX_SOURCE_BYTES + 1);
+		const response = fakeResponse(200, new Uint8Array([1, 2, 3]), fetchLimitBytes() + 1);
 		fetchMock.mockResolvedValueOnce(response);
 		expect(await loadWaveformSource(VIDEO)).toMatchObject({ state: 'too-large' });
 		expect(response.arrayBuffer).not.toHaveBeenCalled();
@@ -435,25 +455,25 @@ describe('loadWaveformSource — fetch 経路の取得と上限の二重判定(�
 
 	it('content-length 申告がちょうど上限 → 弾かない(「超」だけを弾く)', async () => {
 		fetchMock.mockResolvedValueOnce(
-			fakeResponse(200, new Uint8Array([1, 2, 3]), WAVEFORM_MAX_SOURCE_BYTES),
+			fakeResponse(200, new Uint8Array([1, 2, 3]), fetchLimitBytes()),
 		);
 		expect(await loadWaveformSource(VIDEO)).toMatchObject({ state: 'ok' });
 	});
 
 	it('content-length 無し・実測が上限超 → too-large(二重判定の実測側)', async () => {
 		fetchMock.mockResolvedValueOnce(
-			fakeResponse(200, new Uint8Array(WAVEFORM_MAX_SOURCE_BYTES + 1), null),
+			fakeResponse(200, new Uint8Array(fetchLimitBytes() + 1), null),
 		);
 		expect(await loadWaveformSource(VIDEO)).toMatchObject({ state: 'too-large' });
 	});
 
 	it('content-length 無し・実測ちょうど上限 → ok', async () => {
 		fetchMock.mockResolvedValueOnce(
-			fakeResponse(200, new Uint8Array(WAVEFORM_MAX_SOURCE_BYTES), null),
+			fakeResponse(200, new Uint8Array(fetchLimitBytes()), null),
 		);
 		const result = await loadWaveformSource(VIDEO);
 		expect(result).toMatchObject({ state: 'ok' });
-		if (result.state === 'ok') expect(result.bytes.byteLength).toBe(WAVEFORM_MAX_SOURCE_BYTES);
+		if (result.state === 'ok') expect(result.bytes.byteLength).toBe(fetchLimitBytes());
 	});
 });
 
@@ -1424,8 +1444,10 @@ describe('analyzeWaveform — webm は fetch 経路の現状維持(要件#45 契
 		expect(firstRequestUrl(fetchMock)).toBe(toAssetUri(VIDEO_WEBM));
 	});
 
-	it('webm の content-length 申告が 256MiB 超 → too-large・本文を読まない(現状維持)', async () => {
-		const response = fakeResponse(200, new Uint8Array([1, 2]), WAVEFORM_MAX_SOURCE_BYTES + 1);
+	// webm 上限2件は要件#50 契約⑬(b) で fetch 側の門(512MiB)へ追随(2026-09-10 追補a。
+	// #45 契約④「webm は現状維持」のこの一点に限る明示改訂=緩む方向のみ)。
+	it('webm の content-length 申告が 512MiB 超 → too-large・本文を読まない(fetch 側の門)', async () => {
+		const response = fakeResponse(200, new Uint8Array([1, 2]), fetchLimitBytes() + 1);
 		fetchMock.mockResolvedValueOnce(response);
 		const decode = decodeTo(audioBuf([[0.25]]));
 		expect(
@@ -1441,9 +1463,9 @@ describe('analyzeWaveform — webm は fetch 経路の現状維持(要件#45 契
 		expect(decode).not.toHaveBeenCalled();
 	});
 
-	it('webm の実測が 256MiB 超 → too-large(二重判定の実測側も現状維持)', async () => {
+	it('webm の実測が 512MiB 超 → too-large(二重判定の実測側も fetch 側の門)', async () => {
 		fetchMock.mockResolvedValueOnce(
-			fakeResponse(200, new Uint8Array(WAVEFORM_MAX_SOURCE_BYTES + 1), null),
+			fakeResponse(200, new Uint8Array(fetchLimitBytes() + 1), null),
 		);
 		expect(
 			await analyzeWaveform(VIDEO_WEBM, {
@@ -1538,5 +1560,125 @@ describe('waveformBandNote — 解析中状態の出し分け(要件#45 契約�
 		}
 		const analyzing = bandNote!(null, true) as string;
 		expect(new Set([...notes, analyzing]).size).toBe(degraded.length + 1);
+	});
+});
+
+// ===========================================================================
+// 要件#50 の受け入れテスト(requirements.md #50)— 音声波形: 経路3枝化と上限分離(2周目)
+// ===========================================================================
+//
+// 「音声ファイル(wav / mp3 / m4a)をアプリ内で再生でき、プレーヤー画面に音声の波形を
+//  表示する」のうち、本ファイルが受け持つのは**経路の3枝化(契約⑤)と fetch 上限の
+//  分離(契約⑬(b))**。
+//
+// ## 契約(requirements.md 54行目=#50 が正本)
+// ⑤ `waveformPlan` の経路は3枝になる:
+//    (a) mov / mp4(ISO BMFF)→ 既存 `extract`(判定も定数も完全に不変)
+//    (b) **wav → 新設 `wav` 経路**(実体=契約⑯の Rust コマンド。**サイズ・尺に依らず
+//        常に wav 経路**=サイズで分けると閾値をまたいだ瞬間に波形の細かさが変わり
+//        「約25分の崖」が残るため)。判別子は既存 `WaveformPlan` と同じ `route`
+//        (`{ route: 'wav' }`。契約⑯が要素を足す余地を残すため照合は toMatchObject)
+//    (c) それ以外(mp3 / m4a / webm / 不明)→ 既存 `fetch` 経路
+//    hasAudioTrack === false → skip/no-audio が経路より先、は従来どおり。
+// ⑬(b) 上限定数・判定の分離:
+//    - 新設 `WAVEFORM_MAX_FETCH_BYTES = 512 * 1024 * 1024` — `loadWaveformSource` の
+//      content-length 事前判定と実測の二重判定はこちらを見る(上の4件+webm 2件を
+//      2026-09-10 追補a で差し替え済み。「超」だけを弾く等、判定の意味は不変)
+//    - `WAVEFORM_MAX_SOURCE_BYTES = 256MiB` は抽出経路の門として値も名前も据え置き
+//      (:329 の固定と抽出側 too-large の既存ケースは無改変で有効なまま)
+//    - **wav はどちらの門も通らない**(⑬(c)=wav 経路は fetch しない。尺で縮退しない)
+//
+// ## 周回分割(ここでは判定しないもの=3周目)
+// - wav 経路の中身(契約⑯= `analyze_wav_waveform` の IPC 応答の形・RIFF パース・
+//   受け口の WaveformResult への写し)は3周目(src-tauri/tests/acceptance_req50.rs と
+//   TS 側受け口テスト)の持ち場。ここでは「wav が fetch / extract のどちらにも
+//   流れない」ことだけを固定し、wav 経路の解析結果の状態には断言を置かない
+//   (throw しない= fail-open だけは既存契約どおり要求する)
+// - `analyzeWaveform` の `durationSeconds`(契約④(a))と門の経路別の当たり先の統合は
+//   audio-viewing.acceptance.test.ts の要件#50 2周目セクションが判定する
+
+const AUDIO_WAV = 'file:///Users/a/music/take.wav';
+const AUDIO_MP3 = 'file:///Users/a/music/song.mp3';
+const AUDIO_M4A = 'file:///Users/a/music/voice.m4a';
+
+/**
+ * fetch 側の上限 `WAVEFORM_MAX_FETCH_BYTES`(要件#50 契約⑬(b))。新設 export は
+ * namespace 経由で参照する(#45 の waveformBandNote と同じ作法)―― 実装前は
+ * undefined なので、参照した各ケースだけが assertion で赤になり、モジュール読込は
+ * 落ちない。function 宣言は巻き上がるので、ファイル前半の fetch 上限ケースからも
+ * 呼べる。
+ */
+function fetchLimitBytes(): number {
+	const value = (AudioWaveform as unknown as Record<string, unknown>).WAVEFORM_MAX_FETCH_BYTES;
+	expect(
+		value,
+		'WAVEFORM_MAX_FETCH_BYTES(要件#50 契約⑬(b))が export されていること',
+	).toBeTypeOf('number');
+	return value as number;
+}
+
+// ---------------------------------------------------------------------------
+// waveformPlan — 経路の3枝化(要件#50 契約⑤)
+// ---------------------------------------------------------------------------
+
+describe('waveformPlan — wav を加えた経路3枝(要件#50 契約⑤)', () => {
+	it('wav → 新設 wav 経路(サイズ・尺に依らず常に=約25分の崖を残さない)', () => {
+		expect(waveformPlan(AUDIO_WAV, null, true)).toMatchObject({ route: 'wav' });
+		expect(waveformPlan(AUDIO_WAV, 7200, true)).toMatchObject({ route: 'wav' });
+		expect(waveformPlan(AUDIO_WAV, null, null)).toMatchObject({ route: 'wav' });
+	});
+
+	it('拡張子は大文字小文字を区別せず、末尾セグメントで判定する(.WAV / .Wav も wav 経路・パス途中の .wav に引っ張られない)', () => {
+		expect(waveformPlan('file:///a/TAKE.WAV', null, true)).toMatchObject({ route: 'wav' });
+		expect(waveformPlan('file:///a/take.Wav', null, true)).toMatchObject({ route: 'wav' });
+		expect(waveformPlan('file:///a.wav/clip.mp4', null, true)).toEqual({ route: 'extract' });
+		expect(waveformPlan('file:///a.wav/clip.mp3', null, true)).toEqual({ route: 'fetch' });
+	});
+
+	it('mp3 / m4a → 既存 fetch 経路(枝(c))', () => {
+		expect(waveformPlan(AUDIO_MP3, null, true)).toEqual({ route: 'fetch' });
+		expect(waveformPlan(AUDIO_M4A, null, true)).toEqual({ route: 'fetch' });
+	});
+
+	it('mov / mp4 → extract・webm / 不明 → fetch は不変(枝(a)(c)=動画側の判定は完全不変)', () => {
+		expect(waveformPlan(VIDEO, 10, true)).toEqual({ route: 'extract' });
+		expect(waveformPlan(VIDEO_MOV, 10, true)).toEqual({ route: 'extract' });
+		expect(waveformPlan(VIDEO_WEBM, 10, true)).toEqual({ route: 'fetch' });
+		expect(waveformPlan('file:///a/clip.mkv', 10, true)).toEqual({ route: 'fetch' });
+	});
+
+	it('音声トラックなし(false)→ skip/no-audio が経路より先(wav でも)', () => {
+		expect(waveformPlan(AUDIO_WAV, null, false)).toEqual({ route: 'skip', reason: 'no-audio' });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// analyzeWaveform — wav はどちらの門も通らない(要件#50 契約⑤⑬(c))
+// ---------------------------------------------------------------------------
+
+describe('analyzeWaveform — wav は fetch / extract のどちらにも流れない(要件#50 契約⑤⑬(c))', () => {
+	const fetchMock = vi.fn();
+
+	beforeEach(() => {
+		fetchMock.mockReset();
+		vi.stubGlobal('fetch', fetchMock);
+	});
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('wav では fetch も extract も呼ばれず、throw もしない(fail-open。wav 経路の中身=IPC 応答の形は3周目)', async () => {
+		const extract = extractNever();
+		const result = await analyzeWaveform(AUDIO_WAV, {
+			durationSeconds: null,
+			hasAudioTrack: null,
+			decode: decodeTo(audioBuf([[0.5, -0.5]])),
+			extract,
+		});
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(extract).not.toHaveBeenCalled();
+		// 状態の中身(縮退か ready か)は3周目の持ち場。ここでは「WaveformResult として
+		// 返る」ことだけを固定する。
+		expect(typeof result.state).toBe('string');
 	});
 });

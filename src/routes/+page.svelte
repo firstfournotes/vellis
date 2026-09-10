@@ -5,6 +5,7 @@
 	import HtmlViewer from '../components/HtmlViewer.svelte';
 	import ImageViewer from '../components/ImageViewer.svelte';
 	import VideoViewer from '../components/VideoViewer.svelte';
+	import AudioViewer from '../components/AudioViewer.svelte';
 	import PdfViewer from '../components/PdfViewer.svelte';
 	import EmptyState from '../components/EmptyState.svelte';
 	import StatusBar from '../components/StatusBar.svelte';
@@ -17,6 +18,7 @@
 	import { invoke } from '$lib/ipc';
 	import { listen } from '$lib/events';
 	import { open } from '@tauri-apps/plugin-dialog';
+	import { getCurrentWindow } from '@tauri-apps/api/window';
 	import { windowState, type DocumentPayload, type Entry } from '../stores/window-state.svelte';
 	import { marksStore } from '../stores/marks.svelte';
 	import { featureFlags } from '$lib/flags.svelte';
@@ -53,6 +55,9 @@
 		registerDuplicateWindowListener,
 		type DuplicateSnapshot
 	} from '$lib/duplicate-window';
+	import { MENU_EDIT_EVENT } from '$lib/document-edit';
+	import { confirmDiscardEdits } from '$lib/edit-guard';
+	import { MENU_SAVE_EVENT, saveDocument } from '$lib/save-document';
 	import { DEFAULT_ZOOM, isZoomTarget, loadZoom, registerZoomListeners } from '$lib/zoom';
 	import { printFailedMessage, registerPrintListener } from '$lib/print-html';
 	import { videoViewMode } from '$lib/video-viewing';
@@ -232,6 +237,91 @@
 		};
 	});
 
+	// --- 明示保存と編集の関門(要件#48) ----------------------------------
+	// ⌘S / File > Save。Rust 側はフォーカス中の窓へ「保存したい」と投げるだけで、
+	// 何を保存するか(編集中か・バッファの中身)を知っているのはこの窓
+	// (Open… / Print… / ズームと同じ分担)。自動保存は無い(契約⑤)。
+	//
+	// 保存するのは編集中で、かつ変更があるときだけ。閲覧中の ⌘S は何もしない —
+	// 同じ内容を書き戻せば mtime だけが動き、監視・スナップショット・drift 検知が
+	// 空振りする。
+	async function saveCurrentEdits() {
+		const doc = windowState.currentDocument;
+		if (!doc || windowState.editMode !== 'edit' || !windowState.dirty) return;
+		const buffer = windowState.editBuffer;
+		if (buffer === null) return;
+		try {
+			await saveDocument(doc.uri, buffer);
+		} catch (err) {
+			alert(`保存に失敗しました: ${err}`);
+		}
+	}
+
+	// Edit メニュー「Edit」(⌘E)= 閲覧⇄編集のトグル(契約③・追補b)。本文の
+	// ダブルクリックと並ぶもう1つの明示操作で、html 種別にとっては唯一の入口
+	// (閲覧中の html は HtmlViewer の iframe の中にあり、本文のダブルクリックが
+	// アプリまで届かない)。編集に入れない文書では beginEdit が false を返して
+	// 何も起きない。
+	async function toggleEditMode() {
+		if (windowState.editMode !== 'edit') {
+			windowState.beginEdit();
+			return;
+		}
+		// 閲覧へ戻る=編集バッファを捨てる。保存していない変更があるときだけ聞く
+		// (`confirmDiscardEdits` は保存 / 破棄まで済ませてから編集を畳む。
+		// キャンセルなら編集中のまま)。
+		if (windowState.dirty) {
+			await confirmDiscardEdits();
+			return;
+		}
+		windowState.endEdit();
+	}
+
+	// 購読の解除があるので await を挟まない専用の onMount に分けている。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void Promise.all([
+			listen(MENU_SAVE_EVENT, () => {
+				void saveCurrentEdits();
+			}),
+			listen(MENU_EDIT_EVENT, () => {
+				void toggleEditMode();
+			}),
+		]).then((offs) => {
+			const off = () => offs.forEach((f) => f());
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
+	// 要件#48 契約④: dirty のまま閉じようとしたら聞く。閉窓は取り消せないので、
+	// いったん止めて(preventDefault)から確認し、進んでよいと決まったときだけ
+	// 改めて閉じる。確認と保存の実体は `$lib/edit-guard`。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		const appWindow = getCurrentWindow();
+		void appWindow
+			.onCloseRequested(async (event) => {
+				if (!windowState.dirty) return;
+				event.preventDefault();
+				if (await confirmDiscardEdits()) await appWindow.destroy();
+			})
+			.then((off) => {
+				if (disposed) off();
+				else unlisten = off;
+			});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
 	function handleRequestAddMark(anchor: BuiltAnchor) {
 		dialog = { open: true, anchor };
 	}
@@ -330,6 +420,8 @@
 	}
 
 	async function pickFolderAndSetRoot() {
+		// 要件#48 契約④: root を変えると編集は持ち越せない。選ばせる前に聞く。
+		if (!(await confirmDiscardEdits())) return;
 		const selected = await open({
 			directory: true,
 			multiple: false,
@@ -348,6 +440,8 @@
 	 * the user can pick another one.
 	 */
 	async function openFromHistory(uri: string) {
+		// 要件#48 契約④: 履歴からの root 切替も編集を捨てる操作。
+		if (!(await confirmDiscardEdits())) return;
 		try {
 			applyRoot(await openHistoryEntry<RootPayload>(uri));
 		} catch (err) {
@@ -366,6 +460,9 @@
 		let unlisten: (() => void) | null = null;
 		let disposed = false;
 		void registerMenuOpenListeners<RootPayload, DocumentPayload>({
+			// 要件#48 契約④: Open… / Open Folder… は root も文書も差し替えるので、
+			// ダイアログを出す前に編集の始末を聞く。
+			canProceed: confirmDiscardEdits,
 			onOpened: (opened) => {
 				// applyRoot が履歴選択画面(要件#4)も閉じるので、選択中に
 				// メニューから開いた場合もそのまま本体へ移る。文書は root 切替の
@@ -518,9 +615,13 @@
 		// File content change event (DocumentCoordinator sends content).
 		// Rebind is driven by the `currentDocument` $effect above —
 		// setDocument updates it and the effect handles the rest.
+		// 要件#48 契約⑥: 差し替えるかどうかは `applyFileChanged` が決める。
+		// 自分の保存が返ってきただけのエコーは捨て(編集中の DOM を再レンダーで
+		// 壊さない)、編集中の変更と食い違う外部変更は文書を動かさずに脇へ置く
+		// (Viewer が衝突表示を出す)。それ以外は従来どおり差し替わる。
 		await listen<FileChangedPayload>('file_changed', (e) => {
 			if (e.payload.uri === windowState.currentDocument?.uri) {
-				windowState.setDocument(e.payload);
+				windowState.applyFileChanged(e.payload);
 			}
 		});
 
@@ -724,8 +825,13 @@
 				onpointercancel={endPaneResize}
 			></div>
 			{#if windowState.currentDocument}
-				<!-- srcdoc がある=HTML ファイル(要件#8)。生の content は {@html} 経路に載せない -->
-				{#if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedSrcdoc !== null}
+				<!--
+					srcdoc がある=HTML ファイル(要件#8)。生の content は {@html} 経路に載せない。
+					要件#48 契約②: 編集中(ソース編集モード)だけは HtmlViewer へ回さない —
+					編集するのはレンダリング結果ではなく RAW なので、`<pre contenteditable>` を
+					持つ Viewer(下の {:else})へ落とす。Esc / 「編集を終える」で戻ればここへ戻る。
+				-->
+				{#if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedSrcdoc !== null && windowState.editMode === 'view'}
 					<HtmlViewer srcdoc={windowState.renderedSrcdoc} />
 					<!-- imageSrc がある=画像ファイル(要件#16)。srcdoc と同じ形の分岐 -->
 				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedImageSrc !== null}
@@ -799,6 +905,17 @@
 							/>
 						{/if}
 					</div>
+					<!-- audioSrc がある=音声(要件#50)。videoSrc と同じ形の分岐で、版数も
+					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
+					     ssh もこの経路を通る(出し分けは AudioViewer の中) -->
+				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedAudioSrc !== null}
+					<AudioViewer
+						uri={windowState.currentDocument.uri}
+						src={imageSrcWithVersion(
+							windowState.renderedAudioSrc,
+							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+						)}
+					/>
 					<!-- pdfSrc がある=PDF(要件#29)。videoSrc と同じ形の分岐で、版数も
 					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
 					     ssh もこの経路を通る(出し分けは PdfViewer の中) -->

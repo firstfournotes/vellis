@@ -2,6 +2,7 @@
  * 要件#38 の受け入れテスト(requirements.md #38)— フロント層
  * 「HTML ビューア表示中も ⌘P(File > Print…)で表示中のレンダリング結果を
  *  印刷できる(現状は印刷不能= backlog #82 のバグ修正)」
+ * ※ FileType 網羅表に要件#50 追補b で audio 追加(2026-09-10)
  *
  * 契約(2026-08-30 登録・方式はプローブ実測で確定済み=案a′):
  * - ① 原因=印刷は menu.rs の Webview::print()(メインフレーム対象)+ print.css の
@@ -279,6 +280,7 @@ describe('printRouteFor — html だけ印刷窓・他は従来のメインフ�
 			image: 'main-frame',
 			model3d: 'main-frame',
 			video: 'main-frame',
+			audio: 'main-frame',
 			pdf: 'main-frame',
 			binary: 'main-frame',
 		};

@@ -111,7 +111,7 @@ describe('detectFileType — テキスト系', () => {
 
 describe('detectFileType — バイナリ系', () => {
 	test('代表的バイナリ拡張子を binary と判定する(画像8種は要件#16 で image へ・mp4 は要件#28 で video へ分離済み)', () => {
-		const exts = ['zip', 'gz', 'exe', 'dll', 'woff2', 'mp3'];
+		const exts = ['zip', 'gz', 'exe', 'dll', 'woff2'];
 		expectAll(
 			exts.map((ext) => `blob.${ext}`),
 			'binary',

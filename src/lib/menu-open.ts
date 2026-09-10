@@ -60,6 +60,14 @@ export type MenuOpenHandlers<Root = unknown, Doc = unknown> = {
 	onOpened: (opened: MenuOpened<Root, Doc>) => void;
 	/** 失敗の通知先。省略可 — 省略しても例外は外へ出さない。 */
 	onError?: (err: unknown) => void;
+	/**
+	 * ダイアログを出す前の関門(要件#48 契約④)。false を返すと何もしない。
+	 *
+	 * 保存していない編集があるまま別の root / 文書へ移ると編集が黙って消えるので、
+	 * 窓の側に聞いてから進む。省略時は常に進む(既存の呼び出しは無変化)。
+	 * 何を聞くかを知っているのは窓なので、判断はここには置かない。
+	 */
+	canProceed?: () => Promise<boolean> | boolean;
 };
 
 /**
@@ -185,6 +193,9 @@ export async function registerMenuOpenListeners<Root = unknown, Doc = unknown>(
 ): Promise<() => void> {
 	const run = async (kind: MenuOpenKind): Promise<void> => {
 		try {
+			// 関門はダイアログの前(要件#48 契約④)。選ばせてから「やっぱり中止」に
+			// させない。
+			if (handlers.canProceed && !(await handlers.canProceed())) return;
 			const opened = await openFromMenu<Root, Doc>(kind);
 			if (opened !== null) handlers.onOpened(opened);
 		} catch (err) {

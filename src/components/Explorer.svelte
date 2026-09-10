@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { invoke } from '$lib/ipc';
+	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { detectFileType } from '$lib/file-type';
 	import { openForDisplay } from '$lib/open-document';
 	import { DEFAULT_PANE_WIDTH } from '$lib/pane-resize';
@@ -48,6 +49,8 @@
 
 	async function goUp() {
 		if (!parent) return;
+		// 要件#48 契約④: root を上げると編集は持ち越せない。先に始末を聞く。
+		if (!(await confirmDiscardEdits())) return;
 		const res = await invoke<RootPayload>('set_root', { uri: parent });
 		windowState.applyRoot(res.root_uri, res.entries, res.document_retained);
 	}
@@ -56,6 +59,9 @@
 		// 要件#2: バイナリは表示対象外。エラーにはせず、開かないだけにする。
 		// 画像(要件#16)・動画(要件#28)はここを通る — どちらも binary ではない。
 		if (detectFileType(entry.uri) === 'binary') return;
+		// 要件#48 契約④: この窓で別のファイルを開くと編集は消える。新しい窓で
+		// 開く(Shift)ときはこの窓の文書が動かないので聞かない。
+		if (!e.shiftKey && !(await confirmDiscardEdits())) return;
 		if (e.shiftKey) {
 			// Open in a new window -- current window state is unaffected.
 			await invoke('new_window', { path: entry.uri, root });

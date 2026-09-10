@@ -25,6 +25,7 @@ export type FileType =
 	| 'image'
 	| 'model3d'
 	| 'video'
+	| 'audio'
 	| 'pdf'
 	| 'binary';
 
@@ -74,10 +75,19 @@ const MODEL3D_EXTENSIONS = new Set(['stl', '3mf']);
  * mp4 / mov / webm は WebKit がそのままデコードするのでインライン再生でき、
  * mkv / avi はデコーダが無いので「既定アプリで開く」へ誘導するプレースホルダに
  * なる — が、その出し分けは表示側(`video-viewing.ts` の `videoViewMode`)の
- * 持ち場で、分類はどちらも `video`。音声(mp3/wav/flac/m4a/ogg)は別要件なので
- * binary のまま(docs/video-viewing.md §7 Q7)。
+ * 持ち場で、分類はどちらも `video`。
  */
 const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'webm', 'mkv', 'avi']);
+
+/**
+ * 音声(要件#50)。バイナリのプレースホルダではなく `AudioViewer` へ回す3種。
+ *
+ * flac / ogg は WebKit の対応が版依存なので `binary` に据え置く — 「対応と
+ * 言った形式が黙って無音になる」ことを避ける(要件#28 で mkv/avi を
+ * プレースホルダにしたのと同じ筋)。ssh リモートもここを通り、再生できるか
+ * どうかの出し分けは表示側(`audio-viewing.ts` の `audioViewMode`)の持ち場。
+ */
+const AUDIO_EXTENSIONS = new Set(['wav', 'mp3', 'm4a']);
 
 /**
  * PDF(要件#29)。バイナリのプレースホルダではなく `PdfViewer` へ回す唯一の拡張子。
@@ -126,12 +136,10 @@ const BINARY_EXTENSIONS = new Set([
 	'ttf',
 	'otf',
 	'eot',
-	// media(動画5種は video へ移した=要件#28。ここに残るのは音声だけ)
-	'mp3',
-	'wav',
+	// media(動画5種は video へ・wav/mp3/m4a は audio へ移した=要件#28 / #50。
+	// ここに残るのは WebKit の対応が版依存の2種)
 	'flac',
 	'ogg',
-	'm4a',
 	// databases / disk images
 	'sqlite',
 	'db',
@@ -158,6 +166,7 @@ export function detectFileType(nameOrUri: string): FileType {
 	if (IMAGE_EXTENSIONS.has(ext)) return 'image';
 	if (MODEL3D_EXTENSIONS.has(ext)) return 'model3d';
 	if (VIDEO_EXTENSIONS.has(ext)) return 'video';
+	if (AUDIO_EXTENSIONS.has(ext)) return 'audio';
 	if (PDF_EXTENSIONS.has(ext)) return 'pdf';
 	if (BINARY_EXTENSIONS.has(ext)) return 'binary';
 	return 'text';
@@ -219,6 +228,14 @@ export interface DisplayResult {
 	 */
 	videoSrc?: string;
 	/**
+	 * Present only for audio files: the `vellis-asset:` URI `AudioViewer` puts on
+	 * `<audio src>` (要件#50). Its presence selects the audio viewer, the same way
+	 * `videoSrc` selects `VideoViewer`. ssh remotes carry it too — the viewer shows
+	 * a placeholder instead of a player, and that decision belongs to
+	 * `audioViewMode` (`$lib/audio-viewing`).
+	 */
+	audioSrc?: string;
+	/**
 	 * Present only for PDF files: the `vellis-asset:` URI `PdfViewer` puts on the
 	 * `<iframe src>` WKWebView renders natively (要件#29). Its presence selects the
 	 * PDF viewer, the same way `srcdoc` selects `HtmlViewer`. ssh remotes carry it
@@ -268,6 +285,11 @@ export async function renderForDisplay(
 			// インライン再生できないコンテナ・ssh もここを通り、プレースホルダの
 			// 出し分けは `videoViewMode` が引き受ける。
 			return { html: '', index: null, videoSrc: toAssetUri(uri) };
+		case 'audio':
+			// 動画と同じ形: 本体バイトは本文に載せず、`<audio src>` が asset URI を
+			// 取りに行く(要件#50 契約①)。`content` は空(`open_binary_document` 経由)。
+			// ssh もここを通り、プレースホルダの出し分けは `audioViewMode` が引き受ける。
+			return { html: '', index: null, audioSrc: toAssetUri(uri) };
 		case 'pdf':
 			// 動画と同じ形: 本体バイトは本文に載せず、`<iframe src>` が asset URI を
 			// 取りに行き、描画は WKWebView のネイティブ PDF ビューアが行う(要件#29)。

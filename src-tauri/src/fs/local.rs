@@ -257,6 +257,134 @@ impl FileProvider for LocalProvider {
 
         Ok(WatchHandle::new(id, watcher))
     }
+
+    /// Replace the file at `uri` atomically (要件#48 契約①).
+    ///
+    /// Writes a sibling temp file, flushes it to disk, then `rename`s it over
+    /// the target — the same tmp+rename shape `annotation/store.rs` uses for
+    /// `marks.jsonl`. A crash mid-write therefore leaves either the old file
+    /// or the new one, never a truncated document. The temp file is a sibling
+    /// (not `/tmp`) so the rename stays within one filesystem, which is what
+    /// makes it atomic.
+    ///
+    /// Bytes go out exactly as given: no newline translation, no BOM
+    /// handling, no trailing-newline insertion. The editor buffer round-trips
+    /// through `<pre>` unchanged (契約②) and it must survive this step too.
+    ///
+    /// The only refusal here is a path carrying `..`. Root containment is
+    /// checked one layer up, by `save_document`, because a `LocalProvider`
+    /// holds no root of its own (追補a).
+    async fn write_text(&self, uri: &str, content: &str) -> Result<(), FsError> {
+        let parsed = Uri::parse(uri).map_err(|e| FsError::PermissionDenied(e.to_string()))?;
+        if parsed.scheme != "file" {
+            return Err(FsError::UnsupportedScheme(parsed.scheme.clone()));
+        }
+        let target = parsed.path;
+
+        // `..` is refused before anything is opened: a path that walks up is
+        // never something the user pointed at, and resolving it here would
+        // silently write somewhere else (snapshot.rs `resolve_source` refuses
+        // the same shape for the same reason).
+        if target
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(FsError::PermissionDenied(format!(
+                "path contains a parent-directory component: {}",
+                target.display()
+            )));
+        }
+
+        let parent = target.parent().ok_or_else(|| {
+            FsError::PermissionDenied(format!("{} has no parent directory", target.display()))
+        })?;
+        let file_name = target.file_name().ok_or_else(|| {
+            FsError::PermissionDenied(format!("{} has no file name", target.display()))
+        })?;
+
+        // Hidden name so a crash between create and rename does not leave
+        // something the explorer would list (hidden entries are skipped by
+        // `list`, 要件#31).
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(file_name);
+        tmp_name.push(".vellis-tmp");
+        let tmp_path = parent.join(tmp_name);
+
+        if let Err(e) = write_then_rename(&tmp_path, &target, content).await {
+            // Best-effort cleanup: a failed write must not leave the temp file
+            // behind next to the document.
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+/// Write `content` to `tmp_path`, fsync it, then rename it onto `target`.
+async fn write_then_rename(
+    tmp_path: &std::path::Path,
+    target: &std::path::Path,
+    content: &str,
+) -> Result<(), FsError> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(tmp_path).await.map_err(io_to_fs)?;
+    file.write_all(content.as_bytes()).await.map_err(io_to_fs)?;
+    // fsync before the rename: without it the rename can land while the new
+    // contents are still only in the page cache, and a power loss leaves an
+    // empty file where the document was.
+    file.sync_all().await.map_err(io_to_fs)?;
+    drop(file);
+    tokio::fs::rename(tmp_path, target).await.map_err(io_to_fs)?;
+    Ok(())
+}
+
+/// Resolve `target` and refuse it unless it lives under `root` (要件#48 追補a).
+///
+/// Returns the canonical path to write to. This is the **only** root check on
+/// the write path: `LocalProvider` is a unit struct with no root of its own,
+/// so containment is the command layer's job, and it is a pure function here
+/// so it can be judged on its own.
+///
+/// Both sides are canonicalised before comparing, which is what makes a
+/// symlink pointing out of the root a refusal rather than a hole: the string
+/// `<root>/looks-inside.txt` is under the root, its canonical form is not.
+/// A file that does not exist yet (a first save) is resolved through its
+/// parent directory instead, so creating a new file under the root is allowed
+/// while creating one outside is not.
+pub fn ensure_within_root(
+    root: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<std::path::PathBuf, FsError> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| {
+        FsError::PermissionDenied(format!("cannot resolve root {}: {}", root.display(), e))
+    })?;
+
+    let resolved = if target.exists() {
+        std::fs::canonicalize(target).map_err(|e| {
+            FsError::PermissionDenied(format!("cannot resolve {}: {}", target.display(), e))
+        })?
+    } else {
+        let parent = target.parent().ok_or_else(|| {
+            FsError::PermissionDenied(format!("{} has no parent directory", target.display()))
+        })?;
+        let file_name = target.file_name().ok_or_else(|| {
+            FsError::PermissionDenied(format!("{} has no file name", target.display()))
+        })?;
+        let parent_canon = std::fs::canonicalize(parent).map_err(|e| {
+            FsError::PermissionDenied(format!("cannot resolve {}: {}", parent.display(), e))
+        })?;
+        parent_canon.join(file_name)
+    };
+
+    if !resolved.starts_with(&canonical_root) {
+        return Err(FsError::PermissionDenied(format!(
+            "{} resolves outside the current root {}",
+            target.display(),
+            canonical_root.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 /// Convert `std::io::Error` to `FsError`, mapping `NotFound` and `PermissionDenied`.

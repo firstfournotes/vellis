@@ -16,6 +16,7 @@ pub mod session;
 pub mod spacemouse;
 pub mod update_check;
 pub mod video_frames;
+pub mod wav_waveform;
 pub mod watch;
 pub mod window;
 
@@ -37,12 +38,13 @@ use commands::app::init_window;
 use commands::asset::handle_asset;
 use commands::build_info::get_build_info;
 use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
-use commands::document::{open_binary_document, open_document};
+use commands::document::{open_binary_document, open_document, save_document};
 use commands::history::list_history;
 use commands::list::list_dir;
 use commands::print::{print_current_window, print_html};
 use commands::root::set_root;
 use commands::video::get_video_frame_index;
+use commands::wav_waveform::analyze_wav_waveform;
 use commands::waveform::extract_waveform_audio;
 use commands::window::new_window;
 use commands::AppState;
@@ -153,6 +155,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         init_window,
         open_document,
         open_binary_document,
+        save_document,
         set_root,
         new_window,
         list_dir,
@@ -171,6 +174,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         list_history,
         get_video_frame_index,
         extract_waveform_audio,
+        analyze_wav_waveform,
         print_current_window,
         print_html,
         commands::test_helpers::__test_list_windows,
@@ -180,6 +184,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         init_window,
         open_document,
         open_binary_document,
+        save_document,
         set_root,
         new_window,
         list_dir,
@@ -198,6 +203,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         list_history,
         get_video_frame_index,
         extract_waveform_audio,
+        analyze_wav_waveform,
         print_current_window,
         print_html,
     ]);
@@ -248,6 +254,16 @@ pub fn run_with_args(initial_args: WindowArgs) {
                 }
                 id if id == menu::OPEN_FOLDER_ITEM_ID => {
                     menu::handle_menu_open_click(app_handle, menu::MENU_OPEN_FOLDER_EVENT);
+                }
+                id if id == menu::EDIT_ITEM_ID => {
+                    // 編集に入れる文書かも、いま編集中かも窓の側にしかないので、
+                    // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#48 追補b)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_EDIT_EVENT);
+                }
+                id if id == menu::SAVE_ITEM_ID => {
+                    // 編集中かどうかも保存する中身も窓の側にしかないので、
+                    // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#48)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_SAVE_EVENT);
                 }
                 _ => {}
             });

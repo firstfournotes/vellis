@@ -34,6 +34,12 @@ pub enum FsError {
     #[error("unsupported scheme: {0}")]
     UnsupportedScheme(String),
 
+    /// The provider handles this scheme but cannot perform the requested
+    /// operation (要件#48 契約①: `SshProvider::write_text`). Distinct from
+    /// `UnsupportedScheme`, which means "wrong provider for this URI".
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

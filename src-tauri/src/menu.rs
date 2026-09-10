@@ -14,6 +14,47 @@ pub const TOGGLE_DEVTOOLS_ITEM_ID: &str = "toggle-devtools";
 /// Stable identifier for the "Print…" menu item (issue #24).
 pub const PRINT_ITEM_ID: &str = "print";
 
+/// Stable identifier for the "Save" menu item (requirements.md #48).
+pub const SAVE_ITEM_ID: &str = "save";
+
+/// Event emitted to the focused window when "Save" is clicked
+/// (requirements.md #48 契約⑤).
+///
+/// Same shape and same reason as the Open / Print / zoom events: the menu can
+/// only say "the user asked to save". Whether anything is being edited, what
+/// the edit buffer holds and which document it belongs to are known only to
+/// the window, so it decides and calls `save_document` itself
+/// (`src/lib/save-document.ts`). Name must stay in sync with `MENU_SAVE_EVENT`
+/// there. Nothing is saved automatically — this event is the only trigger.
+pub const MENU_SAVE_EVENT: &str = "menu_save";
+
+/// Stable identifier for the Edit menu's "Edit" item (requirements.md #48 追補b).
+pub const EDIT_ITEM_ID: &str = "edit";
+
+/// Event emitted to the focused window when "Edit" is clicked
+/// (requirements.md #48 契約③・追補b).
+///
+/// Toggles the focused window between viewing and editing. Same division of
+/// labour as Save: the menu cannot know whether the window is showing an
+/// editable document or is already in edit mode, so it only reports the
+/// gesture and the window decides (`src/lib/document-edit.ts`).
+///
+/// This is the *only* way into edit mode for HTML documents: while viewing,
+/// they are rendered inside `HtmlViewer`'s sandboxed iframe, where the
+/// double-click that starts editing in the Markdown / text viewer never
+/// reaches the app.
+pub const MENU_EDIT_EVENT: &str = "menu_edit";
+
+/// Accelerator for the Edit item (requirements.md #48 追補b).
+pub const EDIT_ACCELERATOR: &str = "CmdOrCtrl+E";
+
+/// Accelerator for the Save item (requirements.md #48 契約⑤).
+///
+/// Spelled out as a constant for the same reason the zoom ones are: tauri
+/// drops an unparseable accelerator silently, so the test and the menu read
+/// the same literal.
+pub const SAVE_ACCELERATOR: &str = "CmdOrCtrl+S";
+
 /// Stable identifier for the "New Window" menu item (requirements.md #12).
 pub const NEW_WINDOW_ITEM_ID: &str = "new-window";
 
@@ -179,6 +220,12 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         Some("CmdOrCtrl+Shift+O"),
     )?;
     let file_sep = PredefinedMenuItem::separator(app)?;
+    // Save sits between the Open items and Print, where macOS puts it
+    // (requirements.md #48 契約⑤). Enabled unconditionally, like the zoom
+    // items: the menu does not know whether anything is being edited, and a
+    // window with nothing to save simply ignores the event.
+    let save_item = MenuItem::with_id(app, SAVE_ITEM_ID, "Save", true, Some(SAVE_ACCELERATOR))?;
+    let save_sep = PredefinedMenuItem::separator(app)?;
     let print_item = MenuItem::with_id(
         app,
         PRINT_ITEM_ID,
@@ -197,6 +244,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &open_file_item,
             &open_folder_item,
             &file_sep,
+            &save_item,
+            &save_sep,
             &print_item,
         ],
     )?;
@@ -215,6 +264,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let copy = PredefinedMenuItem::copy(app, None)?;
     let paste = PredefinedMenuItem::paste(app, None)?;
     let select_all = PredefinedMenuItem::select_all(app, None)?;
+    // Entering / leaving edit mode (requirements.md #48 契約③・追補b). Placed
+    // after the standard block rather than above Undo so the macOS ordering
+    // every app shares stays where users expect it. Enabled unconditionally,
+    // like Save and the zoom items: a window showing an image (or an SSH
+    // document, which stays read-only) simply ignores the event.
+    let edit_mode_sep = PredefinedMenuItem::separator(app)?;
+    let edit_mode_item =
+        MenuItem::with_id(app, EDIT_ITEM_ID, "Edit", true, Some(EDIT_ACCELERATOR))?;
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
@@ -227,6 +284,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &copy,
             &paste,
             &select_all,
+            &edit_mode_sep,
+            &edit_mode_item,
         ],
     )?;
 

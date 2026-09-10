@@ -4,7 +4,7 @@ A desktop Markdown viewer for AI-generated documents.
 
 Vellis pairs a tree file explorer with a Markdown viewer and re-renders as files change on disk. It is built for the case where an AI agent is writing the documents and you are reading them: open a folder, watch the rendered output update as the agent edits, copy the *source* Markdown back out, and hand review instructions to the agent without leaving the app.
 
-Vellis is a viewer — it has no editor. The only files it writes are its own metadata under `<root>/.vellis/`, plus the explicit one-click revert that restores a file from a snapshot you took.
+Vellis reads first and writes only when you say so. Double-click the body to edit a plain-text file in place — or the Markdown or HTML source behind a rendered page — and press ⌘S to save. Nothing is written automatically, every save takes a snapshot under `<root>/.vellis/` first so one click restores what was there, and Vellis never deletes, renames or moves a file. Remote (`ssh://`) roots stay read-only.
 
 ## Features
 

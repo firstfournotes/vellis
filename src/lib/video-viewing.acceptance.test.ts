@@ -145,8 +145,14 @@ describe('detectFileType — 動画5拡張子を video と判定する(要件#28
 		expect(detectFileType('file:///home/user.mp4/Makefile')).toBe('text');
 	});
 
-	test('音声ファイルは binary のまま(契約⑦=別要件に切り出し)', () => {
-		expectAll(['song.mp3', 'take.wav', 'album.flac', 'voice.m4a', 'loop.ogg'], 'binary');
+	test('音声3種(wav/mp3/m4a)は audio・flac/ogg は binary 据え置き(要件#50 契約①=追補a(1)で改訂)', () => {
+		// 旧「音声は binary のまま(契約⑦)」は要件#50 で撤回された。詳細な分類テーブルは
+		// audio-viewing.acceptance.test.ts の持ち場 ―― ここは動画側の隣接ガードとして
+		// 3種の移動と2種の据え置きだけを見る。
+		expect(detectFileType('song.mp3')).toBe('audio');
+		expect(detectFileType('take.wav')).toBe('audio');
+		expect(detectFileType('voice.m4a')).toBe('audio');
+		expectAll(['album.flac', 'loop.ogg'], 'binary');
 	});
 
 	test('動画以外の既存 binary は不変(tiff / heic / zip / dmg)', () => {

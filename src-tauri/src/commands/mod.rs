@@ -11,6 +11,7 @@ pub mod root;
 #[cfg(feature = "webdriver")]
 pub mod test_helpers;
 pub mod video;
+pub mod wav_waveform;
 pub mod waveform;
 pub mod window;
 

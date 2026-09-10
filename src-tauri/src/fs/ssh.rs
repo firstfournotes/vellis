@@ -326,6 +326,25 @@ impl FileProvider for SshProvider {
         "ssh"
     }
 
+    /// SSH roots stay read-only in this first cut (要件#48 契約①).
+    ///
+    /// SFTP could write, but the guarantees the local path gives — an atomic
+    /// tmp+rename on one filesystem, and a `SnapshotManager` copy taken under
+    /// `<root>/.vellis/` before the write — have no equivalent here yet, and a
+    /// save that can half-succeed over a dropped connection is worse than no
+    /// save at all. Refused without touching the network, so no connection is
+    /// attempted and no error is ambiguous.
+    ///
+    /// Stated explicitly rather than inherited from the trait default: whether
+    /// a provider writes is part of its contract, not something to read by
+    /// absence. The frontend refuses earlier still (`canEnterEdit` keeps `ssh://`
+    /// documents out of edit mode), so this is the backstop.
+    async fn write_text(&self, uri: &str, _content: &str) -> Result<(), FsError> {
+        Err(FsError::Unsupported(format!(
+            "writing to SSH roots is unsupported: {uri}"
+        )))
+    }
+
     async fn list(&self, uri: &Uri) -> Result<Vec<Entry>, FsError> {
         let authority = uri
             .authority

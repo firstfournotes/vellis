@@ -1,6 +1,7 @@
 /**
  * 要件#36 の受け入れテスト(requirements.md #36)— フロント層
  * 「テキスト系ビューアの表示を拡大縮小できるズーム機能(⌘+ / ⌘− / ⌘0)」
+ * ※ FileType 網羅表に要件#50 追補b で audio 追加(2026-09-10)
  *
  * 契約(2026-08-30 由谷決定=Q2〜Q4・コードレビュー15件反映の改稿):
  * - ① 対象= FileType(markdown・text・html)のビューア本体のみ。本文中の画像・
@@ -236,6 +237,7 @@ describe('isZoomTarget — テキスト系(markdown/text/html)のみ対象', () 
 			image: false,
 			model3d: false,
 			video: false,
+			audio: false,
 			pdf: false,
 			binary: false,
 		};

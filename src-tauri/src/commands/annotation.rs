@@ -100,7 +100,7 @@ pub struct DiffResponse {
 const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
 const MAX_SELECTED_MARKDOWN_BYTES: usize = 64 * 1024;
 
-fn store_for(state: &AppState, root_uri: &str) -> Result<Arc<AnnotationStore>, String> {
+pub(crate) fn store_for(state: &AppState, root_uri: &str) -> Result<Arc<AnnotationStore>, String> {
     let uri = Uri::parse(root_uri).map_err(|e| format!("invalid root_uri: {}", e))?;
     if uri.scheme != "file" {
         return Err(format!(
