@@ -10,7 +10,10 @@
  *     → remark-rehype { allowDangerousHtml: true }
  *     → rehype-raw                (re-parse inline HTML into hast)
  *     → rehype-vellis-mermaid     (pre>code[lang=mermaid] → placeholder div)
- *     → @shikijs/rehype           (syntax highlighting; preserves data-* attrs)
+ *     → rehype-vellis-code-attrs  (hoist: <code>'s data-* onto the wrapping <pre>)
+ *     → @shikijs/rehype           (syntax highlighting; rebuilds <pre>, dropping
+ *                                  every attribute it carried)
+ *     → rehype-vellis-code-attrs  (restore: re-attach the data-* onto Shiki's <pre>)
  *     → rehype-vellis-uri-rewrite (relative img/a → vellis-asset / data-vellis-link)
  *     → rehype-sanitize(vellisSchema)
  *     → rehype-stringify
@@ -32,6 +35,7 @@ import type { BundledLanguage } from 'shiki';
 import { remarkVellisAlert } from './plugins/alert';
 import { remarkVellisSourceMap } from './plugins/source-map';
 import { rehypeVellisMermaid } from './plugins/mermaid';
+import { createVellisCodeAttrs } from './plugins/code-attrs';
 import { rehypeVellisUriRewrite } from './plugins/rewrite-uri';
 import { vellisSchema } from './sanitize-schema';
 import { buildSourceIndex } from './source-index';
@@ -58,6 +62,9 @@ export interface RenderResult {
 
 export async function render(source: string, baseUri: string): Promise<RenderResult> {
 	const metas: NodeMeta[] = [];
+	// 要件#52 契約④: Shiki は fence の <pre> を作り直して属性を落とすので、
+	// 前後で挟んで source-map の属性を引き継ぐ。控えはレンダーごとに作る。
+	const codeAttrs = createVellisCodeAttrs();
 
 	const file = await unified()
 		.use(remarkParse)
@@ -67,10 +74,12 @@ export async function render(source: string, baseUri: string): Promise<RenderRes
 		.use(remarkRehype, { allowDangerousHtml: true })
 		.use(rehypeRaw)
 		.use(rehypeVellisMermaid)
+		.use(codeAttrs.hoist)
 		.use(rehypeShiki, {
 			theme: 'github-light',
 			langs: PRELOAD_LANGS,
 		})
+		.use(codeAttrs.restore)
 		.use(rehypeVellisUriRewrite, { baseUri })
 		.use(rehypeSanitize, vellisSchema)
 		.use(rehypeStringify)

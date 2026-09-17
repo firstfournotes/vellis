@@ -237,7 +237,7 @@
 		if (mismatchLoggedSrc === key) return;
 		mismatchLoggedSrc = key;
 		console.warn(
-			`要素の申告尺(${media} 秒)と解析尺(${analyzed} 秒)が食い違っています: ${fileName}`,
+			`Media duration (${media} s) and analyzed duration (${analyzed} s) disagree: ${fileName}`,
 		);
 	});
 
@@ -597,7 +597,7 @@
 		class="audio-pane"
 		bind:this={pane}
 		role="application"
-		aria-label="音声プレーヤー({fileName})。Space で再生/停止・←/→ で {COARSE_STEP_SECONDS} 秒送り・Shift+←/→ で {FINE_STEP_SECONDS} 秒送り"
+		aria-label="Audio player ({fileName}). Space to play/pause, ←/→ to seek {COARSE_STEP_SECONDS} s, Shift+←/→ to seek {FINE_STEP_SECONDS} s"
 		tabindex="0"
 		onkeydown={onKeyDown}
 	>
@@ -616,8 +616,8 @@
 					class:dragging={resizingWaveform}
 					role="separator"
 					aria-orientation="horizontal"
-					aria-label="波形の高さを変更"
-					title="ドラッグで波形の高さを変更"
+					aria-label="Resize Waveform"
+					title="Drag to resize the waveform"
 					onpointerdown={startWaveformResize}
 					onpointermove={moveWaveformResize}
 					onpointerup={endWaveformResize}
@@ -646,7 +646,7 @@
 					<canvas
 						class="waveform-canvas"
 						bind:this={waveformCanvas}
-						aria-label="音声波形(クリックでその位置へシーク)"
+						aria-label="Audio waveform (click to seek)"
 						onclick={onWaveformClick}
 					></canvas>
 					{#if waveformNote}
@@ -710,7 +710,7 @@
 						step="0.001"
 						value={barPosition}
 						disabled={barDuration <= 0}
-						aria-label="再生位置"
+						aria-label="Playback Position"
 						oninput={onScrubInput}
 						onchange={onScrubCommit}
 					/>
@@ -730,10 +730,10 @@
 					<button
 						type="button"
 						class="audio-button"
-						title={playing ? '停止(Space)' : '再生(Space)'}
+						title={playing ? 'Pause (Space)' : 'Play (Space)'}
 						onclick={togglePlay}
 					>
-						{playing ? '停止' : '再生'}
+						{playing ? 'Pause' : 'Play'}
 					</button>
 
 					<span class="audio-readout">
@@ -750,17 +750,17 @@
 						<button
 							type="button"
 							class="audio-button audio-zoom"
-							title="波形を拡大(×2)"
-							aria-label="波形を拡大"
+							title="Zoom In Waveform (×2)"
+							aria-label="Zoom In Waveform"
 							onclick={() => zoomWaveformBy(2)}
 						>
-							＋
+							+
 						</button>
 						<button
 							type="button"
 							class="audio-button audio-zoom"
-							title="波形を縮小(÷2)"
-							aria-label="波形を縮小"
+							title="Zoom Out Waveform (÷2)"
+							aria-label="Zoom Out Waveform"
 							onclick={() => zoomWaveformBy(0.5)}
 						>
 							−
@@ -768,22 +768,22 @@
 						<button
 							type="button"
 							class="audio-button audio-zoom"
-							title="波形を等倍に戻す"
-							aria-label="波形を等倍に戻す"
+							title="Reset Waveform Zoom"
+							aria-label="Reset Waveform Zoom"
 							onclick={resetWaveformZoom}
 						>
-							等倍
+							1×
 						</button>
 					</span>
 
 					<button
 						type="button"
 						class="audio-button audio-mute"
-						title={audioMuted ? '消音を解除' : '消音'}
+						title={audioMuted ? 'Unmute' : 'Mute'}
 						aria-pressed={audioMuted}
 						onclick={toggleMute}
 					>
-						{audioMuted ? '消音中' : '消音'}
+						{audioMuted ? 'Muted' : 'Mute'}
 					</button>
 				</div>
 			</div>
@@ -791,9 +791,9 @@
 			<div class="audio-placeholder">
 				<p class="audio-message">
 					{#if mode === 'remote'}
-						リモート(ssh)の音声はアプリ内で再生できません({fileName})。
+						Remote (ssh) audio cannot be played in the app ({fileName}).
 					{:else}
-						この音声を再生できませんでした({fileName})。
+						Could not play this audio ({fileName}).
 					{/if}
 				</p>
 			</div>

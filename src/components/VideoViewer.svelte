@@ -960,11 +960,11 @@
 				type="button"
 				class="toolbar-button"
 				class:active={provenanceOpen}
-				title="素材パネル(出所)を開閉"
+				title="Show or hide the Sources (provenance) panel"
 				aria-pressed={provenanceOpen}
 				onclick={onToggleProvenance}
 			>
-				素材
+				Sources
 			</button>
 		{/if}
 		<!--
@@ -987,7 +987,7 @@
 		class="video-pane"
 		bind:this={pane}
 		role="application"
-		aria-label="動画プレーヤー({fileName})。Space で再生/停止・←/→ でコマ送り・Shift+←/→ で {LARGE_FRAME_STEP} フレーム送り"
+		aria-label="Video player ({fileName}). Space to play/pause, ←/→ to step one frame, Shift+←/→ to step {LARGE_FRAME_STEP} frames"
 		tabindex="0"
 		onkeydown={onKeyDown}
 		onpointerdown={() => pane?.focus()}
@@ -1029,16 +1029,16 @@
 				<div class="video-placeholder">
 					<p class="video-message">
 						{#if mode === 'remote'}
-							リモート(ssh)の動画はアプリ内で再生できません({fileName})。
+							Remote (ssh) videos cannot be played in the app ({fileName}).
 						{:else if loadFailed}
-							この動画を再生できませんでした({fileName})。コーデックが未対応の可能性があります。
+							Could not play this video ({fileName}). The codec may be unsupported.
 						{:else}
-							この形式の動画はアプリ内で再生できません({fileName})。
+							This video format cannot be played in the app ({fileName}).
 						{/if}
 					</p>
 					{#if externalPlan}
 						<button type="button" class="toolbar-button" onclick={openExternally}>
-							既定アプリで開く
+							Open with Default App
 						</button>
 					{/if}
 				</div>
@@ -1070,8 +1070,8 @@
 					class:dragging={resizingWaveform}
 					role="separator"
 					aria-orientation="horizontal"
-					aria-label="波形の高さを変更"
-					title="ドラッグで波形の高さを変更"
+					aria-label="Resize Waveform"
+					title="Drag to resize the waveform"
 					onpointerdown={startWaveformResize}
 					onpointermove={moveWaveformResize}
 					onpointerup={endWaveformResize}
@@ -1103,7 +1103,7 @@
 					<canvas
 						class="waveform-canvas"
 						bind:this={waveformCanvas}
-						aria-label="音声波形(クリックでその位置へシーク)"
+						aria-label="Audio waveform (click to seek)"
 						onclick={onWaveformClick}
 					></canvas>
 					{#if waveformNote}
@@ -1143,7 +1143,7 @@
 						step="0.001"
 						value={barPosition}
 						disabled={barDuration <= 0}
-						aria-label="再生位置"
+						aria-label="Playback Position"
 						oninput={onScrubInput}
 						onchange={onScrubCommit}
 					/>
@@ -1164,17 +1164,17 @@
 					<button
 						type="button"
 						class="video-button"
-						title={playing ? '停止(Space)' : '再生(Space)'}
+						title={playing ? 'Pause (Space)' : 'Play (Space)'}
 						onclick={togglePlay}
 					>
-						{playing ? '停止' : '再生'}
+						{playing ? 'Pause' : 'Play'}
 					</button>
 
 					{#if capabilities.frameStepping}
 						<button
 							type="button"
 							class="video-button video-step"
-							title="{LARGE_FRAME_STEP} フレーム戻す(Shift+←)"
+							title="Step back {LARGE_FRAME_STEP} frames (Shift+←)"
 							onclick={() => stepBy(-LARGE_FRAME_STEP)}
 						>
 							−{LARGE_FRAME_STEP}
@@ -1186,7 +1186,7 @@
 						<button
 							type="button"
 							class="video-button video-step"
-							title="1 フレーム戻す(←・長押しで連続)"
+							title="Step back 1 frame (←, hold to repeat)"
 							onpointerdown={() => startRepeat(-1)}
 							onpointerup={stopRepeat}
 							onpointerleave={stopRepeat}
@@ -1197,7 +1197,7 @@
 						<button
 							type="button"
 							class="video-button video-step"
-							title="1 フレーム送る(→・長押しで連続)"
+							title="Step forward 1 frame (→, hold to repeat)"
 							onpointerdown={() => startRepeat(1)}
 							onpointerup={stopRepeat}
 							onpointerleave={stopRepeat}
@@ -1208,7 +1208,7 @@
 						<button
 							type="button"
 							class="video-button video-step"
-							title="{LARGE_FRAME_STEP} フレーム送る(Shift+→)"
+							title="Step forward {LARGE_FRAME_STEP} frames (Shift+→)"
 							onclick={() => stepBy(LARGE_FRAME_STEP)}
 						>
 							+{LARGE_FRAME_STEP}
@@ -1240,17 +1240,17 @@
 						<button
 							type="button"
 							class="video-button video-zoom"
-							title="波形を拡大(×2)"
-							aria-label="波形を拡大"
+							title="Zoom In Waveform (×2)"
+							aria-label="Zoom In Waveform"
 							onclick={() => zoomWaveformBy(2)}
 						>
-							＋
+							+
 						</button>
 						<button
 							type="button"
 							class="video-button video-zoom"
-							title="波形を縮小(÷2)"
-							aria-label="波形を縮小"
+							title="Zoom Out Waveform (÷2)"
+							aria-label="Zoom Out Waveform"
 							onclick={() => zoomWaveformBy(0.5)}
 						>
 							−
@@ -1258,22 +1258,22 @@
 						<button
 							type="button"
 							class="video-button video-zoom"
-							title="波形を等倍に戻す"
-							aria-label="波形を等倍に戻す"
+							title="Reset Waveform Zoom"
+							aria-label="Reset Waveform Zoom"
 							onclick={resetWaveformZoom}
 						>
-							等倍
+							1×
 						</button>
 					</span>
 
 					<button
 						type="button"
 						class="video-button video-mute"
-						title={audioMuted ? '消音を解除' : '消音'}
+						title={audioMuted ? 'Unmute' : 'Mute'}
 						aria-pressed={audioMuted}
 						onclick={toggleMute}
 					>
-						{audioMuted ? '消音中' : '消音'}
+						{audioMuted ? 'Muted' : 'Mute'}
 					</button>
 				</div>
 			</div>

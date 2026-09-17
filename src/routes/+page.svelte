@@ -254,7 +254,7 @@
 		try {
 			await saveDocument(doc.uri, buffer);
 		} catch (err) {
-			alert(`保存に失敗しました: ${err}`);
+			alert(`Could not save: ${err}`);
 		}
 	}
 
@@ -337,7 +337,7 @@
 				instruction,
 			});
 		} catch (err) {
-			alert(`マーク追加に失敗しました: ${err}`);
+			alert(`Could not add the mark: ${err}`);
 		}
 		dialog = { open: false, anchor: null };
 	}
@@ -441,7 +441,7 @@
 		try {
 			applyRoot(await openHistoryEntry<RootPayload>(uri));
 		} catch (err) {
-			rootPicker = { ...rootPicker, error: `フォルダを開けませんでした: ${err}` };
+			rootPicker = { ...rootPicker, error: `Could not open the folder: ${err}` };
 		}
 	}
 
@@ -813,8 +813,8 @@
 				class:dragging={resizingPane}
 				role="separator"
 				aria-orientation="vertical"
-				aria-label="Explorer の幅を変更"
-				title="ドラッグで Explorer の幅を変更"
+				aria-label="Resize Explorer"
+				title="Drag to resize the Explorer"
 				onpointerdown={startPaneResize}
 				onpointermove={movePaneResize}
 				onpointerup={endPaneResize}

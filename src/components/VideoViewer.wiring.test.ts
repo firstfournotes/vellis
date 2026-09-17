@@ -120,7 +120,7 @@ describe('VideoViewer 配線スモーク(要件#41 第2周・要件#44 常時表
 		render(VideoViewer, { props: PROPS });
 
 		// トグルは意味ごと廃止 ―― ボタンが残っていたら常時表示になっていない。
-		expect(screen.queryByRole('button', { name: '波形' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Waveform' })).toBeNull();
 
 		// 帯・上端ハンドル・canvas はクリックなしで DOM に居る(要件#42 のハンドルも常時)。
 		expect(document.querySelector('.video-waveform')).not.toBeNull();
@@ -235,9 +235,9 @@ describe('VideoViewer 配線スモーク(要件#47 波形の時間軸ズーム)'
 	it('「＋」「−」「等倍」の3ボタンが出る・等倍では窓指標が無い(契約③④)', async () => {
 		await renderZoomable();
 
-		expect(screen.getByRole('button', { name: '波形を拡大' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: '波形を縮小' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: '波形を等倍に戻す' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Zoom In Waveform' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Zoom Out Waveform' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Reset Waveform Zoom' })).toBeTruthy();
 
 		// 倍率 1 では指標を出さない(契約③=waveformWindowIndicator が null)。
 		expect(indicator()).toBeNull();
@@ -252,7 +252,7 @@ describe('VideoViewer 配線スモーク(要件#47 波形の時間軸ズーム)'
 		});
 		const before = getContextSpy.mock.calls.length;
 
-		await fireEvent.click(screen.getByRole('button', { name: '波形を拡大' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Zoom In Waveform' }));
 		await vi.waitFor(() => {
 			expect(indicator()).not.toBeNull();
 		});
@@ -261,7 +261,7 @@ describe('VideoViewer 配線スモーク(要件#47 波形の時間軸ズーム)'
 			expect(getContextSpy.mock.calls.length).toBeGreaterThan(before);
 		});
 
-		await fireEvent.click(screen.getByRole('button', { name: '波形を等倍に戻す' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Reset Waveform Zoom' }));
 		await vi.waitFor(() => {
 			expect(indicator()).toBeNull();
 		});
@@ -293,7 +293,7 @@ describe('VideoViewer 配線スモーク(要件#47 波形の時間軸ズーム)'
 	it('src が変わると等倍・先頭へ戻る(指標が消える=契約①)', async () => {
 		const { rerender } = await renderZoomable();
 
-		await fireEvent.click(screen.getByRole('button', { name: '波形を拡大' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Zoom In Waveform' }));
 		await vi.waitFor(() => {
 			expect(indicator()).not.toBeNull();
 		});

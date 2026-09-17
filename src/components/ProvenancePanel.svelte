@@ -80,38 +80,38 @@
 
 	/** 縮退8段の説明文(§4.5)。null =マップが読めている。 */
 	let notice = $derived.by((): string | null => {
-		if (!load) return '出所マップを読み込んでいます…';
+		if (!load) return 'Loading the provenance map…';
 		if (load.state === 'absent') {
-			return `この動画には出所マップがありません(${sidecarName} を探しました)。tool-video-editor の vedit map で作れます。`;
+			return `This video has no provenance map (looked for ${sidecarName}). You can create one with vedit map in tool-video-editor.`;
 		}
-		if (load.state === 'unreadable') return '出所マップを読み込めませんでした。';
-		if (load.state === 'too-large') return '出所マップが大きすぎるため読みませんでした(上限 8MB)。';
+		if (load.state === 'unreadable') return 'Could not read the provenance map.';
+		if (load.state === 'too-large') return 'The provenance map is too large to read (limit 8MB).';
 		if (!parsed || parsed.ok) return null;
-		if (parsed.error === 'invalid-json') return '出所マップが JSON として壊れています。';
-		if (parsed.error === 'not-vedit-map') return 'これは出所マップ(vedit-map)ではない別の形式のファイルです。';
+		if (parsed.error === 'invalid-json') return 'The provenance map is not valid JSON.';
+		if (parsed.error === 'not-vedit-map') return 'This file is not a provenance map (vedit-map).';
 		if (parsed.error === 'unsupported-version') {
-			return '新しい形式の出所マップです。このバージョンの Vellis では読めません。';
+			return 'This provenance map uses a newer format. This version of Vellis cannot read it.';
 		}
-		if (parsed.error === 'malformed') return '出所マップの形が違います(必須の項目か型が不正です)。';
-		return '出所マップの辻褄が合いません(区間が出力の全体を隙間なく覆っていません)。';
+		if (parsed.error === 'malformed') return 'The provenance map is malformed (a required field is missing or has the wrong type).';
+		return 'The provenance map is inconsistent (segments do not cover the whole output without gaps).';
 	});
 
 	const WARNING_TEXT: Record<ProvenanceWarning, string> = {
 		'video-name-mismatch':
-			'マップが指す動画名と開いている動画名が違います。別の動画のマップかもしれません。',
+			'The map refers to a different video name than the one that is open. It may belong to another video.',
 		'duration-mismatch':
-			'マップの尺と動画の実尺が 0.05 秒を超えてずれています。動画を作り直した後のマップかもしれません。',
+			'The map duration differs from the actual video duration by more than 0.05 seconds. The map may be from before the video was rebuilt.',
 	};
 
 	const ROLE_TEXT: Record<'out' | 'in', string> = {
-		out: '消えていく側',
-		in: '現れる側',
+		out: 'Fading out',
+		in: 'Fading in',
 	};
 
 	const OVERLAY_KIND_TEXT: Record<'image' | 'video' | 'text', string> = {
-		image: '画像',
-		video: '動画',
-		text: 'テキスト',
+		image: 'Image',
+		video: 'Video',
+		text: 'Text',
 	};
 
 	/**
@@ -142,20 +142,20 @@
 	 * 理由表示を兼ねる ―― 押せないボタンは、なぜ押せないかを言わないと故障に見える。
 	 */
 	const SYNTHETIC_TITLE =
-		'合成素材(vedit のプレースホルダー入力)。実ファイルがまだ無いので、Finder で表示・パスをコピーは使えません。';
+		'Synthetic source (a vedit placeholder input). The file does not exist yet, so Reveal in Finder and Copy Path are unavailable.';
 
 	/** 素材の素性を title に集める(主=入力キー・副=ファイル名なので、原文はここ)。 */
 	function sourceTitle(path: string | null, scenarioPath: string | null): string {
 		// path が null =合成素材(spec.md:669 の読み手契約)。出すべきパスがそもそも無い。
 		if (path === null) return SYNTHETIC_TITLE;
-		return `マップからの相対パス: ${path}\nシナリオの記述: ${scenarioPath ?? '(記述なし)'}`;
+		return `Path relative to the map: ${path}\nScenario reference: ${scenarioPath ?? '(not specified)'}`;
 	}
 </script>
 
-<aside class="provenance-panel" aria-label="素材">
+<aside class="provenance-panel" aria-label="Sources">
 	<header>
-		<h2>素材</h2>
-		<button type="button" class="ghost" onclick={onClose} aria-label="閉じる">×</button>
+		<h2>Sources</h2>
+		<button type="button" class="ghost" onclick={onClose} aria-label="Close">×</button>
 	</header>
 
 	{#if warnings.length > 0}
@@ -175,16 +175,16 @@
 	{:else if map && card}
 		<div class="panel-body">
 			<section class="block block-current">
-				<h3>現在位置</h3>
+				<h3>Current Position</h3>
 				<!--
 					区間種別(契約⑥a)。transition は2素材が同時に映っているので、2枚カードの
 					前に「重なり中」であることを明示する(Q23)。
 				-->
 				<p class="kind" class:overlap={card.overlapping}>
 					{#if card.overlapping}
-						重なり中(両方が映っています){card.transitionType ? ` — ${card.transitionType}` : ''}
+						Overlapping (both visible){card.transitionType ? ` — ${card.transitionType}` : ''}
 					{:else}
-						クリップ区間(1素材)
+						Clip segment (single source)
 					{/if}
 				</p>
 				{#each card.sources as source, i (i)}
@@ -197,29 +197,29 @@
 								{source.inputKey}
 							</span>
 							{#if source.path === null}
-								<span class="synthetic" title={SYNTHETIC_TITLE}>プレースホルダー</span>
+								<span class="synthetic" title={SYNTHETIC_TITLE}>Placeholder</span>
 							{/if}
 							<span class="file-name" title={sourceTitle(source.path, source.scenarioPath)}>
 								{source.fileName}
 							</span>
 						</div>
 						<dl>
-							<dt>素材の現在位置</dt>
+							<dt>Position in source</dt>
 							<dd>
 								<span class="mono">{source.inputTimeText}</span>
 								{#if source.inputFrame !== null}
-									<span class="mono ref-frame" title="再生位置から求めた参考値です(±1 フレームずれることがあります)">
-										{formatMapFrame(source.inputFrame)}(参考)
+									<span class="mono ref-frame" title="Estimated from the playback position (may be off by ±1 frame)">
+										{formatMapFrame(source.inputFrame)} (approx.)
 									</span>
 								{/if}
 							</dd>
-							<dt>使用範囲</dt>
+							<dt>Range used</dt>
 							<dd>
 								<span class="mono">{source.fromText} {source.fromFrameText}</span>
-								〜
+								–
 								<span class="mono">{source.toText} {source.toFrameText}</span>
 							</dd>
-							<dt>クリップ</dt>
+							<dt>Clip</dt>
 							<dd>
 								{source.clip}
 								<span class="muted">({source.mode}{source.speedText ? ` ${source.speedText}` : ''})</span>
@@ -234,7 +234,7 @@
 									if (source.path !== null) void revealInput(source.path);
 								}}
 							>
-								Finder で表示
+								Reveal in Finder
 							</button>
 							<button
 								type="button"
@@ -244,7 +244,7 @@
 									if (source.path !== null) void copyInputPath(source.path);
 								}}
 							>
-								パスをコピー
+								Copy Path
 							</button>
 						</div>
 					</article>
@@ -252,7 +252,7 @@
 			</section>
 
 			<section class="block block-segments">
-				<h3>全区間({map.segments.length})</h3>
+				<h3>All Segments ({map.segments.length})</h3>
 				<ul class="segments">
 					{#each map.segments as segment, i (i)}
 						<li>
@@ -261,7 +261,7 @@
 								class="segment"
 								class:current={i === currentIndex}
 								aria-current={i === currentIndex ? 'true' : undefined}
-								title="この区間の頭へ移動"
+								title="Jump to the start of this segment"
 								onclick={() => onSeekSegment(segment)}
 							>
 								<span class="mono seg-time">{formatMapTime(segment.start.sec)}</span>
@@ -269,7 +269,7 @@
 									{segment.sources.map((source) => source.input).join(' → ')}
 								</span>
 								{#if segment.kind === 'transition'}
-									<span class="seg-kind">重なり{segment.type ? `(${segment.type})` : ''}</span>
+									<span class="seg-kind">Overlap{segment.type ? ` (${segment.type})` : ''}</span>
 								{/if}
 							</button>
 						</li>
@@ -284,9 +284,9 @@
 					持たないので出さない。
 				-->
 				<section class="block block-overlays">
-					<h3>オーバーレイ</h3>
+					<h3>Overlays</h3>
 					{#if overlays.length === 0}
-						<p class="muted small">いまの位置には掛かっていません。</p>
+						<p class="muted small">None at the current position.</p>
 					{:else}
 						<ul class="overlays">
 							{#each overlays as overlay (overlay.index)}
@@ -300,14 +300,14 @@
 										</span>
 									</div>
 									<p class="small mono">
-										{formatMapTime(overlay.start.sec)} 〜 {formatMapTime(overlay.end.sec)}
+										{formatMapTime(overlay.start.sec)} – {formatMapTime(overlay.end.sec)}
 									</p>
 									{#if overlay.extract}
 										<p class="small muted">
-											使用区間:
+											Range used:
 											{#each overlay.extract as range, i (i)}
 												<span class="mono"
-													>{formatMapTime(range.from.sec)}〜{formatMapTime(range.to.sec)}</span
+													>{formatMapTime(range.from.sec)}–{formatMapTime(range.to.sec)}</span
 												>{i + 1 < overlay.extract.length ? ' / ' : ''}
 											{/each}
 										</p>

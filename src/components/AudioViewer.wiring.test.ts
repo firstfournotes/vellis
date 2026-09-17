@@ -223,9 +223,9 @@ describe('AudioViewer 配線スモーク(要件#50 1周目=契約③⑨⑩)', ()
 	it('トランスポート(再生/停止・シークバー・時刻表示・ミュート)が DOM に居る(契約③⑨)', async () => {
 		await renderInline();
 
-		expect(screen.getByRole('button', { name: '再生' })).toBeTruthy();
-		expect(screen.getByRole('slider', { name: '再生位置' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: '消音' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy();
+		expect(screen.getByRole('slider', { name: 'Playback Position' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Mute' })).toBeTruthy();
 		expect(document.querySelector('.audio-time')).not.toBeNull();
 	});
 
@@ -469,17 +469,17 @@ describe('AudioViewer 配線スモーク(要件#50 2周目=波形帯・レーン
 	it('ズーム3ボタンが出る・等倍では窓指標なし・「＋」で指標が出て「等倍」で消える(契約⑦)', async () => {
 		await renderWaveformInline(60);
 
-		expect(screen.getByRole('button', { name: '波形を拡大' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: '波形を縮小' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: '波形を等倍に戻す' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Zoom In Waveform' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Zoom Out Waveform' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Reset Waveform Zoom' })).toBeTruthy();
 		expect(indicator()).toBeNull();
 
-		await fireEvent.click(screen.getByRole('button', { name: '波形を拡大' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Zoom In Waveform' }));
 		await vi.waitFor(() => {
 			expect(indicator()).not.toBeNull();
 		});
 
-		await fireEvent.click(screen.getByRole('button', { name: '波形を等倍に戻す' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Reset Waveform Zoom' }));
 		await vi.waitFor(() => {
 			expect(indicator()).toBeNull();
 		});
@@ -562,9 +562,9 @@ describe('AudioViewer 配線スモーク(要件#50 2周目=波形帯・レーン
 		await vi.waitFor(() => {
 			const note = noteEl()?.textContent ?? '';
 			expect(note.length).toBeGreaterThan(0);
-			expect(note).not.toContain('音声を解析中');
+			expect(note).not.toContain('Analyzing audio');
 		});
-		expect(noteEl()?.textContent ?? '').not.toContain('この動画');
+		expect(noteEl()?.textContent ?? '').not.toContain('This video');
 	});
 
 	it('fail-open: 波形の解析が失敗しても <audio> とトランスポートは残る(契約⑫⑬)', async () => {
@@ -581,8 +581,8 @@ describe('AudioViewer 配線スモーク(要件#50 2周目=波形帯・レーン
 			expect((noteEl()?.textContent ?? '').length).toBeGreaterThan(0);
 		});
 		expect(document.querySelector('audio')).not.toBeNull();
-		expect(screen.getByRole('button', { name: '再生' })).toBeTruthy();
-		expect(screen.getByRole('slider', { name: '再生位置' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy();
+		expect(screen.getByRole('slider', { name: 'Playback Position' })).toBeTruthy();
 	});
 
 	it('解析尺が横軸へ流れる ―― duration が NaN でもシークバーの軸が解析尺で立つ(契約④)', async () => {
@@ -590,7 +590,7 @@ describe('AudioViewer 配線スモーク(要件#50 2周目=波形帯・レーン
 		decodedBuffer = monoBuffer(84000, 8000);
 		await renderWaveformInline(Number.NaN);
 
-		const slider = screen.getByRole('slider', { name: '再生位置' }) as HTMLInputElement;
+		const slider = screen.getByRole('slider', { name: 'Playback Position' }) as HTMLInputElement;
 		await vi.waitFor(() => {
 			// audioAxisDuration(NaN, 10.5) = 10.5 が max へ届く=解析尺が第2引数に流れた証明。
 			expect(slider.max).toBe('10.5');
@@ -675,13 +675,13 @@ describe('AudioViewer 配線スモーク(要件#50 3周目=wav の Rust 経路�
 
 		await vi.waitFor(() => {
 			const recorded = warnSpy.mock.calls.some((args) =>
-				args.some((arg) => typeof arg === 'string' && arg.includes('解析尺')),
+				args.some((arg) => typeof arg === 'string' && arg.includes('analyzed duration')),
 			);
-			expect(recorded, '食い違いが console.warn(「解析尺」を含む)で記録されること').toBe(true);
+			expect(recorded, "食い違いが console.warn('analyzed duration' を含む)で記録されること").toBe(true);
 		});
 
 		// 表示は要素側の軸のまま(契約④(b)=記録はしても軸は動かさない)。
-		const slider = screen.getByRole('slider', { name: '再生位置' }) as HTMLInputElement;
+		const slider = screen.getByRole('slider', { name: 'Playback Position' }) as HTMLInputElement;
 		expect(slider.max).toBe('300');
 	});
 });
@@ -726,7 +726,7 @@ describe('AudioViewer 配線スモーク(要件#50 追補e=src 変更時のリ�
 		await fireEvent(audio, new Event('error'));
 		expect(document.querySelector('audio')).toBeNull();
 		expect(document.querySelector('.audio-placeholder')?.textContent ?? '').toContain(
-			'この音声を再生できませんでした',
+			'Could not play this audio',
 		);
 
 		// ディスク上の実体が差し替わると版数付きの新しい src が届く(要件#22 の機構)。
@@ -750,7 +750,7 @@ describe('AudioViewer 配線スモーク(要件#50 追補e=src 変更時のリ�
 		await flushTasks();
 		for (const cb of rafCallbacks.splice(0)) cb(performance.now());
 		await flushTasks();
-		expect(screen.getByRole('button', { name: '停止' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy();
 		expect(document.querySelector('.audio-time')?.textContent ?? '').toContain('1:23');
 
 		// 別ファイルを開く(src 変更)。新要素の durationchange は**まだ来ていない**
@@ -759,14 +759,14 @@ describe('AudioViewer 配線スモーク(要件#50 追補e=src 変更時のリ�
 		await flushTasks();
 
 		expect(
-			screen.getByRole('button', { name: '再生' }),
+			screen.getByRole('button', { name: 'Play' }),
 			'再生中の表示(「停止」)を持ち越さないこと',
 		).toBeTruthy();
 		expect(
 			document.querySelector('.audio-time')?.textContent ?? '',
 			'再生位置 83.5 秒を持ち越さないこと',
 		).toContain('0:00:00');
-		const slider = screen.getByRole('slider', { name: '再生位置' }) as HTMLInputElement;
+		const slider = screen.getByRole('slider', { name: 'Playback Position' }) as HTMLInputElement;
 		expect(slider.max, '前ファイルの尺(300 秒)をシークバーの max が引き継がないこと').toBe(
 			'0',
 		);
@@ -775,11 +775,11 @@ describe('AudioViewer 配線スモーク(要件#50 追補e=src 変更時のリ�
 	it('消音 → src 変更 → 新要素の muted が true で表示も「消音中」(追補e(2)=muted={audioMuted})', async () => {
 		const { rerender, audio } = await renderInline();
 
-		await fireEvent.click(screen.getByRole('button', { name: '消音' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Mute' }));
 		// jsdom が volumechange を自動発火するとは限らないので明示的に流す(表示の同期)。
 		await fireEvent(audio, new Event('volumechange'));
 		expect(audio.muted).toBe(true);
-		expect(screen.getByRole('button', { name: '消音中' }).getAttribute('aria-pressed')).toBe(
+		expect(screen.getByRole('button', { name: 'Muted' }).getAttribute('aria-pressed')).toBe(
 			'true',
 		);
 
@@ -794,7 +794,7 @@ describe('AudioViewer 配線スモーク(要件#50 追補e=src 変更時のリ�
 			'新しい <audio> 要素にも消音状態が反映されること(muted={audioMuted})',
 		).toBe(true);
 		expect(
-			screen.getByRole('button', { name: '消音中' }).getAttribute('aria-pressed'),
+			screen.getByRole('button', { name: 'Muted' }).getAttribute('aria-pressed'),
 			'UI 側の消音表示は src 切替をまたいで維持されること',
 		).toBe('true');
 	});

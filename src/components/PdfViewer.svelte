@@ -109,24 +109,24 @@
 				作り直す。前のファイルのページ位置やズームを持ち越さないため。
 			-->
 			{#key src}
-				<iframe class="pdf-frame" {src} title="PDF 表示({fileName})"></iframe>
+				<iframe class="pdf-frame" {src} title="PDF view ({fileName})"></iframe>
 			{/key}
 		{:else if mode === 'inline' && load === 'checking'}
 			<div class="pdf-placeholder">
-				<p class="pdf-message">読み込み中…({fileName})</p>
+				<p class="pdf-message">Loading… ({fileName})</p>
 			</div>
 		{:else}
 			<div class="pdf-placeholder">
 				<p class="pdf-message">
 					{#if mode === 'remote'}
-						リモート(ssh)の PDF はアプリ内で表示できません({fileName})。
+						Remote (ssh) PDFs cannot be displayed in the app ({fileName}).
 					{:else}
-						この PDF を表示できませんでした({fileName})。ファイルが壊れているか、暗号化されている可能性があります。
+						Could not display this PDF ({fileName}). The file may be corrupted or encrypted.
 					{/if}
 				</p>
 				{#if externalPlan}
 					<button type="button" class="toolbar-button" onclick={openExternally}>
-						既定アプリで開く
+						Open with Default App
 					</button>
 				{/if}
 			</div>

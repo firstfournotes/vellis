@@ -115,7 +115,7 @@ pub fn rebind(mark: &Mark, new_content: &str) -> (Mark, RebindOutcome) {
 
     if hits.len() == 1 {
         let hit = &hits[0];
-        let updated = build_anchored(mark, hit, &new_hash, mark.status);
+        let updated = build_anchored(mark, hit, new_content, &new_hash, mark.status);
         return (updated, RebindOutcome::Moved);
     }
 
@@ -126,6 +126,7 @@ pub fn rebind(mark: &Mark, new_content: &str) -> (Mark, RebindOutcome) {
             let updated = build_anchored(
                 mark,
                 &fuzzy_hit.hit,
+                new_content,
                 &new_hash,
                 MarkStatus::ChangedByAgent,
             );
@@ -175,8 +176,9 @@ fn slice_lines(lines: &[&str], start_line: u32, end_line: u32) -> Option<String>
     Some(lines[s..end].join("\n"))
 }
 
-/// Compute the byte offsets of `text` in `content` when the match
-/// starts on `start_line` (1-based).
+/// Compute the anchor offsets of `text` in `content` when the match
+/// starts on `start_line` (1-based).  Offsets are **UTF-16 code units**
+/// (要件#49 契約⑤ — same unit as `MarkAnchor` and the TS side).
 fn locate_text_offsets(content: &str, start_line: u32, text: &str) -> Option<(u32, u32)> {
     if start_line == 0 {
         return None;
@@ -184,9 +186,27 @@ fn locate_text_offsets(content: &str, start_line: u32, text: &str) -> Option<(u3
     let line_start = byte_offset_of_line(content, start_line)?;
     let rest = &content[line_start..];
     let rel = rest.find(text)?;
-    let start = (line_start + rel) as u32;
-    let end = start + text.len() as u32;
+    let start = utf16_offset(content, line_start + rel);
+    let end = start + utf16_len(text);
     Some((start, end))
+}
+
+/// UTF-16 code unit count of `s` (the TS `String.prototype.length`).
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
+}
+
+/// Convert a byte offset into `content` to a UTF-16 code unit offset
+/// (要件#49 契約⑤).  Internal search results are byte-based — the
+/// conversion happens only where an offset is written onto an anchor,
+/// so multi-byte text (日本語) and surrogate pairs (絵文字) land where
+/// the TS side expects them.
+fn utf16_offset(content: &str, byte_offset: usize) -> u32 {
+    let mut bounded = byte_offset.min(content.len());
+    while bounded > 0 && !content.is_char_boundary(bounded) {
+        bounded -= 1;
+    }
+    utf16_len(&content[..bounded])
 }
 
 /// Byte offset where `line_1based` begins.  Returns `Some(content.len())`
@@ -319,12 +339,20 @@ fn context_matches(lines: &[&str], start_line_1based: u32, anchor: &Anchor) -> b
     cb_ok || ca_ok
 }
 
-fn build_anchored(mark: &Mark, hit: &Hit, new_hash: &str, status: MarkStatus) -> Mark {
+fn build_anchored(
+    mark: &Mark,
+    hit: &Hit,
+    content: &str,
+    new_hash: &str,
+    status: MarkStatus,
+) -> Mark {
     let mut updated = mark.clone();
     updated.anchor.start_line = hit.line_1based;
     updated.anchor.end_line = hit.end_line_1based;
-    updated.anchor.start_offset = hit.byte_offset;
-    updated.anchor.end_offset = hit.end_byte_offset;
+    // `Hit` carries byte offsets (that is what `str::find` returns); the
+    // anchor is UTF-16 (要件#49 契約⑤).
+    updated.anchor.start_offset = utf16_offset(content, hit.byte_offset as usize);
+    updated.anchor.end_offset = utf16_offset(content, hit.end_byte_offset as usize);
     updated.anchor.file_hash = new_hash.to_string();
     updated.status = status;
     updated.updated_at = chrono::Utc::now();

@@ -119,11 +119,11 @@
 
 {#if isDir && expanded}
 	{#if loading && !children}
-		<div class="tree-note" style="padding-left: {8 + (depth + 1) * 14}px">読み込み中...</div>
+		<div class="tree-note" style="padding-left: {8 + (depth + 1) * 14}px">Loading…</div>
 	{:else if loadError}
 		<div class="tree-note error" style="padding-left: {8 + (depth + 1) * 14}px">{loadError}</div>
 	{:else if children && children.length === 0}
-		<div class="tree-note empty" style="padding-left: {8 + (depth + 1) * 14}px">(空)</div>
+		<div class="tree-note empty" style="padding-left: {8 + (depth + 1) * 14}px">(empty)</div>
 	{:else if children}
 		{#each children as child (child.uri)}
 			<ExplorerItem

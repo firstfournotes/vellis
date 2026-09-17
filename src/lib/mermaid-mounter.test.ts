@@ -130,7 +130,7 @@ describe('mountMermaid — error handling', () => {
 		expect(div.classList.contains('vellis-mermaid-rendered')).toBe(true);
 		expect(div.classList.contains('vellis-mermaid-error')).toBe(true);
 		expect(div.querySelector('summary')!.textContent).toContain(
-			'レンダーに失敗しました',
+			'Failed to render',
 		);
 		expect(div.querySelector('.vellis-mermaid-error-message')!.textContent).toContain(
 			'parse error',
@@ -150,7 +150,7 @@ describe('mountMermaid — error handling', () => {
 		const div = document.body.querySelector('.vellis-mermaid')!;
 		expect(div.classList.contains('vellis-mermaid-error')).toBe(true);
 		expect(div.querySelector('.vellis-mermaid-error-message')!.textContent).toContain(
-			'空',
+			'empty',
 		);
 	});
 });

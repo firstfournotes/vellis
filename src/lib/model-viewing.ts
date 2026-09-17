@@ -75,7 +75,7 @@ function summarize(object: Object3D): number {
 function boundsOf(object: Object3D): ParsedModel['bounds'] {
 	object.updateMatrixWorld(true);
 	const box = new Box3().setFromObject(object);
-	if (box.isEmpty()) throw new Error('モデルに描画できる形状がありません');
+	if (box.isEmpty()) throw new Error('The model has no drawable geometry');
 	return {
 		min: [box.min.x, box.min.y, box.min.z],
 		max: [box.max.x, box.max.y, box.max.z],
@@ -102,7 +102,7 @@ export async function parseModel(nameOrUri: string, buffer: ArrayBuffer): Promis
 			object = new ThreeMFLoader().parse(buffer);
 			break;
 		default:
-			throw new Error(`3D モデルとして開けない拡張子です: ${nameOrUri}`);
+			throw new Error(`Not a supported 3D model extension: ${nameOrUri}`);
 	}
 
 	const triangleCount = summarize(object);

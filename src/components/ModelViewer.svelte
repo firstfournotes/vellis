@@ -204,11 +204,11 @@
 		load = { kind: 'loading' };
 		try {
 			const response = await fetch(assetSrc);
-			if (!response.ok) throw new Error(`読み込みに失敗しました(HTTP ${response.status})`);
+			if (!response.ok) throw new Error(`Could not load the model (HTTP ${response.status})`);
 			const buffer = await response.arrayBuffer();
 			if (buffer.byteLength > MAX_BYTES) {
 				const mb = Math.round(buffer.byteLength / (1024 * 1024));
-				throw new Error(`ファイルが大きすぎます(${mb}MB。上限 256MB)`);
+				throw new Error(`The file is too large (${mb}MB; limit 256MB)`);
 			}
 			const model = await parseModel(uri, buffer);
 
@@ -225,7 +225,7 @@
 			disposeModel();
 			load = {
 				kind: 'error',
-				message: error instanceof Error ? error.message : 'モデルを表示できませんでした',
+				message: error instanceof Error ? error.message : 'Could not display the model',
 			};
 		}
 	}
@@ -363,15 +363,15 @@
 		<button
 			type="button"
 			class="toolbar-button"
-			title="初期の視点に戻す"
+			title="Return to the initial view"
 			onclick={resetView}
 			disabled={load.kind !== 'ready'}
 		>
-			視点をリセット
+			Reset View
 		</button>
 		<span class="model-name" title={uri}>{fileName}</span>
 		{#if load.kind === 'ready'}
-			<span class="model-stats">{load.triangleCount.toLocaleString()} 三角形</span>
+			<span class="model-stats">{load.triangleCount.toLocaleString()} triangles</span>
 		{/if}
 	</header>
 
@@ -383,7 +383,7 @@
 		class="model-stage"
 		bind:this={stage}
 		role="application"
-		aria-label="3D モデル表示({fileName})。左ドラッグで回転・右ドラッグでパン・ホイールでズーム"
+		aria-label="3D model view ({fileName}). Drag to rotate, right-drag to pan, scroll to zoom"
 		onpointerdown={onPointerDown}
 		onpointermove={onPointerMove}
 		onpointerup={onPointerUp}
@@ -392,7 +392,7 @@
 		oncontextmenu={(e) => e.preventDefault()}
 	>
 		{#if load.kind === 'loading'}
-			<p class="model-message">読み込み中…({fileName})</p>
+			<p class="model-message">Loading… ({fileName})</p>
 		{:else if load.kind === 'error'}
 			<p class="model-message">{load.message}</p>
 		{/if}

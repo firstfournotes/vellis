@@ -28,9 +28,9 @@
 </script>
 
 <div class="update-banner" role="status">
-	<span class="update-message">新しいバージョン v{version} が公開されています</span>
-	<button class="update-download" onclick={download}>ダウンロード</button>
-	<button class="update-close" onclick={onClose} aria-label="通知を閉じる" title="閉じる">✕</button>
+	<span class="update-message">A new version v{version} is available</span>
+	<button class="update-download" onclick={download}>Download</button>
+	<button class="update-close" onclick={onClose} aria-label="Dismiss" title="Close">✕</button>
 </div>
 
 <style>

@@ -64,7 +64,7 @@ function renderError(el: HTMLElement, message: string, source: string): void {
 	el.classList.add(RENDERED_CLASS, ERROR_CLASS);
 	const details = document.createElement('details');
 	const summary = document.createElement('summary');
-	summary.textContent = 'Mermaid 図のレンダーに失敗しました';
+	summary.textContent = 'Failed to render the Mermaid diagram';
 	const errorPre = document.createElement('pre');
 	errorPre.className = 'vellis-mermaid-error-message';
 	errorPre.textContent = message;
@@ -81,7 +81,7 @@ async function renderOne(
 ): Promise<void> {
 	const source = el.dataset.mermaidSource ?? '';
 	if (source.trim().length === 0) {
-		renderError(el, '空の Mermaid ブロックです。', source);
+		renderError(el, 'This Mermaid block is empty.', source);
 		return;
 	}
 	try {
@@ -118,7 +118,7 @@ export async function mountMermaid(
 		const msg = err instanceof Error ? err.message : String(err);
 		for (const el of placeholders) {
 			const source = el.dataset.mermaidSource ?? '';
-			renderError(el, `mermaid のロードに失敗しました: ${msg}`, source);
+			renderError(el, `Could not load Mermaid: ${msg}`, source);
 		}
 		// Reset the failed promise so a future mount can retry.
 		mermaidPromise = null;

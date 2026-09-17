@@ -63,11 +63,13 @@
  * gate で由谷が文言 NG とした場合は要件側で文言を確定してから acceptance を
  * 更新する(契約①の脱出口=要件#24 と同じ運用・事前承認済み)。
  *
- * ## スコープ外(契約④=日本語のまま残ってよい)
- * RootPicker・UpdateBanner・各ビューアのプレースホルダ・+page.svelte の
- * 履歴選択画面エラー(「フォルダを開けませんでした」)・マーク追加失敗 alert・
- * ペイン仕切りの aria-label / title 等。ソース走査はこれらを誤検知しない形で
- * 対象文言だけを見る。
+ * ## スコープ外だったもの(契約④)は要件#51 が回収済み
+ * 登録時に「日本語のまま残ってよい」と列挙した RootPicker・UpdateBanner・
+ * 各ビューアのプレースホルダ・+page.svelte の履歴選択画面エラー・マーク追加失敗
+ * alert・ペイン仕切りの aria-label / title 等は、要件#51(UI 文言の全英語化=
+ * src/ 全面走査+主要文言の値固定。docs/requirements/req-51.md)で英語になった。
+ * 本ファイルの否定判定3件(下の +page.svelte ソース走査)は英語化後も
+ * そのまま通り続ける(判定は不変)。
  *
  * ## reviewer 照合に委ねる配線(本テストの判定対象外)
  * - +page.svelte が openFailedMessage / duplicateWindowFailedMessage /

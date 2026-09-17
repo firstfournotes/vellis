@@ -51,26 +51,26 @@
 	<div class="backdrop" onclick={onCancel}></div>
 	<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="instr-title" onkeydown={handleKeydown}>
 		<header>
-			<h2 id="instr-title">AI 修正指示</h2>
+			<h2 id="instr-title">AI Instruction</h2>
 		</header>
 		<section class="preview">
-			<span class="preview-label">対象範囲</span>
+			<span class="preview-label">Selection</span>
 			<pre>{preview}</pre>
 		</section>
 		<section>
-			<label for="instr-textarea">指示内容</label>
+			<label for="instr-textarea">Instruction</label>
 			<textarea
 				id="instr-textarea"
 				bind:this={textarea}
 				bind:value={instruction}
 				rows="6"
-				placeholder="例: この説明を最新仕様に合わせて修正してください"
+				placeholder="e.g. Update this description to match the latest spec"
 			></textarea>
 		</section>
 		<footer>
-			<button type="button" onclick={onCancel}>取り消し (Esc)</button>
+			<button type="button" onclick={onCancel}>Cancel (Esc)</button>
 			<button type="button" class="primary" onclick={submit} disabled={!instruction.trim()}>
-				送信 (Cmd/Ctrl+Enter)
+				Submit (Cmd/Ctrl+Enter)
 			</button>
 		</footer>
 	</div>

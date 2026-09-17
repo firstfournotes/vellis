@@ -8,7 +8,7 @@
 		{#if windowState.version}
 			<p class="version">v{windowState.version}</p>
 		{/if}
-		<p class="hint">ファイルを選択してください</p>
+		<p class="hint">Select a file</p>
 	</div>
 </div>
 

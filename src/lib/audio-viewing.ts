@@ -161,7 +161,7 @@ export function saveAudioWaveformHeight(height: number): void {
 // ---------------------------------------------------------------------------
 
 /** 解析中インジケータの文言(契約⑫。動画側と同じ役割で、語は音声ビューア用)。 */
-const AUDIO_WAVEFORM_ANALYZING_NOTE = '音声を解析中…';
+const AUDIO_WAVEFORM_ANALYZING_NOTE = 'Analyzing audio…';
 
 /**
  * 音声ビューア用の縮退文言(契約⑫)。
@@ -174,11 +174,11 @@ const AUDIO_WAVEFORM_ANALYZING_NOTE = '音声を解析中…';
  * ―― 状態が増えたときに「文言を足し忘れた」を型が咎める側であり続ける。
  */
 const AUDIO_WAVEFORM_DEGRADED_NOTES: Record<Exclude<WaveformResult['state'], 'ready'>, string> = {
-	'no-audio': 'このファイルから音声を読み取れませんでした',
-	'too-large': 'ファイルが大きすぎて波形を作れません',
-	unreadable: 'この音声を読み取れませんでした',
-	'unsupported-codec': 'この音声コーデックの波形は出せません',
-	'decode-failed': 'この音声をデコードできませんでした',
+	'no-audio': 'Could not read audio from this file',
+	'too-large': 'The file is too large to build a waveform',
+	unreadable: 'Could not read this audio',
+	'unsupported-codec': 'Waveforms are not available for this audio codec',
+	'decode-failed': 'Could not decode this audio',
 };
 
 /**

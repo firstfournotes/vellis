@@ -24,7 +24,7 @@
 <div class="root-picker">
 	<div class="picker-content">
 		<h1 class="app-name">Vellis</h1>
-		<p class="hint">開くフォルダを選んでください</p>
+		<p class="hint">Choose a folder to open</p>
 
 		{#if entries.length > 0}
 			<ul class="history-list">
@@ -38,14 +38,14 @@
 				{/each}
 			</ul>
 		{:else}
-			<p class="empty-history">最近開いたフォルダはありません</p>
+			<p class="empty-history">No recently opened folders</p>
 		{/if}
 
 		{#if error}
 			<p class="error" role="alert">{error}</p>
 		{/if}
 
-		<button class="pick-folder" onclick={onPickFolder}>フォルダを選択…</button>
+		<button class="pick-folder" onclick={onPickFolder}>Select Folder…</button>
 	</div>
 </div>
 

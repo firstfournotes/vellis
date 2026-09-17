@@ -67,8 +67,8 @@
 	async function revertFile() {
 		if (!diff || !mark) return;
 		const ok = confirm(
-			`${diff.file} を snapshot ${diff.snapshot_id} の状態に復元します。\n\n` +
-				'この操作は AI が編集した変更を上書きします。続行しますか?',
+			`Restore ${diff.file} to the state of snapshot ${diff.snapshot_id}.\n\n` +
+				'This will overwrite changes made by the AI. Continue?',
 		);
 		if (!ok) return;
 		try {
@@ -77,10 +77,10 @@
 				snapshotId: diff.snapshot_id,
 				files: [diff.file],
 			});
-			alert(`復元しました: ${diff.file}`);
+			alert(`Restored: ${diff.file}`);
 			onClose();
 		} catch (e) {
-			alert(`復元失敗: ${e}`);
+			alert(`Could not restore: ${e}`);
 		}
 	}
 
@@ -125,7 +125,7 @@
 		onkeydown={handleKeydown}
 	>
 		<header>
-			<h2 id="diff-title">変更差分: {mark.file}</h2>
+			<h2 id="diff-title">Changes: {mark.file}</h2>
 			<div class="header-right">
 				<div class="mode-toggle" role="tablist">
 					<button
@@ -147,34 +147,34 @@
 				</div>
 				{#if diff}
 					<button type="button" class="revert" onclick={revertFile}>
-						snapshot に戻す
+						Revert to Snapshot
 					</button>
 				{/if}
-				<button type="button" class="close" onclick={onClose} aria-label="閉じる">
+				<button type="button" class="close" onclick={onClose} aria-label="Close">
 					×
 				</button>
 			</div>
 		</header>
 		<div class="body">
 			{#if loading}
-				<p class="placeholder">差分を計算中…</p>
+				<p class="placeholder">Computing diff…</p>
 			{:else if error}
 				<p class="placeholder error">
-					差分が取得できません: {error}<br />
-					generate_inbox を一度実行して snapshot を作成してください。
+					Could not compute the diff: {error}<br />
+					Run generate_inbox once to create a snapshot.
 				</p>
 			{:else if !diff}
-				<p class="placeholder">スナップショットがありません。</p>
+				<p class="placeholder">No snapshot available.</p>
 			{:else if diff.hunks.length === 0}
-				<p class="placeholder">差分はありません。</p>
+				<p class="placeholder">No differences.</p>
 			{:else if mode === 'inline'}
 				<pre class="inline-diff">
-{#each diff.hunks as h, i (i)}{#if h.kind === 'equal'}<span class="hunk-equal">{h.text}</span>{:else if h.kind === 'delete'}<span class={classifyHunk(h)} title="削除 (snapshot 側)">{prefixLines(h.text, '-')}</span>{:else}<span class={classifyHunk(h)} title="挿入 (現在側)">{prefixLines(h.text, '+')}</span>{/if}{/each}
+{#each diff.hunks as h, i (i)}{#if h.kind === 'equal'}<span class="hunk-equal">{h.text}</span>{:else if h.kind === 'delete'}<span class={classifyHunk(h)} title="Deleted (snapshot side)">{prefixLines(h.text, '-')}</span>{:else}<span class={classifyHunk(h)} title="Inserted (current side)">{prefixLines(h.text, '+')}</span>{/if}{/each}
 				</pre>
 			{:else}
 				<div class="side-by-side">
 					<pre class="col col-before"><span class="col-label">snapshot</span>{diff.before}</pre>
-					<pre class="col col-after"><span class="col-label">現在</span>{diff.after}</pre>
+					<pre class="col col-after"><span class="col-label">Current</span>{diff.after}</pre>
 				</div>
 			{/if}
 		</div>

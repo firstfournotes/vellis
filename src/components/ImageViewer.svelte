@@ -63,11 +63,11 @@
 				type="button"
 				class="toolbar-button"
 				class:active={sizeMode === 'actual'}
-				title={sizeMode === 'fit' ? '原寸で表示(スクロール)' : 'ウインドウに合わせて表示'}
+				title={sizeMode === 'fit' ? 'View at actual size (scrolls)' : 'Fit to the window'}
 				aria-pressed={sizeMode === 'actual'}
 				onclick={() => (sizeMode = toggleSizeMode(sizeMode))}
 			>
-				{sizeMode === 'fit' ? '実寸表示' : 'フィット表示'}
+				{sizeMode === 'fit' ? 'Actual Size' : 'Fit to Window'}
 			</button>
 		{/if}
 		{#if sourceAvailable}
@@ -75,11 +75,11 @@
 				type="button"
 				class="toolbar-button"
 				class:active={showingSource}
-				title={showingSource ? '画像として表示' : 'SVG のソースを表示'}
+				title={showingSource ? 'Show the image' : 'Show the SVG source'}
 				aria-pressed={showingSource}
 				onclick={() => (svgViewMode = toggleSvgViewMode(svgViewMode))}
 			>
-				{showingSource ? '画像表示' : 'ソース表示'}
+				{showingSource ? 'View Image' : 'View Source'}
 			</button>
 		{/if}
 		<span class="image-name" title={uri}>{fileName}</span>
@@ -89,7 +89,7 @@
 		<div class="image-source"><pre>{source}</pre></div>
 	{:else if loadFailed}
 		<div class="image-stage">
-			<p class="image-error">画像を表示できませんでした({fileName})。</p>
+			<p class="image-error">Could not display the image ({fileName}).</p>
 		</div>
 	{:else}
 		<div class="image-stage">

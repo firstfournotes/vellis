@@ -93,8 +93,8 @@
 			class="up-button"
 			onclick={goUp}
 			disabled={!parent}
-			title="親フォルダへ移動"
-			aria-label="親フォルダへ移動"
+			title="Go to Parent Folder"
+			aria-label="Go to Parent Folder"
 		>
 			↑
 		</button>

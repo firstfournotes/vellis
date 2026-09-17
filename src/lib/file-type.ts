@@ -195,7 +195,7 @@ function renderPlainText(content: string): string {
 
 /** Shown instead of the body for files that are not displayable as text. */
 const BINARY_PLACEHOLDER =
-	'<p class="vellis-unsupported">このファイルは表示できません(バイナリ形式)。</p>';
+	'<p class="vellis-unsupported">This file cannot be displayed (binary format).</p>';
 
 export interface DisplayResult {
 	html: string;

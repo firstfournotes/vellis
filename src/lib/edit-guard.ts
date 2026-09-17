@@ -18,14 +18,14 @@ import { ask } from '@tauri-apps/plugin-dialog';
 import { saveDocument } from '$lib/save-document';
 import { windowState } from '../stores/window-state.svelte';
 
-export const UNSAVED_TITLE = '保存していない変更があります';
+export const UNSAVED_TITLE = 'Unsaved Changes';
 
 /** 1枚目 — 進んでよいか(いいえ=操作そのものを取りやめる)。 */
 export const UNSAVED_PROCEED_MESSAGE =
-	'編集中の変更がまだ保存されていません。このまま続けますか?';
+	'Your edits have not been saved yet. Do you want to continue?';
 
 /** 2枚目 — 進むと決めた後、保存してから進むか捨てて進むか。 */
-export const UNSAVED_SAVE_MESSAGE = '続ける前に変更を保存しますか?';
+export const UNSAVED_SAVE_MESSAGE = 'Do you want to save your changes before continuing?';
 
 export type UnsavedChoice = 'save' | 'discard' | 'cancel';
 
@@ -38,15 +38,15 @@ export async function askUnsavedChoice(dirty: boolean): Promise<UnsavedChoice> {
 	const proceed = await ask(UNSAVED_PROCEED_MESSAGE, {
 		title: UNSAVED_TITLE,
 		kind: 'warning',
-		okLabel: '続ける',
-		cancelLabel: 'キャンセル',
+		okLabel: 'Continue',
+		cancelLabel: 'Cancel',
 	});
 	if (!proceed) return 'cancel';
 	const save = await ask(UNSAVED_SAVE_MESSAGE, {
 		title: UNSAVED_TITLE,
 		kind: 'warning',
-		okLabel: '保存する',
-		cancelLabel: '破棄する',
+		okLabel: 'Save',
+		cancelLabel: "Don't Save",
 	});
 	return save ? 'save' : 'discard';
 }
@@ -68,7 +68,7 @@ export async function confirmDiscardEdits(): Promise<boolean> {
 		try {
 			await saveDocument(doc.uri, buffer);
 		} catch (err) {
-			alert(`保存に失敗しました: ${err}`);
+			alert(`Could not save: ${err}`);
 			return false;
 		}
 	}

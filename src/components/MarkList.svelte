@@ -52,9 +52,9 @@
 	async function generateInbox() {
 		try {
 			const res = await marksStore.generateInbox(rootUri, { status: 'open' });
-			alert(`agent-inbox.md を書き出しました:\n${res.path}\n\n対象 ${res.mark_ids.length} 件 (Open → Sent)`);
+			alert(`Exported agent-inbox.md:\n${res.path}\n\n${res.mark_ids.length} marks (Open → Sent)`);
 		} catch (err) {
-			alert(`generate_inbox 失敗: ${err}`);
+			alert(`Could not export the inbox: ${err}`);
 		}
 	}
 
@@ -67,7 +67,7 @@
 	}
 
 	async function remove(mark: Mark) {
-		if (!confirm(`このマークを削除しますか?\n\n${mark.instruction.slice(0, 80)}`)) return;
+		if (!confirm(`Delete this mark?\n\n${mark.instruction.slice(0, 80)}`)) return;
 		await marksStore.remove({ rootUri, id: mark.id });
 	}
 
@@ -77,15 +77,15 @@
 	}
 </script>
 
-<aside class="mark-list" aria-label="マーク一覧">
+<aside class="mark-list" aria-label="Marks">
 	<header>
 		<h2>
-			マーク
+			Marks
 			{#if marksStore.recentDrift.length > 0}
 				<button
 					type="button"
 					class="drift-badge"
-					title="AI 編集で位置が変わった/失われたマークがあります。クリックで通知をクリア。"
+					title="Some marks moved or were lost during AI edits. Click to clear this notice."
 					onclick={() => marksStore.acknowledgeDrift()}
 				>
 					! {marksStore.recentDrift.length}
@@ -94,39 +94,39 @@
 		</h2>
 		<div class="header-actions">
 			<button type="button" class="primary" onclick={generateInbox} disabled={marksStore.all.length === 0}>
-				inbox 生成
+				Generate Inbox
 			</button>
-			<button type="button" class="ghost" onclick={onClose} aria-label="閉じる">×</button>
+			<button type="button" class="ghost" onclick={onClose} aria-label="Close">×</button>
 		</div>
 	</header>
-	<nav class="filter-tabs" aria-label="マークフィルタ">
+	<nav class="filter-tabs" aria-label="Mark Filter">
 		<button
 			type="button"
 			class="filter-tab"
 			class:active={filter === 'all'}
 			onclick={() => onFilterChange?.('all')}
 		>
-			すべて ({marksStore.all.length})
+			All ({marksStore.all.length})
 		</button>
 		<button
 			type="button"
 			class="filter-tab"
 			class:active={filter === 'drift'}
-			title="AI 編集で位置がずれたマーク (changed_by_agent / stale)"
+			title="Marks that drifted during AI edits (changed_by_agent / stale)"
 			onclick={() => onFilterChange?.('drift')}
 		>
 			drift ({marksStore.all.filter((m) => DRIFT_STATUSES.includes(m.status)).length})
 		</button>
 	</nav>
 	{#if marksStore.loading}
-		<p class="empty">読み込み中…</p>
+		<p class="empty">Loading…</p>
 	{:else if marksStore.lastError}
 		<p class="error">{marksStore.lastError}</p>
 	{:else if filtered.length === 0}
 		{#if filter === 'drift'}
-			<p class="empty">drift 対象のマークはありません。</p>
+			<p class="empty">No drifted marks.</p>
 		{:else}
-			<p class="empty">マークはまだありません。<br />本文を選択して「指示を追加」を押してください。</p>
+			<p class="empty">No marks yet.<br />Select text and press Add Instruction.</p>
 		{/if}
 	{:else}
 		<ul>
@@ -141,12 +141,12 @@
 					<p class="instruction">{previewText(mark.instruction)}</p>
 					<div class="actions">
 						{#if onShowDiff && mark.status !== 'open'}
-							<button type="button" onclick={() => onShowDiff(mark)}>差分</button>
+							<button type="button" onclick={() => onShowDiff(mark)}>Diff</button>
 						{/if}
 						{#if mark.status !== 'resolved'}
-							<button type="button" onclick={() => resolve(mark)}>解決</button>
+							<button type="button" onclick={() => resolve(mark)}>Resolve</button>
 						{/if}
-						<button type="button" onclick={() => remove(mark)}>削除</button>
+						<button type="button" onclick={() => remove(mark)}>Delete</button>
 					</div>
 				</li>
 			{/each}

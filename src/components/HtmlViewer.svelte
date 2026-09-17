@@ -10,7 +10,7 @@
 	(script-src 'self')。allow-same-origin もないので不透明オリジンになる。
 	リンクは踏んでも遷移しない静的スナップショット(docs/html-viewing.md 案B)。
 -->
-<iframe class="html-viewer" title="HTML プレビュー" sandbox={SANDBOX_ATTRIBUTE} {srcdoc}></iframe>
+<iframe class="html-viewer" title="HTML preview" sandbox={SANDBOX_ATTRIBUTE} {srcdoc}></iframe>
 
 <style>
 	.html-viewer {

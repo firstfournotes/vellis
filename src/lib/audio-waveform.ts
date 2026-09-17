@@ -195,15 +195,15 @@ export type WaveformResult =
 // ---------------------------------------------------------------------------
 
 /** 解析中インジケータの文言(要件#45 契約③・文言は実装裁量)。 */
-const WAVEFORM_ANALYZING_NOTE = '音声を解析中…';
+const WAVEFORM_ANALYZING_NOTE = 'Analyzing audio…';
 
 /** 縮退の理由を帯に出す文言(契約⑤)。どの理由でも再生は止まらない。 */
 const WAVEFORM_DEGRADED_NOTES: Record<Exclude<WaveformResult['state'], 'ready'>, string> = {
-	'no-audio': 'この動画に音声トラックはありません',
-	'too-large': 'ファイルが大きすぎて波形を作れません',
-	unreadable: '音声を読み取れませんでした',
-	'unsupported-codec': 'この音声コーデックの波形は出せません',
-	'decode-failed': '音声をデコードできませんでした',
+	'no-audio': 'This video has no audio track',
+	'too-large': 'The file is too large to build a waveform',
+	unreadable: 'Could not read the audio',
+	'unsupported-codec': 'Waveforms are not available for this audio codec',
+	'decode-failed': 'Could not decode the audio',
 };
 
 /**
