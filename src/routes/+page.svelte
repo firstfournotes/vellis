@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import Explorer from '../components/Explorer.svelte';
+	import GoToBar from '../components/GoToBar.svelte';
 	import Viewer from '../components/Viewer.svelte';
 	import HtmlViewer from '../components/HtmlViewer.svelte';
 	import ImageViewer from '../components/ImageViewer.svelte';
@@ -19,6 +20,9 @@
 	import { listen } from '$lib/events';
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
+	// `~` の展開(要件#60 契約②・追補c)。`core:default` に含まれる口なので
+	// capability も Rust も無改変で、依存も増えない。
+	import { homeDir } from '@tauri-apps/api/path';
 	import { windowState, type DocumentPayload, type Entry } from '../stores/window-state.svelte';
 	import { marksStore } from '../stores/marks.svelte';
 	import { featureFlags } from '$lib/flags.svelte';
@@ -55,7 +59,11 @@
 		registerDuplicateWindowListener,
 		type DuplicateSnapshot
 	} from '$lib/duplicate-window';
+	import { openInNewWindow, openInNewWindowFailedMessage } from '$lib/open-in-new-window';
+	import type { NewWindowAction } from '$lib/context-menu';
 	import { MENU_EDIT_EVENT } from '$lib/document-edit';
+	import { MENU_FIND_EVENT } from '$lib/find-in-document';
+	import { MENU_GO_TO_EVENT, revealPath } from '$lib/go-to-path';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { handleCloseRequested } from '$lib/close-window';
 	import { MENU_SAVE_EVENT, saveDocument } from '$lib/save-document';
@@ -200,6 +208,213 @@
 		};
 	});
 
+	// --- 文書内検索(要件#54) ----------------------------------------------
+	// 検索そのものは Viewer の中で完結する(バー・一致・ハイライト)。ここが持つのは
+	// **html の閲覧中だけの回り道**: そのときの画面は `HtmlViewer` の sandbox された
+	// iframe で、Viewer はまだマウントされていない ―― ⌘F を受ける相手が居ない。
+	// そこで ⌘F をここでも受け、複製面を持つ Viewer へ切り替えてから、その ⌘F を
+	// `findRequest` で渡す(要件#54 契約①②)。閲覧の iframe・sandbox・CSP には
+	// 触れない(要件#8・#53 契約①の継承)。
+
+	/** html の閲覧中に ⌘F が来て、複製面(Viewer)へ切り替えているか。 */
+	let htmlFindOpen = $state(false);
+
+	/** Viewer 側で検索バーが開いているか(閉じる操作は向こうにしかない)。 */
+	let viewerFindOpen = $state(false);
+
+	/**
+	 * Viewer へ渡す「今の ⌘F」。0 =要求なしで、進んだときだけ検索バーが開く。
+	 * 切り替えの結果として Viewer が**生まれる**ので、初回も 0 → 1 の前進で伝わる。
+	 */
+	let findRequest = $state(0);
+
+	function handleMenuFind() {
+		if (windowState.editMode !== 'view') return;
+		const doc = windowState.currentDocument;
+		if (!doc || detectFileType(doc.uri) !== 'html') return;
+		htmlFindOpen = true;
+		findRequest += 1;
+	}
+
+	/** 検索バーが閉じたら html は閲覧の iframe へ戻す。 */
+	function handleFindOpenChange(open: boolean) {
+		viewerFindOpen = open;
+		if (open) return;
+		htmlFindOpen = false;
+		findRequest = 0;
+	}
+
+	// 要件#54 契約⑤: 別の文書を開いても検索バーは開いたまま。html へ移ったときは
+	// 複製面の側で続ける(iframe には探せる文字が無い)ので、回り道を張り直す。
+	// バーが閉じているなら回り道も畳んで、閲覧は素の iframe へ戻す。
+	$effect(() => {
+		const uri = windowState.currentDocument?.uri;
+		untrack(() => {
+			if (uri && viewerFindOpen && detectFileType(uri) === 'html') {
+				htmlFindOpen = true;
+				findRequest += 1;
+				return;
+			}
+			htmlFindOpen = false;
+			findRequest = 0;
+		});
+	});
+
+	// --- パスを名指しして跳ぶ(要件#60) ------------------------------------
+	// 入力の解釈・root 配下判定・解決・跳躍は `$lib/go-to-path` の持ち場(純関数と、
+	// 手段を注入して動く `revealPath`)。ここが持つのは「いつバーを出すか」と
+	// 「どの手段を渡すか」だけで、バーそのものは `GoToBar.svelte`
+	// (ズーム・印刷・複製と同じ分担)。今の窓の root は**どの場合も変えない**。
+
+	/** Go to バーを出しているか。ウインドウ単位・揮発(閉じれば値も消える=契約①)。 */
+	let goToOpen = $state(false);
+
+	/** 直前の Go が「無い」で終わったか(契約⑥)。バーの表示欄がこれを映す。 */
+	let goToNotFound = $state(false);
+
+	/** 入力欄の実体。⇧⌘G の再送でフォーカスを戻して全選択する(契約①)。 */
+	let goToInputEl = $state<HTMLInputElement | undefined>(undefined);
+
+	/** バーで IME 変換中か。変換中の Esc は IME に委ねる(契約⑦)。 */
+	let goToComposing = $state(false);
+
+	function focusGoToInput() {
+		goToInputEl?.focus();
+		goToInputEl?.select();
+	}
+
+	/**
+	 * File メニュー「Go to Path…」(⇧⌘G)を受ける(契約①)。
+	 *
+	 * **root が決まっているときだけ出す** —— 履歴選択画面(要件#4)が出ている間は
+	 * 跳ぶ先の root が無い。**文書が開いていなくても出す** —— Go to は文書ではなく
+	 * ツリーに効く操作で、空の閲覧面のときこそ使い道がある。
+	 */
+	async function handleMenuGoTo() {
+		if (!windowState.root || rootPicker.open) return;
+		if (goToOpen) {
+			// 既に出ているときは入力欄へフォーカスを戻して現在の値を全選択する。
+			focusGoToInput();
+			return;
+		}
+		goToNotFound = false;
+		goToOpen = true;
+		await tick();
+		focusGoToInput();
+	}
+
+	/** Esc / Close(契約⑦)。閉じれば not-found の表示も入力した値も消える。 */
+	function closeGoTo() {
+		if (!goToOpen) return;
+		// フォーカスは閲覧面へ戻す(入力欄はこの直後に消える)。
+		goToInputEl?.blur();
+		goToOpen = false;
+		goToNotFound = false;
+		goToComposing = false;
+	}
+
+	/**
+	 * 跳んだ先の行まで運ぶ(契約⑤)。展開が DOM に反映されてから呼ぶ。
+	 * ツリーの行は `title` に自分の URI を持っている(`ExplorerItem`)ので、
+	 * 行そのものはそこから引ける。要件#54 の現在一致と同じ呼び方で運ぶ。
+	 */
+	function scrollTreeItemIntoView(uri: string) {
+		for (const row of document.querySelectorAll<HTMLElement>('.explorer-item')) {
+			if (row.title !== uri) continue;
+			row.scrollIntoView({ block: 'center', behavior: 'auto' });
+			return;
+		}
+	}
+
+	/**
+	 * ⏎ / Go(契約④⑤⑤'⑥)。打たれた1行をそのまま `revealPath` へ渡し、手段だけを
+	 * 与える —— 降りるのは既存の `list_dir`、開くのはツリーのクリックと同じ
+	 * `openForDisplay`、新しい窓は要件#59 と同じ `openInNewWindow`。
+	 *
+	 * 跳べたらバーを閉じてその行まで運ぶ。「無い」ときは `notFound` が立つだけで、
+	 * root も文書もツリーも動かず、バーは開いたまま(打ち直せる)。
+	 */
+	async function runGoTo(raw: string) {
+		goToNotFound = false;
+		// 跳んだ先(ツリーの行へ運ぶ URI)と、新しい窓が開いたか。
+		let revealedUri: string | null = null;
+		let openedWindow = false;
+		try {
+			await revealPath(raw, {
+				rootUri: windowState.root,
+				listDir: (uri) => invoke<Entry[]>('list_dir', { uri }),
+				open: async (uri) => {
+					windowState.setDocument(await openForDisplay(uri));
+					revealedUri = uri;
+				},
+				newWindow: async (args) => {
+					// 要件#59 と同じ実行列(引数は `{ path, root, expandedDirs: [] }`)。
+					const label = await openInNewWindow({
+						command: 'new-window',
+						path: args.path,
+						root: args.root
+					});
+					openedWindow = true;
+					return label;
+				},
+				setExpandedDirs: (uris) => windowState.setExpandedDirs(uris),
+				getExpandedDirs: () => windowState.expandedDirs,
+				setChildEntries: (uri, entries) => windowState.setChildEntries(uri, entries),
+				selectTreeItem: (uri) => {
+					windowState.selectTreeItem(uri);
+					revealedUri = uri;
+				},
+				notFound: () => (goToNotFound = true),
+				// 要件#48 契約④: この窓で別のファイルを開くと編集は消える(root 外の
+				// 新しい窓では聞かない=契約⑤'。判断は revealPath の側にある)。
+				confirmDiscard: confirmDiscardEdits,
+				detectFileType,
+				// 要件#59 と同じ失敗通知。窓が開かない失敗には OS 側の手応えが無い。
+				onNewWindowFailed: (err) => alert(openInNewWindowFailedMessage(err)),
+				// `~` の展開先(契約②・追補c)。`homeDir()` が返すのは絶対パスなので
+				// `file://` を前置して URI にする —— 生文字列のまま繋ぐのは
+				// `menu-open.ts` の `toUri` と同じ規約で、percent-encode すると root や
+				// 履歴との比較が食い違う。ssh の root では `revealPath` がそもそも
+				// 呼ばない(追補c (t))。
+				homeDir: async () => `file://${await homeDir()}`
+			});
+		} catch (err) {
+			// 開く側が落ちても今の窓は生きたまま。バーは開いたままにして打ち直させる。
+			alert(`Could not go to the path: ${err}`);
+			return;
+		}
+		const revealed = revealedUri as string | null;
+		if (revealed === null && !openedWindow) return;
+		closeGoTo();
+		if (revealed === null) return;
+		// 展開が DOM に反映されてから運ぶ(行はまだ生えていない)。
+		await tick();
+		scrollTreeItemIntoView(revealed);
+	}
+
+	/**
+	 * 契約⑦: Esc の宛先。Go to バーが開いていれば**バーが先に食う**(バーは編集より
+	 * 手前の一時 UI)。編集の破棄より先に決着させるため `document` の capture 段で
+	 * 受けて後段へ渡さない —— 要件#54 の検索バーとまったく同じ形で、`Viewer` 側も
+	 * `goToOpen` を見て譲るので、登録順に依らず結論が同じになる。
+	 *
+	 * IME の変換中の Esc は IME に委ねる(閉じない)。
+	 */
+	$effect(() => {
+		if (!goToOpen) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key !== 'Escape') return;
+			if (e.isComposing || goToComposing) return;
+			e.preventDefault();
+			e.stopImmediatePropagation();
+			closeGoTo();
+		};
+		document.addEventListener('keydown', onKeyDown, true);
+		return () => {
+			document.removeEventListener('keydown', onKeyDown, true);
+		};
+	});
+
 	// --- Print (要件#38) ----------------------------------------------------
 	// ⌘P の経路(HTML だけ印刷専用ウィンドウ・他は従来のメインフレーム印刷)と
 	// 印刷文書の組み立ては `$lib/print-html` の持ち場。ここは「いま何を表示して
@@ -288,6 +503,16 @@
 			}),
 			listen(MENU_EDIT_EVENT, () => {
 				void toggleEditMode();
+			}),
+			// 要件#54 契約①: html の閲覧中だけの回り道(上の handleMenuFind)。
+			// markdown / text の ⌘F は Viewer が自分で受ける。
+			listen(MENU_FIND_EVENT, () => {
+				handleMenuFind();
+			}),
+			// 要件#60 契約①: ⇧⌘G で Go to バーを出す。root が決まっていない窓
+			// (履歴選択画面)は何も起こさない — 跳ぶ先が無い。
+			listen(MENU_GO_TO_EVENT, () => {
+				void handleMenuGoTo();
 			}),
 		]).then((offs) => {
 			const off = () => offs.forEach((f) => f());
@@ -511,6 +736,20 @@
 			await duplicateWindow(currentSnapshot());
 		} catch (err) {
 			reportDuplicateFailure(err);
+		}
+	}
+
+	/**
+	 * ツリーの右クリックからの「Open in New Window」(要件#59)。計画は純関数が
+	 * 決めてあるので、ここは実行して失敗を伝えるだけ。新しい窓を作るだけなので、
+	 * この窓の状態(root・開いている文書・展開・未保存の編集)は何も動かない
+	 * — 確認ダイアログも出さない(契約④)。
+	 */
+	async function openPlanInNewWindow(plan: NewWindowAction) {
+		try {
+			await openInNewWindow(plan);
+		} catch (err) {
+			alert(openInNewWindowFailedMessage(err));
 		}
 	}
 
@@ -800,9 +1039,10 @@
 			<Explorer
 				root={windowState.root}
 				entries={windowState.entries}
-				selectedUri={windowState.currentDocument?.uri}
+				selectedUri={windowState.selectedUri}
 				width={explorerWidth}
 				onDuplicateWindow={duplicateCurrentWindow}
+				onOpenInNewWindow={openPlanInNewWindow}
 			/>
 			<!--
 				Explorer と Viewer の仕切り(要件#9)。ドラッグ専用のハンドルで、
@@ -820,127 +1060,148 @@
 				onpointerup={endPaneResize}
 				onpointercancel={endPaneResize}
 			></div>
-			{#if windowState.currentDocument}
-				<!--
-					srcdoc がある=HTML ファイル(要件#8)。生の content は {@html} 経路に載せない。
-					要件#48 契約②: 編集中(ソース編集モード)だけは HtmlViewer へ回さない —
-					編集するのはレンダリング結果ではなく RAW なので、`<pre contenteditable>` を
-					持つ Viewer(下の {:else})へ落とす。Esc / 「編集を終える」で戻ればここへ戻る。
-				-->
-				{#if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedSrcdoc !== null && windowState.editMode === 'view'}
-					<HtmlViewer srcdoc={windowState.renderedSrcdoc} />
-					<!-- imageSrc がある=画像ファイル(要件#16)。srcdoc と同じ形の分岐 -->
-				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedImageSrc !== null}
-					<ImageViewer
-						uri={windowState.currentDocument.uri}
-						src={imageSrcWithVersion(
-							windowState.renderedImageSrc,
-							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
-						)}
-						source={windowState.currentDocument.content}
-					/>
-					<!-- modelSrc がある=3D モデル(要件#23)。imageSrc と同じ形の分岐で、
-					     版数も同じ `binary_file_changed` の機構に乗る -->
-				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedModelSrc !== null}
-					<!--
-						three.js は重い(数百 KB)ので、3D モデルを開いたときだけ読み込む
-						(mermaid を図が出たときだけ `import()` するのと同じ整理)。
-					-->
-					{#await import('../components/ModelViewer.svelte') then module}
-						<module.default
-							uri={windowState.currentDocument.uri}
-							src={imageSrcWithVersion(
-								windowState.renderedModelSrc,
-								binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
-							)}
-						/>
-					{/await}
-					<!-- videoSrc がある=動画(要件#28)。imageSrc と同じ形の分岐で、版数も
-					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
-					     mkv/avi・ssh もこの経路を通る(出し分けは VideoViewer の中) -->
-				{:else if videoDisplay}
-					<!--
-						要件#40 追補1(Q31): 素材パネルは動画ペインの**下**に敷く横帯。右に置くと
-						動画の表示幅が削られるので、ビューアとパネルを縦に積む。内側の `.video-main` は
-						VideoViewer を今までどおり「行方向 flex の子」のまま置くための一枚 —— 縦積みの
-						直下だと min-height:auto が効いて動画が縮まず、帯が下へ押し出される。
-					-->
-					<div class="video-stack">
-						<div class="video-main">
-							<!--
-								要件#40: 素材パネルのトグルと、パネルが要る材料(再生位置・実尺)の
-								受け口を足す。位置は**パネルが開いているときだけ**上げる(契約⑪)。
-								区間クリックのシークはインスタンス経由で呼ぶ — 吸着に使うフレーム索引を
-								持っているのは VideoViewer の側。
-							-->
-							<VideoViewer
-								bind:this={videoViewer}
-								uri={videoDisplay.uri}
-								src={videoDisplay.src}
-								provenanceOpen={showProvenance}
-								onToggleProvenance={provenanceTarget
-									? () => (showProvenance = !showProvenance)
-									: undefined}
-								onPositionChange={showProvenance ? handleVideoPosition : undefined}
-								onDurationChange={handleVideoDuration}
-							/>
-						</div>
-						<!--
-							素材パネル本体(契約②・追補1)。`provenanceTarget` は `videoDisplay` の絞り込み
-							なので、真になり得るのはこの枝の中だけ。マーク一覧とは排他にしない —— 並びは
-							左からビューア(下に素材)・マーク一覧。
-						-->
-						{#if showProvenance && provenanceTarget}
-							<ProvenancePanel
-								videoUri={provenanceTarget.uri}
-								load={provenanceLoad}
-								position={videoPosition}
-								actualDurationSec={videoDurationSec}
-								onSeekSegment={seekToSegment}
-								onClose={() => (showProvenance = false)}
-							/>
-						{/if}
-					</div>
-					<!-- audioSrc がある=音声(要件#50)。videoSrc と同じ形の分岐で、版数も
-					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
-					     ssh もこの経路を通る(出し分けは AudioViewer の中) -->
-				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedAudioSrc !== null}
-					<AudioViewer
-						uri={windowState.currentDocument.uri}
-						src={imageSrcWithVersion(
-							windowState.renderedAudioSrc,
-							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
-						)}
-					/>
-					<!-- pdfSrc がある=PDF(要件#29)。videoSrc と同じ形の分岐で、版数も
-					     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
-					     ssh もこの経路を通る(出し分けは PdfViewer の中) -->
-				{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedPdfSrc !== null}
-					<PdfViewer
-						uri={windowState.currentDocument.uri}
-						src={imageSrcWithVersion(
-							windowState.renderedPdfSrc,
-							binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
-						)}
-					/>
-				{:else}
-					<Viewer
-						document={windowState.currentDocument}
-						html={windowState.renderedUri === windowState.currentDocument.uri
-							? windowState.renderedHtml
-							: ''}
-						index={windowState.renderedUri === windowState.currentDocument.uri
-							? windowState.sourceIndex
-							: null}
-						onRequestAddMark={handleRequestAddMark}
-						onToggleMarks={() => (showMarks = !showMarks)}
-						marksOpen={showMarks}
-						zoom={zoomTarget ? zoomLevel : DEFAULT_ZOOM}
+			<!--
+				要件#60 契約①: Go to バーは**閲覧面の上**に敷く1行。Viewer の中ではなく
+				ここに置くのは、文書が開いていなくても(EmptyState のときこそ)出るため。
+				ビューアとバーを縦に積むので、行の中では今までのビューアと同じ場所を占める。
+			-->
+			<div class="viewer-stack">
+				{#if goToOpen}
+					<GoToBar
+						onGo={(input) => void runGoTo(input)}
+						onClose={closeGoTo}
+						notFound={goToNotFound}
+						bind:inputEl={goToInputEl}
+						onComposingChange={(composing) => (goToComposing = composing)}
 					/>
 				{/if}
-			{:else}
-				<EmptyState />
-			{/if}
+				<div class="viewer-main">
+					{#if windowState.currentDocument}
+						<!--
+							srcdoc がある=HTML ファイル(要件#8)。生の content は {@html} 経路に載せない。
+							要件#48 契約②: 編集中(ソース編集モード)だけは HtmlViewer へ回さない —
+							編集するのはレンダリング結果ではなく RAW なので、`<pre contenteditable>` を
+							持つ Viewer(下の {:else})へ落とす。Esc / 「編集を終える」で戻ればここへ戻る。
+						-->
+						{#if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedSrcdoc !== null && windowState.editMode === 'view' && !htmlFindOpen}
+							<HtmlViewer srcdoc={windowState.renderedSrcdoc} />
+							<!-- imageSrc がある=画像ファイル(要件#16)。srcdoc と同じ形の分岐 -->
+						{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedImageSrc !== null}
+							<ImageViewer
+								uri={windowState.currentDocument.uri}
+								src={imageSrcWithVersion(
+									windowState.renderedImageSrc,
+									binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+								)}
+								source={windowState.currentDocument.content}
+							/>
+							<!-- modelSrc がある=3D モデル(要件#23)。imageSrc と同じ形の分岐で、
+							     版数も同じ `binary_file_changed` の機構に乗る -->
+						{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedModelSrc !== null}
+							<!--
+								three.js は重い(数百 KB)ので、3D モデルを開いたときだけ読み込む
+								(mermaid を図が出たときだけ `import()` するのと同じ整理)。
+							-->
+							{#await import('../components/ModelViewer.svelte') then module}
+								<module.default
+									uri={windowState.currentDocument.uri}
+									src={imageSrcWithVersion(
+										windowState.renderedModelSrc,
+										binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+									)}
+								/>
+							{/await}
+							<!-- videoSrc がある=動画(要件#28)。imageSrc と同じ形の分岐で、版数も
+							     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
+							     mkv/avi・ssh もこの経路を通る(出し分けは VideoViewer の中) -->
+						{:else if videoDisplay}
+							<!--
+								要件#40 追補1(Q31): 素材パネルは動画ペインの**下**に敷く横帯。右に置くと
+								動画の表示幅が削られるので、ビューアとパネルを縦に積む。内側の `.video-main` は
+								VideoViewer を今までどおり「行方向 flex の子」のまま置くための一枚 —— 縦積みの
+								直下だと min-height:auto が効いて動画が縮まず、帯が下へ押し出される。
+							-->
+							<div class="video-stack">
+								<div class="video-main">
+									<!--
+										要件#40: 素材パネルのトグルと、パネルが要る材料(再生位置・実尺)の
+										受け口を足す。位置は**パネルが開いているときだけ**上げる(契約⑪)。
+										区間クリックのシークはインスタンス経由で呼ぶ — 吸着に使うフレーム索引を
+										持っているのは VideoViewer の側。
+									-->
+									<VideoViewer
+										bind:this={videoViewer}
+										uri={videoDisplay.uri}
+										src={videoDisplay.src}
+										provenanceOpen={showProvenance}
+										onToggleProvenance={provenanceTarget
+											? () => (showProvenance = !showProvenance)
+											: undefined}
+										onPositionChange={showProvenance ? handleVideoPosition : undefined}
+										onDurationChange={handleVideoDuration}
+									/>
+								</div>
+								<!--
+									素材パネル本体(契約②・追補1)。`provenanceTarget` は `videoDisplay` の絞り込み
+									なので、真になり得るのはこの枝の中だけ。マーク一覧とは排他にしない —— 並びは
+									左からビューア(下に素材)・マーク一覧。
+								-->
+								{#if showProvenance && provenanceTarget}
+									<ProvenancePanel
+										videoUri={provenanceTarget.uri}
+										load={provenanceLoad}
+										position={videoPosition}
+										actualDurationSec={videoDurationSec}
+										onSeekSegment={seekToSegment}
+										onClose={() => (showProvenance = false)}
+									/>
+								{/if}
+							</div>
+							<!-- audioSrc がある=音声(要件#50)。videoSrc と同じ形の分岐で、版数も
+							     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
+							     ssh もこの経路を通る(出し分けは AudioViewer の中) -->
+						{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedAudioSrc !== null}
+							<AudioViewer
+								uri={windowState.currentDocument.uri}
+								src={imageSrcWithVersion(
+									windowState.renderedAudioSrc,
+									binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+								)}
+							/>
+							<!-- pdfSrc がある=PDF(要件#29)。videoSrc と同じ形の分岐で、版数も
+							     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
+							     ssh もこの経路を通る(出し分けは PdfViewer の中) -->
+						{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedPdfSrc !== null}
+							<PdfViewer
+								uri={windowState.currentDocument.uri}
+								src={imageSrcWithVersion(
+									windowState.renderedPdfSrc,
+									binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
+								)}
+							/>
+						{:else}
+							<Viewer
+								document={windowState.currentDocument}
+								html={windowState.renderedUri === windowState.currentDocument.uri
+									? windowState.renderedHtml
+									: ''}
+								index={windowState.renderedUri === windowState.currentDocument.uri
+									? windowState.sourceIndex
+									: null}
+								onRequestAddMark={handleRequestAddMark}
+								onToggleMarks={() => (showMarks = !showMarks)}
+								marksOpen={showMarks}
+								zoom={zoomTarget ? zoomLevel : DEFAULT_ZOOM}
+								{findRequest}
+								onFindOpenChange={handleFindOpenChange}
+								{goToOpen}
+							/>
+						{/if}
+					{:else}
+						<EmptyState />
+					{/if}
+				</div>
+			</div>
 			{#if showMarks && windowState.root}
 				<MarkList
 					rootUri={windowState.root}
@@ -971,6 +1232,29 @@
 />
 
 <style>
+	/*
+	 * Go to バー(要件#60 契約①)とビューアの縦積み。行の中では今までのビューアと
+	 * 同じ場所を占め(`flex: 1`)、その中を上下に割る —— 素材パネルの縦積み
+	 * (`.video-stack`)と同じ形。バーが出ていないときは中身が1枚だけになる。
+	 */
+	.viewer-stack {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/*
+	 * ビューア側。行方向のままなので各ビューアの `flex: 1` / `min-width: 0` は
+	 * これまでどおり効き、高さはバーを引いた残りに収まる(min-height: 0 = 縮める許可)。
+	 */
+	.viewer-main {
+		flex: 1;
+		min-height: 0;
+		min-width: 0;
+		display: flex;
+	}
+
 	/*
 	 * 動画ビューアと素材パネルの縦積み(要件#40 追補1)。行の中では今までの
 	 * VideoViewer と同じ場所を占め(`flex: 1`)、その中を上下に割る。

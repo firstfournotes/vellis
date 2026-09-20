@@ -1,5 +1,7 @@
 # Vellis
 
+English | [日本語](./README.ja.md)
+
 Vellis is a desktop file viewer for Markdown, HTML, images, 3D models, video, audio, and PDF — with in-place text editing.
 
 AI tools now work with a wide range of files. Vellis brings those files into one place for you to browse and inspect, whether you're preparing inputs, reviewing outputs, or simply opening files yourself.
@@ -39,7 +41,8 @@ Video and audio decoding is the system WebView's, so H.264, HEVC and ProRes play
 
 Vellis started as a viewer and still behaves like one until you ask it to do otherwise. Nothing is written unless you press save.
 
-- **Edit mode** — double-click the body of a plain-text file, or use **Edit → Edit** (`⌘E`). Markdown and HTML files open the same way into a *source* editing mode showing the raw text behind the rendered page; an HTML page is rendered inside a sandboxed iframe, so `⌘E` is the way in there.
+- **Edit mode** — double-click the body of a plain-text file, or use **Edit → Edit** (`⌘E`). In Markdown, `⌘E` edits the rendered block under the cursor in place — a paragraph, heading, list item, table cell, or the body of a fenced code block. In HTML, it edits the text nodes of the rendered page. A *source* editing mode showing the raw text is still available for both.
+- **What gets written** — for Markdown and HTML only the source range of the edited block (or text node) is rewritten; everything else stays byte-for-byte as it was. An edit that would change the markup structure is refused rather than written in a way that could break the file.
 - **Saving** — `⌘S` or **File → Save**. There is no autosave, and the file is written by an atomic replace rather than in place.
 - **Snapshots** — every save copies the previous contents to `<root>/.vellis/snapshots/` beforehand, so the diff view's "revert to snapshot" brings back what was there.
 - **Unsaved changes** — closing a window, opening another file, changing the root, or leaving edit mode with `Esc` / "Done" while there are unsaved changes asks whether to save, discard or cancel.
@@ -50,7 +53,7 @@ Vellis started as a viewer and still behaves like one until you ask it to do oth
 
 Vellis puts the **original source** on the clipboard, not the rendered appearance — so pasting into an AI chat keeps the formatting intact.
 
-- **Whole document** — the copy button in the viewer toolbar (`マークダウンをコピー`).
+- **Whole document** — the copy button in the viewer toolbar (`Copy Markdown`).
 - **Selection** — select a range and press `⌘C`. The selected text comes back as Markdown source with its markup (`**bold**`, list bullets, table pipes) preserved. A partial selection copies only what you selected, not the whole paragraph containing it.
 
 Extraction uses the source offsets recorded by the render pipeline for each node, so it is not affected by line wrapping or whitespace collapsing in the rendered view.
@@ -155,7 +158,7 @@ Switch the running Vellis window's explorer root to the current directory.
 
 Typing `/vellis` then runs `vellis -r .`, which retargets the running window — or starts Vellis if none is running.
 
-Note that the in-app UI labels are currently in Japanese; the CLI and menu bar are in English.
+The in-app UI, the CLI and the menu bar are all in English.
 
 ## Building from source
 

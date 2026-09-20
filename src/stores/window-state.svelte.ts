@@ -63,6 +63,25 @@ class WindowState {
 	 */
 	childEntries = $state<Record<string, Entry[]>>({});
 
+	/**
+	 * ツリーで選ばれている項目(要件#60 起案時判断 (a))。null =選択は文書に従う。
+	 *
+	 * Explorer の選択はこれまで「開いている文書の URI」だけを映していたので、
+	 * **フォルダは構造上選択され得なかった**。Go to がフォルダ(と、開けない種類の
+	 * ファイル)を指したときに「そこが選択されたものに変わる」には、文書とは別の
+	 * 選択が要る。**文書を開けば消える**(`setDocument` / `clearDocument`)ので、
+	 * 従来の見え方は変わらない。
+	 */
+	selectedTreeUri = $state<string | null>(null);
+
+	/**
+	 * Explorer が `active` を付ける URI(要件#60)。ツリー選択があればそれ、
+	 * 無ければ開いている文書 —— 選択の在り処が2つに割れても、映す先は1つに保つ。
+	 */
+	selectedUri = $derived<string | undefined>(
+		this.selectedTreeUri ?? this.currentDocument?.uri
+	);
+
 	renderedHtml = $state<string>('');
 	sourceIndex = $state<SourceIndex | null>(null);
 	renderedUri = $state<string | null>(null);
@@ -110,7 +129,14 @@ class WindowState {
 		// 内容更新(`file_changed` の apply)ではモードもバッファも畳まない —
 		// あちらは `applyFileChanged` が扱いを決めた上で通ってくる。
 		if (this.currentDocument?.uri !== doc.uri) this.resetEditState();
+		// 文書を開けば選択はその行についてくる(要件#60 起案時判断 (a))。
+		this.selectedTreeUri = null;
 		this.currentDocument = doc;
+	}
+
+	/** ツリーの選択を移す(要件#60 契約⑤。フォルダ・開けない種類のファイル)。 */
+	selectTreeItem(uri: string): void {
+		this.selectedTreeUri = uri;
 	}
 
 	/** 編集に関わる状態をまとめて初期化する(文書・root の切替と `endEdit` の共通部)。 */
@@ -216,6 +242,8 @@ class WindowState {
 		this.entries = entries;
 		this.expandedDirs = [];
 		this.childEntries = {};
+		// 選択も root ごとにしか意味を持たない(要件#60)。
+		this.selectedTreeUri = null;
 		// root が変われば編集は持ち越さない(要件#48 契約④)。文書が残る切替
 		// (documentRetained)でも同じ — root の外へ出た編集を書き戻す先が無い。
 		this.resetEditState();
@@ -266,6 +294,7 @@ class WindowState {
 	clearDocument() {
 		// 表示を閉じる=編集も終わる(要件#48 契約④)。
 		this.resetEditState();
+		this.selectedTreeUri = null;
 		this.currentDocument = null;
 		this.renderedHtml = '';
 		this.sourceIndex = null;

@@ -4,6 +4,8 @@
 	import { detectFileType } from '$lib/file-type';
 	import { openForDisplay } from '$lib/open-document';
 	import { DEFAULT_PANE_WIDTH } from '$lib/pane-resize';
+	import { parentUri } from '$lib/uri';
+	import type { NewWindowAction } from '$lib/context-menu';
 	import { windowState, type Entry } from '../stores/window-state.svelte';
 	import { contextMenu } from '../stores/context-menu.svelte';
 	import ContextMenu from './ContextMenu.svelte';
@@ -20,7 +22,8 @@
 		entries,
 		selectedUri,
 		width = DEFAULT_PANE_WIDTH,
-		onDuplicateWindow
+		onDuplicateWindow,
+		onOpenInNewWindow
 	}: {
 		root: string;
 		entries: Entry[];
@@ -32,19 +35,12 @@
 		width?: number;
 		/** 「ウィンドウを複製」(要件#34)。ここは右クリックから呼ぶだけ。 */
 		onDuplicateWindow: () => void;
+		/** 「Open in New Window」(要件#59)。実行列はページ側=ここは中継するだけ。 */
+		onOpenInNewWindow: (plan: NewWindowAction) => void;
 	} = $props();
 
-	function parentUri(uri: string): string | null {
-		const trimmed = uri.replace(/\/+$/, '');
-		const schemeIdx = trimmed.indexOf('://');
-		if (schemeIdx === -1) return null;
-		const pathStart = trimmed.indexOf('/', schemeIdx + 3);
-		if (pathStart === -1) return null;
-		const lastSlash = trimmed.lastIndexOf('/');
-		if (lastSlash <= pathStart) return null;
-		return trimmed.slice(0, lastSlash);
-	}
-
+	// 親フォルダの導出は `$lib/uri` の共有実装(要件#59 起案時判断 (f))。
+	// 「↑」ボタンとコンテキストメニューの Open in New Window が同じ規則を使う。
 	let parent = $derived(parentUri(root));
 
 	async function goUp() {
@@ -116,7 +112,7 @@
 	Explorer の overflow には切られず、ツリーの外にもはみ出して表示できる。
 	アイテムのメニューも空白部のメニュー(要件#34)もこの1つが描く。
 -->
-<ContextMenu {onDuplicateWindow} />
+<ContextMenu {onDuplicateWindow} {onOpenInNewWindow} />
 
 <style>
 	/*

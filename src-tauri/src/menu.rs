@@ -48,6 +48,27 @@ pub const MENU_EDIT_EVENT: &str = "menu_edit";
 /// Accelerator for the Edit item (requirements.md #48 追補b).
 pub const EDIT_ACCELERATOR: &str = "CmdOrCtrl+E";
 
+/// Stable identifier for the Edit menu's "Find…" item (requirements.md #54 契約①).
+pub const FIND_ITEM_ID: &str = "find";
+
+/// Event emitted to the focused window when "Find…" is clicked
+/// (requirements.md #54 契約①).
+///
+/// Same shape and same division of labour as Edit and Save: the menu can only
+/// say "the user asked to search". What is on screen, which of its texts is
+/// searchable and where the matches are all live in the frontend
+/// (`src/lib/find-in-document.ts` and the viewer's find bar), so the window
+/// decides. Name must stay in sync with `MENU_FIND_EVENT` there. Documents
+/// with no displayed text (PDF, images, audio, video, 3D) simply ignore it.
+pub const MENU_FIND_EVENT: &str = "menu_find";
+
+/// Accelerator for the Find… item (requirements.md #54 契約①).
+///
+/// Spelled out as a constant for the same reason the zoom and Save ones are:
+/// tauri drops an unparseable accelerator silently, so the test and the menu
+/// read the same literal.
+pub const FIND_ACCELERATOR: &str = "CmdOrCtrl+F";
+
 /// Accelerator for the Save item (requirements.md #48 契約⑤).
 ///
 /// Spelled out as a constant for the same reason the zoom ones are: tauri
@@ -66,6 +87,29 @@ pub const OPEN_FILE_ITEM_ID: &str = "open-file";
 
 /// Stable identifier for the "Open Folder…" menu item (requirements.md #11).
 pub const OPEN_FOLDER_ITEM_ID: &str = "open-folder";
+
+/// Stable identifier for the Go menu's "Go to Path…" item (requirements.md #60
+/// 契約①・追補c — it used to sit in the File menu, next to the Open items).
+pub const GO_TO_ITEM_ID: &str = "go-to-path";
+
+/// Event emitted to the focused window when "Go to Path…" is clicked
+/// (requirements.md #60 契約①).
+///
+/// Same shape and same division of labour as the Open items: the menu can only
+/// say "the user asked to go somewhere". What the current root is, how the typed
+/// path folds, which directories have to be expanded and whether the target even
+/// exists all live in the frontend (`src/lib/go-to-path.ts` and the window's go
+/// to bar), so the window decides. Name must stay in sync with
+/// `MENU_GO_TO_EVENT` there. A window with no root (the history picker) simply
+/// ignores it — there is nowhere to jump.
+pub const MENU_GO_TO_EVENT: &str = "menu_go_to";
+
+/// Accelerator for the Go to Path… item (requirements.md #60 契約①).
+///
+/// ⇧⌘G, the same key Finder gives "Go to Folder". Spelled out as a constant for
+/// the same reason Find and the zoom ones are: tauri drops an unparseable
+/// accelerator silently, so the test and the menu read the same literal.
+pub const GO_TO_ACCELERATOR: &str = "CmdOrCtrl+Shift+G";
 
 /// Events emitted to the focused window when the Open items are clicked.
 ///
@@ -272,6 +316,12 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let edit_mode_sep = PredefinedMenuItem::separator(app)?;
     let edit_mode_item =
         MenuItem::with_id(app, EDIT_ITEM_ID, "Edit", true, Some(EDIT_ACCELERATOR))?;
+    // 文書内検索 (requirements.md #54 契約①). Sits next to Edit, after the
+    // standard block, so the macOS ordering every app shares stays where users
+    // expect it. Enabled unconditionally, like Edit and Save: only the window
+    // knows whether what it displays has any text to search, so a PDF or an
+    // image window simply ignores the event.
+    let find_item = MenuItem::with_id(app, FIND_ITEM_ID, "Find…", true, Some(FIND_ACCELERATOR))?;
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
@@ -286,6 +336,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &select_all,
             &edit_mode_sep,
             &edit_mode_item,
+            &find_item,
         ],
     )?;
 
@@ -346,9 +397,27 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         ],
     )?;
 
+    // Go menu (requirements.md #60 契約①・追補c = 2026-09-20 由谷「新たに "Go"
+    // メニューを追加して、そこに入れてください」). One item for now, and the place
+    // where Back / Forward / Enclosing Folder would go later. Finder puts its Go
+    // menu between View and Window, so the bar reads App / File / Edit / View /
+    // Go / Window. Enabled unconditionally, like Save and the zoom items: only
+    // the window knows whether it has a root to jump inside, and a window showing
+    // the history picker ignores the event.
+    let go_to_item =
+        MenuItem::with_id(app, GO_TO_ITEM_ID, "Go to Path…", true, Some(GO_TO_ACCELERATOR))?;
+    let go_menu = Submenu::with_items(app, "Go", true, &[&go_to_item])?;
+
     Menu::with_items(
         app,
-        &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
+        &[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &go_menu,
+            &window_menu,
+        ],
     )
 }
 

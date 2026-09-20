@@ -47,6 +47,18 @@
  * #35⑤ により英語表記へ読み替える(過去の記述は書き換えない=本追補が正)。
  * メニュー体験全体の英語化の台帳は menu-language.acceptance.test.ts(要件#35)。
  *
+ * ## 要件#59 追補(docs/requirements/req-59.md・2026-09-18 由谷指示)
+ * 「Open in New Window」をアイテムメニューの **Open With… の直後・Copy Path の
+ * 直前**に追加する(id は 'open-in-new-window'・フォルダでは reveal の直後)。
+ * 本要件により #19/#21/#34 の項目数固定(ファイル/symlink 5項目・フォルダ3項目)は
+ * ファイル/symlink 6項目・フォルダ4項目へ**要件側更新**(承認済み=#59⑦)。
+ * 更新するのは**項目数・順序・ラベル列挙だけ**(AC-59-1/2 の台帳を兼ねる)。
+ * 既存項目の enabled の出し分け・planContextAction の対応・pathForCopy /
+ * pathForReveal / clampMenuPosition / capability の各テストは無改変(AC-59-3)。
+ * 新項目の enabled の出し分け(親の取れないファイルは disabled=契約#59②)・
+ * 計画・実行列は open-in-new-window.acceptance.test.ts の持ち場。
+ * 空白部メニュー(buildTreePaneMenu)は不変=duplicate-window 1項目のまま(契約#59⑧)。
+ *
  * ## 確定契約(公開 API・implementer はこれに従う)
  *
  * ```ts
@@ -109,20 +121,23 @@
  * ```
  *
  * 意味論(本テストが固定する判定):
- * 1. local ファイル → [reveal, open, open-with, copy-path, duplicate-window] の5項目・
- *    この順・すべて enabled(要件#21① で open-with を「既定アプリで開く」の直後へ、
- *    要件#34③ で duplicate-window を末尾へ追加=いずれも承認済みの要件側更新)。
- * 2. local フォルダ → [reveal, copy-path, duplicate-window] の3項目
- *    (open / open-with を出さない=契約②・#21①)。
- * 3. ssh ファイル → 5項目とも出すが reveal / open / open-with は enabled=false・
- *    copy-path / duplicate-window は true。
- * 4. ssh フォルダ → [reveal, copy-path, duplicate-window] で reveal は enabled=false・
- *    copy-path / duplicate-window は true。
- * 5. symlink はファイルと同じ扱い(5項目)に固定=実装裁量の確定(本テストの設計判断)。
+ * 1. local ファイル → [reveal, open, open-with, open-in-new-window, copy-path,
+ *    duplicate-window] の6項目・この順・すべて enabled(要件#21① で open-with を
+ *    「既定アプリで開く」の直後へ、要件#34③ で duplicate-window を末尾へ、
+ *    要件#59① で open-in-new-window を Open With… の直後へ追加=いずれも
+ *    承認済みの要件側更新)。
+ * 2. local フォルダ → [reveal, open-in-new-window, copy-path, duplicate-window] の
+ *    4項目(open / open-with を出さない=契約②・#21①)。
+ * 3. ssh ファイル → 6項目とも出すが reveal / open / open-with は enabled=false・
+ *    open-in-new-window / copy-path / duplicate-window は true(#59⑥)。
+ * 4. ssh フォルダ → [reveal, open-in-new-window, copy-path, duplicate-window] で
+ *    reveal は enabled=false・open-in-new-window / copy-path / duplicate-window は true。
+ * 5. symlink はファイルと同じ扱い(6項目)に固定=実装裁量の確定(本テストの設計判断)。
  *    理由: フロントは symlink の指し先種別を知らないため、項目を落とすより
  *    「Finder で表示」「既定アプリで開く」を出して OS に委ねるのが安全側。
  * 6. ラベル文言は "Reveal in Finder"・"Open with Default App"・"Open With…"・
- *    "Copy Path"・"Duplicate Window"(要件#35 で日本語表記から英語へ要件側更新)。
+ *    "Open in New Window"・"Copy Path"・"Duplicate Window"(要件#35 で日本語表記から
+ *    英語へ・要件#59 で1件追加=要件側更新)。
  * 7. 判別は URI スキームのみ(kind と組み合わせ、パス内容では分岐しない)。
  * 8. planContextAction('open-with', local ファイル) → { command: 'pick-app', path: OS パス }。
  *    ssh → null。planOpenWith は選択結果あり → open_path + with・キャンセル → null(要件#21)。
@@ -198,41 +213,49 @@ const sshDir: ContextMenuEntry = {
 // ---------------------------------------------------------------------------
 
 describe('buildContextMenu — local アイテムの項目構成', () => {
-	test('local ファイル → reveal・open・open-with・copy-path・duplicate-window の5項目・この順・すべて有効', () => {
+	test('local ファイル → reveal・open・open-with・open-in-new-window・copy-path・duplicate-window の6項目・この順・すべて有効', () => {
 		const items = buildContextMenu(localFile);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
 		]);
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('local フォルダ → reveal・copy-path・duplicate-window の3項目(open は出さない)・すべて有効', () => {
+	test('local フォルダ → reveal・open-in-new-window・copy-path・duplicate-window の4項目(open は出さない)・すべて有効', () => {
 		const items = buildContextMenu(localDir);
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'copy-path', 'duplicate-window']);
+		expect(items.map((i) => i.id)).toEqual([
+			'reveal',
+			'open-in-new-window',
+			'copy-path',
+			'duplicate-window',
+		]);
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('ラベル文言は英語の推奨文言(要件#35①=local ファイルの5項目)', () => {
+	test('ラベル文言は英語の推奨文言(要件#35①・#59①=local ファイルの6項目)', () => {
 		const labels = buildContextMenu(localFile).map((i) => i.label);
 		expect(labels).toEqual([
 			'Reveal in Finder',
 			'Open with Default App',
 			'Open With…',
+			'Open in New Window',
 			'Copy Path',
 			'Duplicate Window',
 		]);
 	});
 
-	test('symlink はファイルと同じ5項目に固定(実装裁量の確定=一貫性)', () => {
+	test('symlink はファイルと同じ6項目に固定(実装裁量の確定=一貫性)', () => {
 		const items = buildContextMenu(localSymlink);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
 		]);
@@ -241,34 +264,41 @@ describe('buildContextMenu — local アイテムの項目構成', () => {
 });
 
 describe('buildContextMenu — ssh リモートは reveal / open をグレーアウト(契約⑤)', () => {
-	test('ssh ファイル → 5項目とも出すが reveal / open / open-with は disabled・copy-path / duplicate-window は有効', () => {
+	test('ssh ファイル → 6項目とも出すが reveal / open / open-with は disabled・open-in-new-window / copy-path / duplicate-window は有効', () => {
 		const items = buildContextMenu(sshFile);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
 		]);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true]);
 	});
 
-	test('ssh フォルダ → reveal(disabled)+copy-path・duplicate-window(有効)の3項目', () => {
+	test('ssh フォルダ → reveal(disabled)+open-in-new-window・copy-path・duplicate-window(有効)の4項目', () => {
 		const items = buildContextMenu(sshDir);
-		expect(items.map((i) => i.id)).toEqual(['reveal', 'copy-path', 'duplicate-window']);
-		expect(items.map((i) => i.enabled)).toEqual([false, true, true]);
+		expect(items.map((i) => i.id)).toEqual([
+			'reveal',
+			'open-in-new-window',
+			'copy-path',
+			'duplicate-window',
+		]);
+		expect(items.map((i) => i.enabled)).toEqual([false, true, true, true]);
 	});
 
-	test('ssh symlink もファイル同等(5項目・reveal / open / open-with disabled)=一貫性', () => {
+	test('ssh symlink もファイル同等(6項目・reveal / open / open-with disabled)=一貫性', () => {
 		const items = buildContextMenu({ ...sshFile, kind: 'symlink' });
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
 		]);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true]);
 	});
 
 	test('判別は URI スキーム(user なし・ポートなしの ssh URI でも disabled)', () => {
@@ -277,7 +307,7 @@ describe('buildContextMenu — ssh リモートは reveal / open をグレーア
 			name: 'plan.md',
 			kind: 'file',
 		});
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true]);
 	});
 });
 

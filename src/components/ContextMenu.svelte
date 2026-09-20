@@ -15,12 +15,14 @@
 		planOpenWith,
 		type ContextAction,
 		type ContextMenuEntry,
-		type ContextMenuItemId
+		type ContextMenuItemId,
+		type NewWindowAction
 	} from '$lib/context-menu';
 	import { contextMenu } from '../stores/context-menu.svelte';
 
 	let {
-		onDuplicateWindow
+		onDuplicateWindow,
+		onOpenInNewWindow
 	}: {
 		/**
 		 * 「ウィンドウを複製」(要件#34)。中身(root・文書・展開)を知っているのは
@@ -28,6 +30,11 @@
 		 * File メニューの Duplicate Window と同じ関数を通る。
 		 */
 		onDuplicateWindow: () => void;
+		/**
+		 * 「Open in New Window」(要件#59)。計画(root と path)は純関数が決め、
+		 * `new_window` の呼び出しと失敗の通知はページ側 — 複製とまったく同じ分担。
+		 */
+		onOpenInNewWindow: (plan: NewWindowAction) => void;
 	} = $props();
 
 	let el = $state<HTMLDivElement | null>(null);
@@ -75,6 +82,8 @@
 		try {
 			if (action.command === 'duplicate-window') {
 				onDuplicateWindow();
+			} else if (action.command === 'new-window') {
+				onOpenInNewWindow(action);
 			} else if (action.command === 'reveal_item_in_dir') {
 				await revealItemInDir(action.path);
 			} else if (action.command === 'open_path') {

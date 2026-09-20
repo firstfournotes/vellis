@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { tick, untrack } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { invoke } from '$lib/ipc';
+	import { listen } from '$lib/events';
 	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { isExternal } from '$lib/uri';
 	import { sha256 } from '$lib/annotation';
@@ -11,6 +12,20 @@
 	import { saveDocument } from '$lib/save-document';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
+	import {
+		applyHighlights,
+		clearHighlights,
+		detectHighlightApi,
+		findMatches,
+		formatCount,
+		MENU_FIND_EVENT,
+		rangeAtMatch,
+		scrollRangeIntoContainer,
+		stepIndex,
+		type MatchRange,
+	} from '$lib/find-in-document';
+	import { FIND_SURFACE_BASE_CSS, rewriteSurfaceCss, surfaceBaseCss } from '$lib/find-surface-style';
+	import FindBar from './FindBar.svelte';
 	import {
 		buildEditSurface,
 		commitBlock,
@@ -39,6 +54,9 @@
 		onToggleMarks,
 		marksOpen,
 		zoom = DEFAULT_ZOOM,
+		findRequest = 0,
+		onFindOpenChange,
+		goToOpen = false,
 	}: {
 		document: DocumentPayload;
 		html: string;
@@ -51,11 +69,46 @@
 		 * プレースホルダ)には既定=等倍が渡る。
 		 */
 		zoom?: number;
+		/**
+		 * 要件#54 契約①: 外から届いた ⌘F の回数。
+		 *
+		 * 普段の ⌘F はこのコンポーネントが自分で `menu_find` を購読して受ける。
+		 * html の**閲覧中**だけは Viewer がまだ画面に居ない(+page.svelte が
+		 * `HtmlViewer` の iframe を出している)ので、⌘F を受けた +page が複製面へ
+		 * 切り替えてから、この数を1つ進めて「今の ⌘F」を伝える。
+		 */
+		findRequest?: number;
+		/** 検索バーの開閉を +page.svelte へ返す(閉じたら html は iframe へ戻る)。 */
+		onFindOpenChange?: (open: boolean) => void;
+		/**
+		 * 要件#60 契約⑦: Go to バーが開いているか(バーは +page.svelte の持ち場)。
+		 *
+		 * 検索バーと同じ理由で、開いている間の Esc は**バーが先に食う**。あちらは
+		 * `document` の capture 段で `stopImmediatePropagation` するので普通は
+		 * ここまで届かないが、登録順に依らず結論を同じにするため、下の Esc
+		 * ハンドラも `findOpen` と同じようにこれを見て譲る(両側から挟む)。
+		 */
+		goToOpen?: boolean;
 	} = $props();
 
 	let copyLabel = $state('Copy Markdown');
 	let copyTimer: ReturnType<typeof setTimeout> | undefined;
 	let bodyEl: HTMLDivElement | undefined = $state();
+
+	/**
+	 * 閲覧面そのもの(`overflow-y: auto` のスクロール容器)。現在の一致を運ぶときに
+	 * 動かすのはこの要素の `scrollTop` だけ(要件#54 追補c(2))。
+	 */
+	let viewerEl: HTMLElement | undefined = $state();
+
+	/** ツールバー(sticky・top:0)。検索バーを積む高さを測るために握る。 */
+	let toolbarEl: HTMLElement | undefined = $state();
+
+	/**
+	 * ツールバーの高さ。検索バー(sticky)をその直下に積むために CSS へ渡す
+	 * (要件#54 追補c(1))。ツールバーが無い・まだ測れないときは 0 = 上端。
+	 */
+	let toolbarHeight = $state(0);
 
 	// --- その場編集(要件#48) ------------------------------------------
 	// 編集に入れるか・dirty か・届いた外部変更をどう扱うかは `WindowState` と
@@ -278,6 +331,10 @@
 		// composed なイベントはここまで上がってくるが、`target` はホストへ
 		// retarget 済みで Markdown の索引にも載っていないので、経路を通さない。
 		if (htmlEditing) return;
+		// 要件#54 契約②: html の**読み取り専用**複製面(⌘F)は編集の入口ではない。
+		// Shadow から composed で上がってくるが、`target` はホストへ retarget され、
+		// Markdown の索引にも載っていないのでソース編集へ誘導されてしまう。
+		if (findSurfaceHost && eventPathContains(e, findSurfaceHost)) return;
 		if (sourceEditing || blockEdit) return;
 		const target = e.target;
 		if (!(target instanceof Element)) return;
@@ -300,6 +357,9 @@
 
 	/** そのブロックだけを contenteditable にする(コンテナ全体は不可=契約①)。 */
 	function beginBlockEdit(el: HTMLElement, meta: NodeMeta) {
+		// 要件#54 契約④: 掴む前にハイライトを外す ―― 控える `innerHTML` に
+		// フォールバックの `<mark>` が混ざると、Esc の破棄でそれごと書き戻る。
+		dropFindHighlights();
 		blockEditMode = true;
 		if (!editing) {
 			if (!windowState.beginEdit()) {
@@ -328,6 +388,8 @@
 	function beginCodeEdit(el: HTMLElement, meta: NodeMeta) {
 		// 基準は編集中なら編集バッファ・閲覧中なら保存済み content(= `beginEdit()`
 		// がバッファへ複製するもの)。どちらでも同じ値になるので入る前に採ってよい。
+		// 要件#54 契約④: 掴む前にハイライトを外す(上の beginBlockEdit と同じ理由)。
+		dropFindHighlights();
 		const base = windowState.editBuffer ?? document.content;
 		const position = currentPositionOf(meta);
 		// 追補a(6): 開始フェンスのインデント幅。position はフェンス記号から始まるので
@@ -399,6 +461,8 @@
 	function commitBlockEdit() {
 		const current = blockEdit;
 		if (!current) return;
+		// 要件#54 契約④⑦: 逆シリアライズより**前に**必ず外す(AC-54-13)。
+		dropFindHighlights();
 		blockEdit = null;
 		blockEditFromView = false;
 		current.el.removeAttribute('contenteditable');
@@ -441,6 +505,7 @@
 	function discardBlockEdit() {
 		const current = blockEdit;
 		if (!current) return;
+		dropFindHighlights();
 		blockEdit = null;
 		current.el.removeAttribute('contenteditable');
 		current.el.innerHTML = current.html;
@@ -477,6 +542,9 @@
 		};
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key !== 'Escape' || e.isComposing || composing) return;
+			// 要件#54 契約⑤・要件#60 契約⑦: バー(検索 / Go to)が開いていればそちらが
+			// 先に食う(バーは編集より手前の一時 UI)。閉じたあとの Esc は従来どおり破棄。
+			if (escBelongsToBar) return;
 			e.preventDefault();
 			discardBlockEdit();
 		};
@@ -540,8 +608,13 @@
 	/** 編集面のホスト。`attachShadow({mode:'open'})` で文書の CSS を閉じ込める(契約②)。 */
 	let htmlSurfaceHost: HTMLDivElement | undefined = $state();
 
-	/** Shadow 内の編集面ルート。葉ブロックの解決はこの中で閉じる(契約③)。 */
-	let htmlSurfaceRoot: HTMLElement | null = null;
+	/**
+	 * Shadow 内の編集面ルート。葉ブロックの解決はこの中で閉じる(契約③)。
+	 *
+	 * 要件#54: 編集中の html で検索の対象になるのもこの木なので `$state` にしてある
+	 * (編集面が生まれ変わったら再検索が要る=要件#54 契約⑤)。
+	 */
+	let htmlSurfaceRoot: HTMLElement | null = $state(null);
 
 	/**
 	 * hid → 原文範囲の索引(契約②)。確定のたびに位置補正済みのものへ差し替える
@@ -571,6 +644,9 @@
 
 	/** 契約④の拒否通知。null = 出さない。 */
 	let htmlStructureNotice = $state<string | null>(null);
+
+	/** 編集面のルート要素の class(文書スタイルを写す先=要件#54 追補b と同じ手当て)。 */
+	const HTML_EDIT_ROOT_CLASS = 'vellis-html-edit-root';
 
 	/**
 	 * 編集面の中だけに効かせる素の見た目。文書の CSS は Shadow に閉じているので、
@@ -603,17 +679,23 @@
 		const own = owner.createElement('style');
 		own.textContent = HTML_SURFACE_CSS;
 		shadow.append(own);
+		// 要件#54 追補b と同じ手当て(編集面にも同じ差がある)。まず iframe の UA
+		// 既定を再現して継承を断ち、そのあとに文書のスタイルを入れる。
+		const base = owner.createElement('style');
+		base.textContent = surfaceBaseCss('.' + HTML_EDIT_ROOT_CLASS);
+		shadow.append(base);
 		// 文書の head 側のスタイル(style 要素の中身)を編集面へ移して効かせる
 		// (契約②)。ここに生のタグを書かないのは、svelte-check の抽出器が
-		// コンポーネントの style ブロックの開始と取り違えるため。
+		// コンポーネントの style ブロックの開始と取り違えるため。Shadow の中に
+		// `<body>` は無いので、`body{…}` 等は編集面のルートへ写してから入れる。
 		for (const css of surface.styles) {
 			const style = owner.createElement('style');
-			style.textContent = css;
+			style.textContent = rewriteSurfaceCss(css, '.' + HTML_EDIT_ROOT_CLASS);
 			shadow.append(style);
 		}
 
 		const root = owner.createElement('div');
-		root.className = 'vellis-html-edit-root';
+		root.className = HTML_EDIT_ROOT_CLASS;
 		// sanitize 済みの HTML(script / on* / iframe は落ちている=契約②)。
 		root.innerHTML = surface.html;
 		shadow.append(root);
@@ -704,6 +786,9 @@
 		// ダブルクリックに先立つ mousedown が済ませているが、経路を1つに閉じる。
 		if (htmlBlock) commitHtmlBlock();
 		htmlStructureNotice = null;
+		// 要件#54 契約④: 形を控える前に外す ―― `<mark>` が混ざったまま控えると
+		// 確定時の突き合わせが「構造が変わった」で拒否になる(要件#53 契約④)。
+		dropFindHighlights();
 		htmlBlock = { el, before: snapshotBlock(el), html: el.innerHTML };
 		el.setAttribute('contenteditable', 'true');
 		el.focus();
@@ -719,6 +804,8 @@
 	function commitHtmlBlock() {
 		const current = htmlBlock;
 		if (!current) return;
+		// 要件#54 契約④⑦: 書き戻しより前に必ず外す(索引 data-vellis-hid を壊さない)。
+		dropFindHighlights();
 		htmlBlock = null;
 		current.el.removeAttribute('contenteditable');
 
@@ -743,6 +830,7 @@
 	function discardHtmlBlock() {
 		const current = htmlBlock;
 		if (!current) return;
+		dropFindHighlights();
 		htmlBlock = null;
 		current.el.removeAttribute('contenteditable');
 		current.el.innerHTML = current.html;
@@ -794,6 +882,8 @@
 
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.isComposing || htmlComposing) return;
+			// 要件#54 契約⑤・要件#60 契約⑦: バーが開いているときの Esc はバーが先に食う。
+			if (e.key === 'Escape' && escBelongsToBar) return;
 			const current = htmlBlock;
 			if (!current) {
 				// ブロックを掴んでいないときの Esc は要件#48 の出口(閲覧へ戻る関門)。
@@ -892,6 +982,8 @@
 	 */
 	function handleEditKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
+		// 要件#54 契約⑤・要件#60 契約⑦: バーが開いていればそちらが先に食う。
+		if (escBelongsToBar) return;
 		e.preventDefault();
 		void confirmDiscardEdits();
 	}
@@ -908,6 +1000,379 @@
 		} catch (err) {
 			alert(`Could not save: ${err}`);
 		}
+	}
+
+	// --- 文書内検索(要件#54) ------------------------------------------
+	// 一致の計算・件数の文言・送りの循環・ハイライトの付け外しは
+	// `$lib/find-in-document` の純関数。ここが持つのは「どの DOM を探すか」と
+	// 「いつ探し直すか」、そして Esc の取り合いの決着だけ。
+
+	/** 検索バーを出しているか。ウインドウ単位・揮発(localStorage へ保存しない)。 */
+	let findOpen = $state(false);
+
+	/**
+	 * Esc を一時 UI のバーへ譲るか(要件#54 契約⑤・要件#60 契約⑦)。バーは編集より
+	 * 手前の一時 UI なので、開いている間の Esc は編集の破棄に使わない。検索バーは
+	 * この中、Go to バーは +page.svelte の側にある(どちらも同じ扱い)。
+	 */
+	let escBelongsToBar = $derived(findOpen || goToOpen);
+
+	/** 探している語。バーを閉じても残す(次の ⌘F で全選択されて出る=契約①)。 */
+	let findQuery = $state('');
+
+	/** いまの語の一致(表示テキスト上のオフセット・文書順)。 */
+	let findRanges = $state<MatchRange[]>([]);
+
+	/** 現在の一致(0始まり)。再検索のたびに先頭へ戻る(契約④)。 */
+	let findCurrent = $state(0);
+
+	/**
+	 * 契約⑤の「編集の確定」を再検索の契機にするための印。
+	 *
+	 * 確定・破棄・掴み直しでは表示テキストが変わるのに、それだけでは下の依存が
+	 * どれも動かないことがある(ブロック編集の破棄など)。ハイライトを外した側から
+	 * 1つ進めて、探し直しを頼む。
+	 */
+	let findRefresh = $state(0);
+
+	/** 検索バーの入力欄。⌘F の再送でフォーカスと全選択を戻すために握る。 */
+	let findInputEl: HTMLInputElement | undefined = $state();
+
+	/** 要件#48/#49/#52/#53 と同じ: IME の変換中の Esc は IME に委ねる(契約⑤)。 */
+	let findComposing = false;
+
+	/** html の複製面(読み取り専用)のホスト。 */
+	let findSurfaceHost: HTMLDivElement | undefined = $state();
+
+	/** Shadow 内の複製面ルート。html 閲覧中の検索はこの木を探す(契約②)。 */
+	let findSurfaceRoot: HTMLElement | null = $state(null);
+
+	/**
+	 * 契約⑥: 検索バーを出す文書か。
+	 *
+	 * html は複製面を自前で組み立てるので常に出せる。markdown / text は**表示
+	 * テキストがある**ときだけ ―― PDF・画像・音声・動画・3D モデルの窓には
+	 * レンダリング結果(`html` prop)が渡ってこないので、ここで自然に落ちる。
+	 * 「⌘F を受けても何も起きない」は、この判定が偽のまま `openFind` が空振り
+	 * することで満たす。
+	 */
+	let findSearchable = $derived.by(() => {
+		if (htmlDocument) return true;
+		const kind = detectFileType(document.uri);
+		if (kind !== 'markdown' && kind !== 'text') return false;
+		return html.length > 0;
+	});
+
+	/**
+	 * 契約②: いま「表示されているテキスト」を持つ木。
+	 *
+	 * - 編集中の html = 要件#53 の編集面(編集面のテキストが対象)
+	 * - 閲覧中の html = 要件#53 の `buildEditSurface` で作る**読み取り専用**の複製面
+	 * - それ以外 = 本文コンテナ(レンダリング済み Markdown / `<pre>` / ソース編集の
+	 *   `<pre>` のいずれもここに居る)
+	 */
+	let findTarget = $derived.by(() => {
+		if (!findOpen) return null;
+		if (htmlEditing) return htmlSurfaceRoot;
+		if (htmlDocument) return findSurfaceRoot;
+		return bodyEl ?? null;
+	});
+
+	/** 件数表示(契約④)。 */
+	let findCount = $derived(formatCount(findCurrent, findRanges.length, findQuery));
+
+	/**
+	 * 追補c(1): 検索バーを貼り付ける高さ=ツールバーの実寸を測る。
+	 *
+	 * `bind:clientHeight` を使わないのは ResizeObserver を呼ぶため(テストの JSDOM
+	 * には無い)。ツールバーの中身が変わる契機(編集の出入り・種別)と窓の幅の
+	 * 変化だけ測り直せば足りる ―― 測れないときは 0 で上端に貼り付く。
+	 */
+	$effect(() => {
+		if (!findOpen) return;
+		const header = toolbarEl;
+		if (!header) return;
+		// ツールバーのボタンが増減する(=高さが変わりうる)契機。
+		void editing;
+		void htmlEditing;
+		void document.uri;
+		const measure = () => {
+			toolbarHeight = header.offsetHeight;
+		};
+		measure();
+		const view = header.ownerDocument.defaultView;
+		view?.addEventListener('resize', measure);
+		return () => view?.removeEventListener('resize', measure);
+	});
+
+	/**
+	 * 複製面の中だけに効かせる見た目。文書の CSS は Shadow に閉じているので、
+	 * ハイライトの色はこちら側にも要る(`::highlight()` はツリースコープごと)。
+	 */
+	const FIND_SURFACE_CSS = [
+		':host{display:block}',
+		'[data-vellis-href],[data-vellis-xlink-href]{color:#0000ee;color:-webkit-link;',
+		'text-decoration:underline}',
+		'mark[data-vellis-find]{background-color:#fef08a;color:inherit}',
+		'mark[data-vellis-find-current]{background-color:#fb923c;color:inherit}',
+		'::highlight(vellis-find){background-color:#fef08a}',
+		'::highlight(vellis-find-current){background-color:#fb923c}',
+	].join('');
+
+	/**
+	 * 閲覧中の html のための複製面を Shadow DOM へ出す(契約②⑦)。
+	 *
+	 * 中身は要件#53 の `buildEditSurface` そのもの ―― sandbox された iframe の中は
+	 * アプリから読めない(要件#8)ので、sanitize 済みの複製を作って探す。**読み取り
+	 * 専用**なので `contenteditable` は付けず、ダブルクリックの配線もしない
+	 * (⌘F は編集の入口ではない)。原文が差し替わったら組み直す(契約⑤)。
+	 */
+	$effect(() => {
+		const host = findSurfaceHost;
+		const source = windowState.editBuffer ?? document.content;
+		const uri = document.uri;
+		if (!host) {
+			findSurfaceRoot = null;
+			return;
+		}
+		untrack(() => {
+			const owner = host.ownerDocument;
+			const surface = buildEditSurface(source, uri);
+			const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
+			shadow.replaceChildren();
+
+			const own = owner.createElement('style');
+			own.textContent = FIND_SURFACE_CSS;
+			shadow.append(own);
+			// 追補b: まず iframe の UA 既定を再現する(アプリ側からの継承もここで
+			// 断つ)。文書側のスタイルはその後に入れて、基底を上書きできるようにする。
+			const base = owner.createElement('style');
+			base.textContent = FIND_SURFACE_BASE_CSS;
+			shadow.append(base);
+			// 文書側のスタイルも移して、閲覧と同じ見え方の上を探せるようにする。
+			// Shadow の中に `<body>` は無いので、`body{…}` / `html{…}` / `:root{…}` は
+			// 複製面のルートへ写してから入れる(そのままでは何にも当たらない=追補b)。
+			for (const css of surface.styles) {
+				const style = owner.createElement('style');
+				style.textContent = rewriteSurfaceCss(css);
+				shadow.append(style);
+			}
+
+			const root = owner.createElement('div');
+			root.className = 'vellis-html-find-root';
+			root.innerHTML = surface.html;
+			shadow.append(root);
+			findSurfaceRoot = root;
+		});
+		return () => {
+			findSurfaceRoot = null;
+		};
+	});
+
+	/**
+	 * 再検索(契約⑤)。
+	 *
+	 * 契機は入力欄の変化・別の文書を開いた(`html` / `index` / `document` の
+	 * 差し替え)・外部変更の取り込み(同じ経路で props が差し替わる)・編集モードの
+	 * 出入りと編集の確定(対象の木も表示テキストも入れ替わる)。どれも下の依存の
+	 * どれかを動かすので、契機を個別に張らずにこの1つで足りる。
+	 *
+	 * 再検索のたびに現在の一致は**先頭へ戻す**(契約④)。
+	 */
+	$effect(() => {
+		const container = findTarget;
+		const query = findQuery;
+		// 表示テキストが変わりうるもの(DOM は追跡されないので明示的に読む)。
+		void html;
+		void index;
+		void document.uri;
+		void document.content;
+		void windowState.editBuffer;
+		void editing;
+		void blockEditMode;
+		void htmlEditing;
+		void findRefresh;
+
+		if (!container) {
+			findRanges = [];
+			findCurrent = 0;
+			return;
+		}
+		findRanges = findMatches(container.textContent ?? '', query);
+		findCurrent = 0;
+	});
+
+	/**
+	 * ハイライトの張り替え(契約④)。
+	 *
+	 * 一致・現在位置・対象の木のどれかが動いたら、前の分を外してから付け直す。
+	 * 後始末を effect の cleanup に持たせてあるので、**バーを閉じたときも文書を
+	 * 切り替えたときも、そのとき張っていた木から確実に外れる**。
+	 */
+	$effect(() => {
+		const container = findTarget;
+		const ranges = findRanges;
+		const current = findCurrent;
+		if (!container) return;
+		// キャレットが対象の中の編集面にあるあいだは触らない。フォールバックの
+		// `<mark>` を挿すとキャレットが飛ぶ ―― 打つたびにそれが起きると編集に
+		// ならない。件数は上の effect が出し続けるので「探せない」わけではなく、
+		// 出ないのは色だけ。確定・破棄で編集が畳まれたら、その契機で張り直す。
+		if (caretInsideEditable(container)) return;
+		const api = detectHighlightApi();
+		clearHighlights(container, api);
+		if (ranges.length === 0) return;
+		applyHighlights(container, ranges, current, api);
+		scrollToCurrentMatch(container, ranges, current);
+		return () => {
+			clearHighlights(container, api);
+		};
+	});
+
+	/** キャレットが対象の中の `contenteditable` にあるか(Shadow DOM も見る)。 */
+	function caretInsideEditable(container: Element): boolean {
+		const root = container.getRootNode() as Document | ShadowRoot;
+		const active = root.activeElement;
+		if (!active || !container.contains(active)) return false;
+		return active.closest('[contenteditable="true"]') !== null;
+	}
+
+	/**
+	 * 現在の一致を見える位置へ運ぶ(契約④・追補c(2))。
+	 *
+	 * 運ぶ基準は**一致の文字範囲そのもの**(`Range` の矩形)で、要素ではない ――
+	 * ソース編集中の `<pre contenteditable>` には子要素が無く、要素単位で中央寄せ
+	 * すると `<pre>` 全体=文書の真ん中へ飛ぶ(backlog 179)。動かすのは閲覧面の
+	 * スクロール容器(`article.viewer`)の `scrollTop` だけで、`scrollIntoView` は
+	 * 使わない ―― 閲覧・ソース編集・html の複製面(Shadow DOM 内の Range でも
+	 * 矩形は取れる)のどれも同じ経路を通る。
+	 */
+	function scrollToCurrentMatch(container: Element, ranges: MatchRange[], current: number) {
+		const match = ranges[current];
+		if (!match) return;
+		const scroller = viewerEl;
+		if (!scroller) return;
+		const range = rangeAtMatch(container, match);
+		if (!range) return;
+		scrollRangeIntoContainer(scroller, range);
+	}
+
+	/**
+	 * 契約①: ⌘F。出ていなければ出し、出ていれば入力欄へフォーカスを戻して
+	 * 現在の語を全選択する(打ち直しがそのまま次の検索になる)。検索バーを出さない
+	 * 種別では何も起きない(契約⑥)。
+	 */
+	function openFind() {
+		if (!findSearchable) return;
+		findOpen = true;
+		onFindOpenChange?.(true);
+		void tick().then(() => {
+			findInputEl?.focus();
+			findInputEl?.select();
+		});
+	}
+
+	/** 契約⑤: 閉じる。ハイライトは上の effect の cleanup が外す。語は残す。 */
+	function closeFind() {
+		if (!findOpen) return;
+		findOpen = false;
+		findComposing = false;
+		onFindOpenChange?.(false);
+	}
+
+	function stepFind(direction: 1 | -1) {
+		findCurrent = stepIndex(findCurrent, findRanges.length, direction);
+	}
+
+	/**
+	 * 契約①: Edit メニュー「Find…」(⌘F)。⌘E が +page.svelte 経由でウインドウの
+	 * モードを動かすのと違い、検索バーは Viewer の中で完結する一時 UI なので
+	 * ここで直に受ける。
+	 *
+	 * Tauri の外(テストの JSDOM)では購読そのものが失敗するが、それでマウントが
+	 * 壊れてはいけない ―― 既存の wiring テストは `$lib/events` をモックしていない。
+	 */
+	onMount(() => {
+		let off: (() => void) | null = null;
+		let disposed = false;
+		try {
+			void listen(MENU_FIND_EVENT, () => openFind())
+				.then((unlisten) => {
+					if (disposed) unlisten();
+					else off = unlisten;
+				})
+				.catch(() => {});
+		} catch {
+			// Tauri の外。検索は menu からしか入らないので、何もしないでよい。
+		}
+		return () => {
+			disposed = true;
+			off?.();
+			// この窓から Viewer が消えるとき(別種別のビューアへ移った等)は、
+			// 検索バーも一緒に消える。+page.svelte の側に開いたままの印を残さない。
+			if (findOpen) onFindOpenChange?.(false);
+		};
+	});
+
+	/**
+	 * html の閲覧中に +page.svelte が受け取った ⌘F(上のコメント参照)。
+	 *
+	 * 0 = 要求なし。**進んだ**ときだけが「今の ⌘F」で、閉じると +page が 0 へ戻す。
+	 * マウント直後に 1 で来ることがある(iframe から複製面へ切り替えた結果として
+	 * この Viewer が生まれる)ので、初期値は props ではなく 0 から数える。
+	 */
+	let seenFindRequest = 0;
+	$effect(() => {
+		const request = findRequest;
+		const advanced = request > seenFindRequest;
+		seenFindRequest = request;
+		if (advanced) openFind();
+	});
+
+	/**
+	 * 契約⑤: Esc の宛先。
+	 *
+	 * 検索バーが開いていれば**バーが先に食う**(バーは編集より手前の一時 UI)。
+	 * 編集の破棄より先に決着させるため document の capture で受け、後段の
+	 * ハンドラ(要件#48/#49/#52/#53 の Esc)には渡さない。逆に、こちらより先に
+	 * 登録された編集側のハンドラは `findOpen` を見て譲る ―― どちらの登録順でも
+	 * 結論が同じになるように両側から挟む。
+	 *
+	 * IME の変換中の Esc は IME に委ねる(閉じない)。
+	 */
+	$effect(() => {
+		if (!findOpen) return;
+		const owner = bodyEl?.ownerDocument;
+		if (!owner) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key !== 'Escape') return;
+			if (e.isComposing || findComposing) return;
+			e.preventDefault();
+			e.stopImmediatePropagation();
+			closeFind();
+		};
+		owner.addEventListener('keydown', onKeyDown, true);
+		return () => {
+			owner.removeEventListener('keydown', onKeyDown, true);
+		};
+	});
+
+	/**
+	 * 契約④⑦: 編集の確定・破棄・開始の前にハイライトを外す。
+	 *
+	 * フォールバックの `<mark>` を付けたまま確定すると、逆シリアライズがそれを
+	 * 拾って原文へ焼き付く(要件#53 の経路では「構造が変わった」で拒否にもなる)。
+	 * 外したあとは上の effect が契機どおり張り直すので、ここは外すだけでよい。
+	 */
+	function dropFindHighlights() {
+		const container = findTarget;
+		if (!container) return;
+		clearHighlights(container, detectHighlightApi());
+		// 畳んだ編集の結果(確定なら新しい表示テキスト・破棄なら元の DOM)の上で
+		// 探し直す。いまはまだ編集の途中なので、片付いてから頼む(契約⑤)。
+		void tick().then(() => {
+			findRefresh += 1;
+		});
 	}
 
 	// After every html prop change, look for `.vellis-mermaid` placeholders
@@ -998,8 +1463,12 @@
 	}
 </script>
 
-<article class="viewer">
-	<header class="viewer-toolbar">
+<!--
+	要件#54 追補c(1): 検索バーはツールバーの直下に貼り付く(sticky)。その `top` は
+	ツールバーの実寸なので、ここで測って CSS カスタムプロパティに渡す。
+-->
+<article class="viewer" bind:this={viewerEl} style:--vellis-find-bar-top="{toolbarHeight}px">
+	<header class="viewer-toolbar" bind:this={toolbarEl}>
 		<button
 			type="button"
 			class="toolbar-button"
@@ -1057,6 +1526,22 @@
 			</button>
 		{/if}
 	</header>
+	{#if findOpen}
+		<!--
+			要件#54 契約①: 閲覧面の上部に出す検索バー。ツールバーの直下に敷く1行で、
+			本文の上には重ねない(外部変更の帯・構造変化の通知と同じ流儀)。
+		-->
+		<FindBar
+			query={findQuery}
+			count={findCount}
+			bind:inputEl={findInputEl}
+			onQueryChange={(value) => (findQuery = value)}
+			onPrev={() => stepFind(-1)}
+			onNext={() => stepFind(1)}
+			onClose={closeFind}
+			onComposingChange={(value) => (findComposing = value)}
+		/>
+	{/if}
 	{#if windowState.externalChange !== null}
 		<!--
 			要件#48 契約⑥: 編集中に届いた外部変更。再レンダーはせず(編集中の内容を
@@ -1127,6 +1612,15 @@
 				外れて消える ―― 編集面は iframe の外にあり、iframe とは通信しない。
 			-->
 			<div class="html-edit-surface" data-testid="html-edit-surface" bind:this={htmlSurfaceHost}></div>
+		{:else if findOpen && htmlDocument}
+			<!--
+				要件#54 契約②⑦: html の閲覧は sandbox された iframe の中にあり、アプリ
+				から中身を読めない(要件#8)。そこで要件#53 の `buildEditSurface` が作る
+				sanitize 済み複製を**読み取り専用**で出して探す ―― `contenteditable` は
+				付けず、ダブルクリックの配線もしない(⌘F は編集の入口ではない)。
+				iframe・sandbox・CSP・`buildSrcdoc` には一切触れない。
+			-->
+			<div class="html-find-surface" data-testid="html-find-surface" bind:this={findSurfaceHost}></div>
 		{:else if sourceEditing}
 			<!--
 				要件#48 契約②: 編集中はレンダリング結果を出さない。text 種別は
@@ -1231,6 +1725,38 @@
 	 */
 	.html-edit-surface {
 		display: block;
+	}
+
+	/*
+	 * 要件#54 契約②: html の読み取り専用複製面。中身は Shadow DOM にあるので、
+	 * ここに書けるのは外側の箱だけ(ハイライトの色は Shadow 側の style で足す)。
+	 */
+	.html-find-surface {
+		display: block;
+	}
+
+	/*
+	 * 要件#54 契約④: ハイライト。CSS Custom Highlight API が使える環境では
+	 * `::highlight()` が効き、無い環境ではフォールバックの `<mark>` に落ちる ――
+	 * どちらでも現在の一致だけ色を変えて、どこに居るのかが分かるようにする。
+	 * セレクタは本文の中に生えるものに当てるので :global が要る。
+	 */
+	.markdown-body :global(mark[data-vellis-find]) {
+		background-color: #fef08a;
+		color: inherit;
+	}
+
+	.markdown-body :global(mark[data-vellis-find-current]) {
+		background-color: #fb923c;
+		color: inherit;
+	}
+
+	:global(::highlight(vellis-find)) {
+		background-color: #fef08a;
+	}
+
+	:global(::highlight(vellis-find-current)) {
+		background-color: #fb923c;
 	}
 
 	/*

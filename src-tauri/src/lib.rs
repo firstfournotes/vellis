@@ -255,10 +255,20 @@ pub fn run_with_args(initial_args: WindowArgs) {
                 id if id == menu::OPEN_FOLDER_ITEM_ID => {
                     menu::handle_menu_open_click(app_handle, menu::MENU_OPEN_FOLDER_EVENT);
                 }
+                id if id == menu::GO_TO_ITEM_ID => {
+                    // 今の root も展開も、打たれたパスの解決も窓の側にしかないので、
+                    // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#60 契約①)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_GO_TO_EVENT);
+                }
                 id if id == menu::EDIT_ITEM_ID => {
                     // 編集に入れる文書かも、いま編集中かも窓の側にしかないので、
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#48 追補b)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_EDIT_EVENT);
+                }
+                id if id == menu::FIND_ITEM_ID => {
+                    // 何が表示されていて探せる文字があるかは窓の側にしかないので、
+                    // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#54 契約①)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_FIND_EVENT);
                 }
                 id if id == menu::SAVE_ITEM_ID => {
                     // 編集中かどうかも保存する中身も窓の側にしかないので、

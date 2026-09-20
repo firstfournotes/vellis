@@ -5,6 +5,8 @@
  * 項目を押したときの実行計画・メニュー座標のクランプ。実際の表示と
  * opener / clipboard の呼び出しは ContextMenu.svelte と ExplorerItem.svelte 側。
  */
+import { parentUri } from './uri';
+
 
 /**
  * ツリーのアイテム。`stores/window-state.svelte` の Entry と同形だが、
@@ -16,6 +18,8 @@ export type ContextMenuItemId =
 	| 'reveal'
 	| 'open'
 	| 'open-with'
+	/** 右クリックした項目のフォルダを root にした新しい窓(要件#59)。 */
+	| 'open-in-new-window'
 	| 'copy-path'
 	/** ウィンドウの複製(要件#34)。アイテムではなく窓に効く唯一の項目。 */
 	| 'duplicate-window';
@@ -25,6 +29,13 @@ export type ContextMenuItem = {
 	label: string;
 	enabled: boolean;
 };
+
+/**
+ * 新しいウィンドウを開く計画(要件#59 契約②③)。`root` は新窓の起点フォルダ
+ * (フォルダ項目はそれ自身・ファイル/symlink は親フォルダ)、`path` は新窓で
+ * 開く文書(フォルダ項目では null)。どちらも URI のまま(正規化しない)。
+ */
+export type NewWindowAction = { command: 'new-window'; root: string; path: string | null };
 
 export type ContextAction =
 	| { command: 'reveal_item_in_dir'; path: string }
@@ -36,7 +47,8 @@ export type ContextAction =
 	 * ウィンドウ複製の起動(要件#34)。右クリックしたアイテムは関係しない
 	 * (複製するのは窓の中身)ので、パスも URI も持たない。
 	 */
-	| { command: 'duplicate-window' };
+	| { command: 'duplicate-window' }
+	| NewWindowAction;
 
 /** ダイアログで選んだ .app で開く計画(要件#21 第2段)。 */
 export type OpenWithAction = { command: 'open_path'; path: string; with: string };
@@ -46,6 +58,7 @@ const LABELS: Record<ContextMenuItemId, string> = {
 	reveal: 'Reveal in Finder',
 	open: 'Open with Default App',
 	'open-with': 'Open With…',
+	'open-in-new-window': 'Open in New Window',
 	'copy-path': 'Copy Path',
 	'duplicate-window': 'Duplicate Window'
 };
@@ -64,11 +77,23 @@ function isDirEntry(entry: ContextMenuEntry): boolean {
 }
 
 /**
+ * 新しい窓の root にするフォルダ(要件#59 契約②)。フォルダ項目はそれ自身・
+ * ファイル/symlink は親フォルダ。親が取れない(authority 直下の)ファイルは null。
+ */
+function newWindowRoot(entry: ContextMenuEntry): string | null {
+	return isDirEntry(entry) ? entry.uri : parentUri(entry.uri);
+}
+
+/**
  * 右クリックされたアイテムからメニュー項目を組む。
  *
- * - ファイル/symlink = Reveal in Finder・Open with Default App・Open With…・Copy Path
+ * - ファイル/symlink = Reveal in Finder・Open with Default App・Open With…・
+ *   Open in New Window・Copy Path
  * - フォルダ = 既定アプリ系を出さない(Finder 表示と重複するため=契約②・#21①)
- * - ssh リモートは項目を出したまま Finder / 既定アプリ / アプリ選択を disabled(契約⑤)
+ * - ssh リモートは項目を出したまま Finder / 既定アプリ / アプリ選択を disabled(契約⑤)。
+ *   Open in New Window は窓を開くだけでアプリ内に閉じるので ssh でも有効(契約#59⑥)
+ * - Open in New Window(要件#59)が無効になるのは **親フォルダが取れないファイル**
+ *   だけ — 切ると root がスキームだけになり意味を持たないため(契約#59②の縮退)
  * - 末尾のウィンドウ複製(要件#34)だけは種別にもリモートにも左右されない。
  *   アイテムではなく窓に効く操作なので、無効になる状況が無い(契約#34③)。
  *   区切り線を挟むかは描画側の持ち場で、項目の並びには現れない
@@ -76,12 +101,17 @@ function isDirEntry(entry: ContextMenuEntry): boolean {
 export function buildContextMenu(entry: ContextMenuEntry): ContextMenuItem[] {
 	const local = !isRemote(entry.uri);
 	const ids: ContextMenuItemId[] = isDirEntry(entry)
-		? ['reveal', 'copy-path', 'duplicate-window']
-		: ['reveal', 'open', 'open-with', 'copy-path', 'duplicate-window'];
+		? ['reveal', 'open-in-new-window', 'copy-path', 'duplicate-window']
+		: ['reveal', 'open', 'open-with', 'open-in-new-window', 'copy-path', 'duplicate-window'];
 	return ids.map((id) => ({
 		id,
 		label: LABELS[id],
-		enabled: id === 'copy-path' || id === 'duplicate-window' ? true : local
+		enabled:
+			id === 'copy-path' || id === 'duplicate-window'
+				? true
+				: id === 'open-in-new-window'
+					? newWindowRoot(entry) !== null
+					: local
 	}));
 }
 
@@ -130,12 +160,22 @@ export function pathForReveal(uri: string): string {
  * 右クリックしたアイテムは「どこで押したか」でしかない。ssh でも null にしないのは
  * disabled になる組が存在しないため(null は「グレーアウトの安全網」であって、
  * 有効な項目の受け皿ではない)。リモート判定より手前に置くのはそのため。
+ *
+ * 新しい窓(要件#59)も同じ理由でリモート判定より手前に置く — 窓を開くのは
+ * アプリ内で完結するので ssh でも有効(契約#59⑥)。null になるのは親フォルダの
+ * 取れないファイルだけで、これは disabled な項目の安全網にあたる(契約#59②)。
+ * URI は変形しない — `new_window` は verbatim に登録する。
  */
 export function planContextAction(
 	id: ContextMenuItemId,
 	entry: ContextMenuEntry
 ): ContextAction | null {
 	if (id === 'duplicate-window') return { command: 'duplicate-window' };
+	if (id === 'open-in-new-window') {
+		const root = newWindowRoot(entry);
+		if (root === null) return null;
+		return { command: 'new-window', root, path: isDirEntry(entry) ? null : entry.uri };
+	}
 	if (id === 'copy-path') return { command: 'copy', text: pathForCopy(entry.uri) };
 	if (isRemote(entry.uri)) return null;
 	const path = pathForReveal(entry.uri);
