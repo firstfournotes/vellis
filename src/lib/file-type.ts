@@ -61,13 +61,18 @@ const IMAGE_EXTENSIONS = new Set([
 ]);
 
 /**
- * Shown as an interactive 3D scene instead of a binary placeholder (要件#23).
+ * Shown as an interactive 3D scene instead of a binary placeholder (要件#23・#57・#58).
  *
- * Only the two mesh formats three.js reads directly: STL (ASCII / binary alike)
- * and 3MF (a ZIP of XML). STEP is deliberately absent — it is a B-rep format
- * that needs a CAD kernel to tessellate (docs/3d-model-viewing.md §4).
+ * The formats three.js reads directly: STL (ASCII / binary alike), 3MF (a ZIP
+ * of XML), OBJ (Wavefront text — 要件#57 ①) and PLY (要件#58 ①; ASCII and both
+ * binary byte orders, point clouds as well as meshes). OBJ and ASCII PLY are
+ * text, but a 3D file is more useful as a 3D scene than as source, so they join
+ * the group rather than falling back to plain text (the same call as ASCII STL).
+ * STEP is deliberately absent — it is a B-rep format that needs a CAD kernel
+ * to tessellate (docs/3d-model-viewing.md §4). Other point-cloud containers
+ * (.pcd / .xyz / .e57 / .las) stay out of scope (要件#58 スコープ).
  */
-const MODEL3D_EXTENSIONS = new Set(['stl', '3mf']);
+const MODEL3D_EXTENSIONS = new Set(['stl', '3mf', 'obj', 'ply']);
 
 /**
  * 動画(要件#28)。バイナリのプレースホルダではなく `VideoViewer` へ回す5種。

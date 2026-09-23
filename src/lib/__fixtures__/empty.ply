@@ -1,0 +1,8 @@
+ply
+format ascii 1.0
+comment Vellis test fixture (requirement #58): zero vertices
+element vertex 0
+property float x
+property float y
+property float z
+end_header

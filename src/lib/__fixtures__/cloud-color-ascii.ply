@@ -1,0 +1,22 @@
+ply
+format ascii 1.0
+comment Vellis test fixture (requirement #58): colored point cloud (uchar RGB)
+element vertex 8
+property float x
+property float y
+property float z
+property float nx
+property float ny
+property float nz
+property uchar red
+property uchar green
+property uchar blue
+end_header
+0 0 0 -0.577350 -0.577350 -0.577350 0 0 0
+30 0 0 0.577350 -0.577350 -0.577350 255 0 0
+30 30 0 0.577350 0.577350 -0.577350 255 255 0
+0 30 0 -0.577350 0.577350 -0.577350 0 255 0
+0 0 30 -0.577350 -0.577350 0.577350 0 0 255
+30 0 30 0.577350 -0.577350 0.577350 255 0 255
+30 30 30 0.577350 0.577350 0.577350 255 255 255
+0 30 30 -0.577350 0.577350 0.577350 0 255 255

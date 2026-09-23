@@ -1,0 +1,33 @@
+ply
+format ascii 1.0
+comment Vellis test fixture (requirement #58 addendum a): colored cube mesh, 12 triangles, bbox [0,30]^3
+element vertex 8
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+element face 12
+property list uchar int vertex_indices
+end_header
+0 0 0 0 0 0
+30 0 0 255 0 0
+30 30 0 255 255 0
+0 30 0 0 255 0
+0 0 30 0 0 255
+30 0 30 255 0 255
+30 30 30 255 255 255
+0 30 30 0 255 255
+3 0 1 2
+3 0 2 3
+3 4 5 6
+3 4 6 7
+3 0 1 5
+3 0 5 4
+3 1 2 6
+3 1 6 5
+3 2 3 7
+3 2 7 6
+3 3 0 4
+3 3 4 7

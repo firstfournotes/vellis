@@ -43,10 +43,12 @@ const DEFAULT_DEADZONE = 10;
 
 /**
  * 既定の感度。1 イベント(≒1/60 秒)ぶんの量なので、フル倒しを 1 秒続けると
- * 回転は約 1.8rad(100 度強)・ズームは約 e^1.2(3.3 倍)になる目安。
+ * 回転は約 2.7rad(155 度前後)・ズームは約 e^1.2(3.3 倍)になる目安。
  * 実機の感触で調整する余地を残して、呼び出し側から上書きできる。
+ * 回転は当初 0.03(約 100 度/秒)だったが、実機確認で「もう少し速く」となり
+ * 1.5 倍の 0.045 にした(要件#24 追補c)。パン・ズームは据え置き。
  */
-const DEFAULT_ROTATE_SENSITIVITY = 0.03;
+const DEFAULT_ROTATE_SENSITIVITY = 0.045;
 const DEFAULT_PAN_SENSITIVITY = 0.02;
 const DEFAULT_ZOOM_SENSITIVITY = 0.02;
 

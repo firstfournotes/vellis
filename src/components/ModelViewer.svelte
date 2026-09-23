@@ -13,7 +13,7 @@
 	} from 'three';
 	import { listen } from '$lib/events';
 	import { applyCameraDelta, cameraPosition, type CameraState } from '$lib/model-camera';
-	import { parseModel } from '$lib/model-viewing';
+	import { modelStatsLabel, parseModel } from '$lib/model-viewing';
 	import { spaceMouseToCameraDelta, type SpaceMouseAxes } from '$lib/spacemouse';
 
 	let {
@@ -50,9 +50,12 @@
 	const INITIAL_YAW = 0.6;
 	const INITIAL_PITCH = 0.4;
 
+	// `stats` はツールバーに出す文言そのもの(「12 triangles」「8 points」)。
+	// 何を数えるかは描画対象の種別で変わるので、判断は `modelStatsLabel`(要件#58 ④)
+	// に置き、ここでは受け取った文字列を貼るだけにする。
 	type LoadState =
 		| { kind: 'loading' }
-		| { kind: 'ready'; triangleCount: number }
+		| { kind: 'ready'; stats: string }
 		| { kind: 'error'; message: string };
 
 	let stage = $state<HTMLDivElement | null>(null);
@@ -220,7 +223,7 @@
 			cameraState = initialCameraState;
 			resize();
 			syncCamera();
-			load = { kind: 'ready', triangleCount: model.triangleCount };
+			load = { kind: 'ready', stats: modelStatsLabel(model) };
 		} catch (error) {
 			disposeModel();
 			load = {
@@ -287,6 +290,11 @@
 
 	function onSpaceMouseInput(axes: SpaceMouseAxes): void {
 		if (load.kind !== 'ready') return;
+		// 前面のウィンドウだけが受ける(要件#24 追補b)。Rust は全ウィンドウへ同じ
+		// イベントを配るので、受け取る側で絞る(raw HID / SDK 両経路共通の1か所)。
+		// 前面は切り替わるので判定はイベントごと。Vellis が裏にいるときは
+		// どのビューアも動かない(raw HID 経路でも他アプリ操作中に勝手に動かない)。
+		if (!document.hasFocus()) return;
 		// パンだけは world 単位なので、マウスのドラッグと同じ考えで
 		// 「今見えている高さ」から換算する(寄っているときは細かく動く)。
 		const visibleHeight = 2 * cameraState.distance * Math.tan((FOV * Math.PI) / 360);
@@ -371,7 +379,7 @@
 		</button>
 		<span class="model-name" title={uri}>{fileName}</span>
 		{#if load.kind === 'ready'}
-			<span class="model-stats">{load.triangleCount.toLocaleString()} triangles</span>
+			<span class="model-stats">{load.stats}</span>
 		{/if}
 	</header>
 

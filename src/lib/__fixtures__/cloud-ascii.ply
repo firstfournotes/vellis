@@ -1,0 +1,16 @@
+ply
+format ascii 1.0
+comment Vellis test fixture (requirement #58): 8-point cloud, bbox [0,30]^3
+element vertex 8
+property float x
+property float y
+property float z
+end_header
+0 0 0
+30 0 0
+30 30 0
+0 30 0
+0 0 30
+30 0 30
+30 30 30
+0 30 30
