@@ -357,7 +357,8 @@ impl FileProvider for SshProvider {
         let mut out: Vec<Entry> = Vec::new();
         for entry in entries_iter {
             let name = entry.file_name();
-            if name == "." || name == ".." || name.starts_with('.') {
+            // Hidden names are listed; the exclude settings hide them (要件#65 契約2).
+            if name == "." || name == ".." {
                 continue;
             }
             let attrs = entry.metadata();

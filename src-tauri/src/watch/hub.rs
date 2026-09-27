@@ -3,10 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::errors::FsError;
+use crate::exclude::filter_tree_entries;
 use crate::fs::entry::Entry;
 use crate::fs::provider::{WatchEvent, WatchEventKind, WatchHandle};
 use crate::fs::registry::FileProviderRegistry;
@@ -113,10 +114,11 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
 
     /// Subscribe a window to change notifications for the given URI as a
     /// **directory** (Explorer root). Any create/remove/modify under the
-    /// directory triggers a fresh `provider.list(&uri)` and broadcasts
-    /// `directory_changed { root_uri, entries }`. The frontend listener
-    /// filters by `root_uri == windowState.root` (`docs/architecture.md`
-    /// §6.6, issue #18).
+    /// directory triggers a fresh `provider.list(&uri)` and sends
+    /// `directory_changed { root_uri, entries }` to each subscribed window,
+    /// with the entries its exclude settings hide already dropped
+    /// (requirements.md #65 契約9). The frontend listener filters by
+    /// `root_uri == windowState.root` (`docs/architecture.md` §6.6, issue #18).
     pub async fn subscribe_directory(
         self: &Arc<Self>,
         uri: Uri,
@@ -308,7 +310,7 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
             }
         };
         match provider.list(&uri).await {
-            Ok(entries) => self.emit_directory_changed(canonical, entries).await,
+            Ok(entries) => self.emit_directory_changed(canonical, &uri, entries).await,
             Err(e) => tracing::warn!("failed to re-list {}: {}", canonical, e),
         }
     }
@@ -358,16 +360,32 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
     /// Emit `directory_changed` to every window subscribed to `canonical`
     /// as a directory. Frontends self-filter by `root_uri ==
     /// windowState.root` (`src/routes/+page.svelte`).
-    async fn emit_directory_changed(&self, canonical: &str, entries: Vec<Entry>) {
-        let inner = self.inner.lock().await;
-        if let Some(entry) = inner.get(canonical) {
+    ///
+    /// Each window gets the listing through its own exclude judgement: the
+    /// patterns are relative to the root *that window* shows (requirements.md
+    /// #65 契約9), so the event goes to that window alone (`emit_to`) instead
+    /// of to every window. The subscribers are copied out first so the hub
+    /// lock is not held while the window's root is looked up.
+    async fn emit_directory_changed(&self, canonical: &str, dir: &Uri, entries: Vec<Entry>) {
+        let targets: Vec<(WindowId, tauri::AppHandle<R>)> = {
+            let inner = self.inner.lock().await;
+            match inner.get(canonical) {
+                Some(entry) => entry
+                    .subscribers
+                    .iter()
+                    .map(|((wid, _sid), handle)| (wid.clone(), handle.app_handle.clone()))
+                    .collect(),
+                None => return,
+            }
+        };
+        for (wid, app) in targets {
+            // Without a known root (no window state yet) the names alone decide.
+            let root = window_root(&app, &wid).await.unwrap_or_else(|| dir.clone());
             let payload = DirectoryChangedPayload {
                 root_uri: canonical.to_string(),
-                entries,
+                entries: filter_tree_entries(&root, dir, entries.clone()),
             };
-            for ((_wid, _sid), handle) in &entry.subscribers {
-                let _ = handle.app_handle.emit("directory_changed", &payload);
-            }
+            let _ = app.emit_to(wid.0.as_str(), "directory_changed", &payload);
         }
     }
 
@@ -387,6 +405,15 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
     pub(crate) async fn entry_count(&self) -> usize {
         self.inner.lock().await.len()
     }
+}
+
+/// The root the window `window` currently shows, from the app's
+/// `WindowManager` (`None` when the app manages no such state — unit tests on
+/// a mock runtime — or the window has no root yet).
+async fn window_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>, window: &WindowId) -> Option<Uri> {
+    let state = app.try_state::<crate::commands::AppState>()?;
+    let wm = state.window_manager.lock().await;
+    wm.get(&window.0).and_then(|win_state| win_state.root_uri.clone())
 }
 
 // ---------------------------------------------------------------------------

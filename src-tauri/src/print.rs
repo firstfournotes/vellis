@@ -246,6 +246,10 @@ pub async fn open_print_window(app: &AppHandle, document: String) -> Result<(), 
 
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::CustomProtocol(url))
         .title(PRINT_WINDOW_TITLE)
+        // A tab group key of its own (requirements.md #62 契約2): every window
+        // needs one, or tao turns window tabbing off app-wide, and the
+        // `vellis-print:` prefix keeps it out of every document window's group.
+        .tabbing_identifier(&format!("vellis-print:{label}"))
         .inner_size(PRINT_WINDOW_SIZE.0, PRINT_WINDOW_SIZE.1)
         .center()
         .on_page_load(move |_window, payload| {

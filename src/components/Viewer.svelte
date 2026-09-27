@@ -55,6 +55,8 @@
 		marksOpen,
 		zoom = DEFAULT_ZOOM,
 		findRequest = 0,
+		findInitialQuery = '',
+		findInitialIndex = 0,
 		onFindOpenChange,
 		goToOpen = false,
 	}: {
@@ -78,6 +80,19 @@
 		 * 切り替えてから、この数を1つ進めて「今の ⌘F」を伝える。
 		 */
 		findRequest?: number;
+		/**
+		 * 要件#55 契約⑦: `findRequest` が進んだときに検索バーへ入れる語。
+		 *
+		 * フォルダ横断検索の結果から文書を開いたとき、+page.svelte が同じ語を
+		 * ここへ置いてから `findRequest` を進める。空なら従来どおり(語は触らない)。
+		 */
+		findInitialQuery?: string;
+		/**
+		 * 要件#55 追補b: `findInitialQuery` つきで `findRequest` が進んだとき、
+		 * 現在にする一致の番目(0 始まり・省略時 0=先頭)。一致数を超えたら最後の一致。
+		 * フォルダ横断検索の結果でクリックした一致へ跳ぶのに使う。
+		 */
+		findInitialIndex?: number;
 		/** 検索バーの開閉を +page.svelte へ返す(閉じたら html は iframe へ戻る)。 */
 		onFindOpenChange?: (open: boolean) => void;
 		/**
@@ -1027,6 +1042,12 @@
 	let findCurrent = $state(0);
 
 	/**
+	 * 要件#55 追補b: 次に一致が出揃ったとき現在にする番目(null=無し)。
+	 * `findRequest` の effect が置き、下の「番目合わせ」の effect が一度だけ使って消す。
+	 */
+	let pendingFindIndex = $state<number | null>(null);
+
+	/**
 	 * 契約⑤の「編集の確定」を再検索の契機にするための印。
 	 *
 	 * 確定・破棄・掴み直しでは表示テキストが変わるのに、それだけでは下の依存が
@@ -1203,6 +1224,22 @@
 	});
 
 	/**
+	 * 要件#55 追補b: 番目合わせ。上の再検索(現在を先頭へ戻す)より**後**に宣言して
+	 * あるので、同じ flush では再検索が先に走り、ここは出揃った一致を見て現在を
+	 * 置き直す。語が前と同じで再検索が走らない(2 度目のクリック)ときも、ここは
+	 * `pendingFindIndex` の変化で走る。対象の木がまだ無い(html の複製面の組み立て前)
+	 * あいだは使わずに待つ。
+	 */
+	$effect(() => {
+		const pending = pendingFindIndex;
+		const ranges = findRanges;
+		if (pending === null || !findTarget) return;
+		pendingFindIndex = null;
+		if (pending <= 0 || ranges.length === 0) return;
+		findCurrent = Math.min(pending, ranges.length - 1);
+	});
+
+	/**
 	 * ハイライトの張り替え(契約④)。
 	 *
 	 * 一致・現在位置・対象の木のどれかが動いたら、前の分を外してから付け直す。
@@ -1296,7 +1333,11 @@
 		let off: (() => void) | null = null;
 		let disposed = false;
 		try {
-			void listen(MENU_FIND_EVENT, () => openFind())
+			void listen(MENU_FIND_EVENT, () => {
+				// Command + F は番目を持たない(先頭=従来どおり)。
+				pendingFindIndex = null;
+				openFind();
+			})
 				.then((unlisten) => {
 					if (disposed) unlisten();
 					else off = unlisten;
@@ -1326,7 +1367,13 @@
 		const request = findRequest;
 		const advanced = request > seenFindRequest;
 		seenFindRequest = request;
-		if (advanced) openFind();
+		if (!advanced) return;
+		// 要件#55 契約⑦: 語つきの要求なら、その語にしてから開く。
+		const initial = untrack(() => findInitialQuery);
+		if (initial) findQuery = initial;
+		// 要件#55 追補b: 語つきの要求なら、一致が出揃った後でその番目を現在にする。
+		pendingFindIndex = initial ? untrack(() => findInitialIndex) : null;
+		openFind();
 	});
 
 	/**

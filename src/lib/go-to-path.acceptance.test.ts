@@ -839,6 +839,9 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 	});
 
 	test('Tauri command が増えていない — generate_handler! の一覧が登録時点と同一', () => {
+		// 要件#62(契約 12 追補・2026-09-24)で `new_tab` / `set_tab_title` を追加(new_window の直後)。
+		// 要件#55(契約⑨・2026-09-24)で `search_in_folder` を追加(set_tab_title の直後)。
+		// 要件#55 追補a(契約⑨の追加・2026-09-25)で `search_in_folder_page` を追加(search_in_folder の直後)。
 		const libRs = readFileSync(resolve(REPO_ROOT, 'src-tauri/src/lib.rs'), 'utf-8');
 		const blocks = [...libRs.matchAll(/generate_handler!\[([^\]]*)\]/g)].map((m) =>
 			(m[1] ?? '')
@@ -854,6 +857,10 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'save_document',
 			'set_root',
 			'new_window',
+			'new_tab',
+			'set_tab_title',
+			'search_in_folder',
+			'search_in_folder_page',
 			'list_dir',
 			'subscribe_dir',
 			'unsubscribe_dir',

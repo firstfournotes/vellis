@@ -18,6 +18,8 @@ export type ContextMenuItemId =
 	| 'reveal'
 	| 'open'
 	| 'open-with'
+	/** 右クリックしたファイルを今の窓の新しいタブで開く(要件#62 契約3)。 */
+	| 'open-in-new-tab'
 	/** 右クリックした項目のフォルダを root にした新しい窓(要件#59)。 */
 	| 'open-in-new-window'
 	| 'copy-path'
@@ -37,6 +39,12 @@ export type ContextMenuItem = {
  */
 export type NewWindowAction = { command: 'new-window'; root: string; path: string | null };
 
+/**
+ * 新しいタブで開く計画(要件#62 契約3)。`path` は開くファイルの URI のまま
+ * (正規化しない)。root と展開は今の窓のものを実行側が足す(`$lib/new-tab`)。
+ */
+export type NewTabAction = { command: 'new-tab'; path: string };
+
 export type ContextAction =
 	| { command: 'reveal_item_in_dir'; path: string }
 	| { command: 'open_path'; path: string }
@@ -48,7 +56,8 @@ export type ContextAction =
 	 * (複製するのは窓の中身)ので、パスも URI も持たない。
 	 */
 	| { command: 'duplicate-window' }
-	| NewWindowAction;
+	| NewWindowAction
+	| NewTabAction;
 
 /** ダイアログで選んだ .app で開く計画(要件#21 第2段)。 */
 export type OpenWithAction = { command: 'open_path'; path: string; with: string };
@@ -58,6 +67,7 @@ const LABELS: Record<ContextMenuItemId, string> = {
 	reveal: 'Reveal in Finder',
 	open: 'Open with Default App',
 	'open-with': 'Open With…',
+	'open-in-new-tab': 'Open in New Tab',
 	'open-in-new-window': 'Open in New Window',
 	'copy-path': 'Copy Path',
 	'duplicate-window': 'Duplicate Window'
@@ -88,7 +98,9 @@ function newWindowRoot(entry: ContextMenuEntry): string | null {
  * 右クリックされたアイテムからメニュー項目を組む。
  *
  * - ファイル/symlink = Reveal in Finder・Open with Default App・Open With…・
- *   Open in New Window・Copy Path
+ *   Open in New Tab・Open in New Window・Copy Path
+ * - Open in New Tab(要件#62)はファイル/symlink だけ・常に有効(ssh でも=
+ *   アプリの中で完結する)。フォルダをタブで開く意味は定まらないので出さない
  * - フォルダ = 既定アプリ系を出さない(Finder 表示と重複するため=契約②・#21①)
  * - ssh リモートは項目を出したまま Finder / 既定アプリ / アプリ選択を disabled(契約⑤)。
  *   Open in New Window は窓を開くだけでアプリ内に閉じるので ssh でも有効(契約#59⑥)
@@ -102,12 +114,20 @@ export function buildContextMenu(entry: ContextMenuEntry): ContextMenuItem[] {
 	const local = !isRemote(entry.uri);
 	const ids: ContextMenuItemId[] = isDirEntry(entry)
 		? ['reveal', 'open-in-new-window', 'copy-path', 'duplicate-window']
-		: ['reveal', 'open', 'open-with', 'open-in-new-window', 'copy-path', 'duplicate-window'];
+		: [
+				'reveal',
+				'open',
+				'open-with',
+				'open-in-new-tab',
+				'open-in-new-window',
+				'copy-path',
+				'duplicate-window'
+			];
 	return ids.map((id) => ({
 		id,
 		label: LABELS[id],
 		enabled:
-			id === 'copy-path' || id === 'duplicate-window'
+			id === 'copy-path' || id === 'duplicate-window' || id === 'open-in-new-tab'
 				? true
 				: id === 'open-in-new-window'
 					? newWindowRoot(entry) !== null
@@ -165,12 +185,16 @@ export function pathForReveal(uri: string): string {
  * アプリ内で完結するので ssh でも有効(契約#59⑥)。null になるのは親フォルダの
  * 取れないファイルだけで、これは disabled な項目の安全網にあたる(契約#59②)。
  * URI は変形しない — `new_window` は verbatim に登録する。
+ *
+ * 新しいタブ(要件#62)も同じ理由でリモート判定より手前。ファイルの URI を
+ * そのまま渡す(root と展開は実行側が今の窓から足す)。
  */
 export function planContextAction(
 	id: ContextMenuItemId,
 	entry: ContextMenuEntry
 ): ContextAction | null {
 	if (id === 'duplicate-window') return { command: 'duplicate-window' };
+	if (id === 'open-in-new-tab') return { command: 'new-tab', path: entry.uri };
 	if (id === 'open-in-new-window') {
 		const root = newWindowRoot(entry);
 		if (root === null) return null;

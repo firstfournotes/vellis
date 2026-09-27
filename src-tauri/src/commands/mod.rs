@@ -8,6 +8,7 @@ pub mod history;
 pub mod list;
 pub mod print;
 pub mod root;
+pub mod search;
 #[cfg(feature = "webdriver")]
 pub mod test_helpers;
 pub mod video;

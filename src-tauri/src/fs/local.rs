@@ -53,11 +53,9 @@ impl FileProvider for LocalProvider {
             let file_name = de.file_name();
             let name = file_name.to_string_lossy().to_string();
 
-            // Skip hidden files/directories. Decided on the name alone, before any
-            // symlink is resolved, so a hidden broken link costs nothing (要件#31).
-            if name.starts_with('.') {
-                continue;
-            }
+            // Hidden names are listed like any other: hiding them is the exclude
+            // settings' job (`files.exclude` defaults to `**/.*`, 要件#65 契約2),
+            // applied by the callers that hand a listing to the tree.
 
             let entry_path = dir_path.join(&name);
 
@@ -302,9 +300,9 @@ impl FileProvider for LocalProvider {
             FsError::PermissionDenied(format!("{} has no file name", target.display()))
         })?;
 
-        // Hidden name so a crash between create and rename does not leave
-        // something the explorer would list (hidden entries are skipped by
-        // `list`, 要件#31).
+        // A name ending in `.vellis-tmp`, so a crash between create and rename
+        // does not leave something the explorer would list (the built-in
+        // exclusion hides it whatever the settings say, 要件#65 契約2).
         let mut tmp_name = std::ffi::OsString::from(".");
         tmp_name.push(file_name);
         tmp_name.push(".vellis-tmp");
@@ -429,14 +427,15 @@ mod tests {
         let entries = provider.list(&uri).await.unwrap();
 
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        // 要件#1(requirements.md #1): 全ファイルを列挙する。隠しファイルは現行踏襲で除外
+        // 要件#1(requirements.md #1): 全ファイルを列挙する。隠すのは除外の設定(要件#65
+        // 契約2・11: `list` は隠し名も返し、`files.exclude` の既定 `**/.*` がツリーから隠す)
         assert!(names.contains(&"subdir"));
         assert!(names.contains(&"readme.md"));
         assert!(names.contains(&"notes.markdown"));
         assert!(names.contains(&"design.mdx"));
         assert!(names.contains(&"image.png"));
         assert!(names.contains(&"data.json"));
-        assert!(!names.contains(&".hidden.md"));
+        assert!(names.contains(&".hidden.md"));
 
         // Dir should come first
         assert_eq!(entries[0].kind, FileKind::Dir);

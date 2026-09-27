@@ -3,12 +3,14 @@
 //! watches without reading (要件#22); the write is the whole of the app's
 //! authority to modify a file (要件#48).
 
-use tauri::{Manager, Window};
+use tauri::{Emitter, Manager, Window};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::annotation::SnapshotManager;
 use crate::fs::local::ensure_within_root;
 use crate::fs::uri::Uri;
 use crate::session::document::{DocumentPayload, DocumentSession};
+use crate::settings::{is_settings_file, read_settings, SETTINGS_CHANGED_EVENT};
 use crate::watch::hub::WindowId;
 
 use super::AppState;
@@ -62,6 +64,11 @@ pub async fn open_binary_document(
 /// window that saved. The frontend recognises its own bytes by hash and drops
 /// that echo (契約⑥), which is what keeps the caret from being thrown away by
 /// a re-render half a second after every save.
+///
+/// When the file written is the user's `settings.json` (requirements.md #65
+/// 契約7・8), it is read back, every window is told to re-list its tree
+/// (`settings_changed`), and what is wrong with it — if anything — is shown
+/// once, in English.
 #[tauri::command]
 pub async fn save_document(
     uri: String,
@@ -129,7 +136,34 @@ pub async fn save_document(
         .write_text(&parsed_uri.raw, &content)
         .await
         .map_err(|e| e.to_string())?;
+
+    if is_settings_file(&resolved) {
+        announce_settings_saved(&window, &resolved);
+    }
     Ok(())
+}
+
+/// After a save of `settings.json` (requirements.md #65 契約7・8): validate the
+/// file, tell every window to re-list its tree, and show the warnings once —
+/// from here, not from each window, so N windows do not mean N dialogs. A
+/// broken file is never rewritten; the tree and the search run on the defaults
+/// for the broken part until the user fixes it.
+fn announce_settings_saved(window: &Window, path: &std::path::Path) {
+    let loaded = read_settings(path);
+    let app = window.app_handle();
+    if let Err(e) = app.emit(SETTINGS_CHANGED_EVENT, ()) {
+        tracing::warn!("settings_changed emit failed: {e}");
+    }
+    if !loaded.warnings.is_empty() {
+        for warning in &loaded.warnings {
+            tracing::warn!("{warning}");
+        }
+        app.dialog()
+            .message(loaded.warnings.join("\n\n"))
+            .title("Vellis Settings")
+            .kind(MessageDialogKind::Warning)
+            .show(|_| {});
+    }
 }
 
 async fn open_in_window(

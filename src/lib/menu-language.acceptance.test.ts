@@ -146,7 +146,10 @@ describe('契約①: コンテキストメニューのラベルは英語の推�
 	// 要件#59 追補(契約#59⑦の要件側更新): open-with の直後に open-in-new-window /
 	// 'Open in New Window' が1件増え、5項目→6項目・フォルダ3項目→4項目になった。
 	// 更新は項目数・順序・ラベル列挙のみ(既存5件の文言と出し分けは不変)。
-	test('6項目の id → label 対応が推奨文言に一致する(local ファイル)', () => {
+	// 要件#62 追補(契約12の要件側更新): open-with の直後・open-in-new-window の直前に
+	// open-in-new-tab / 'Open in New Tab' が1件増え、ファイル/symlink 6項目→7項目。
+	// フォルダは4項目のまま。更新は項目数・順序・ラベル・ssh の enabled の列挙のみ。
+	test('7項目の id → label 対応が推奨文言に一致する(local ファイル)', () => {
 		const labelById = Object.fromEntries(
 			buildContextMenu(localFile).map((i) => [i.id, i.label])
 		);
@@ -154,6 +157,7 @@ describe('契約①: コンテキストメニューのラベルは英語の推�
 			reveal: 'Reveal in Finder',
 			open: 'Open with Default App',
 			'open-with': 'Open With…',
+			'open-in-new-tab': 'Open in New Tab',
 			'open-in-new-window': 'Open in New Window',
 			'copy-path': 'Copy Path',
 			'duplicate-window': 'Duplicate Window',
@@ -186,11 +190,12 @@ describe('契約①+機械判定: ラベルに日本語(CJK)が残らない・�
 		}
 	});
 
-	test('項目の出し分け・順序は従来どおり(ファイル6項目・フォルダ4項目=要件#59 の追加を除き英語化は label のみ)', () => {
+	test('項目の出し分け・順序は従来どおり(ファイル7項目・フォルダ4項目=要件#59/#62 の追加を除き英語化は label のみ)', () => {
 		expect(buildContextMenu(localFile).map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-tab',
 			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
@@ -203,11 +208,13 @@ describe('契約①+機械判定: ラベルに日本語(CJK)が残らない・�
 		]);
 		// ssh の enabled 出し分けも不変(context-menu.acceptance.test.ts が本判定を
 		// 持つが、「英語化で出し分けが動かない」ことを要件#35 の台帳にも固定する)。
-		// open-in-new-window(4番目)は ssh でも有効=契約#59⑥。
+		// open-in-new-tab(4番目=要件#62 契約3)と open-in-new-window(5番目)は
+		// ssh でも有効=契約#59⑥と同じ理由。
 		expect(buildContextMenu(sshFile).map((i) => i.enabled)).toEqual([
 			false,
 			false,
 			false,
+			true,
 			true,
 			true,
 			true,

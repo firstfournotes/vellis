@@ -7,12 +7,15 @@ pub mod cli_fix;
 pub mod cli_install;
 pub mod commands;
 pub mod errors;
+pub mod exclude;
 pub mod fs;
 pub mod history;
 pub mod ipc;
 pub mod menu;
 pub mod print;
+pub mod search;
 pub mod session;
+pub mod settings;
 pub mod spacemouse;
 pub mod update_check;
 pub mod video_frames;
@@ -43,10 +46,11 @@ use commands::history::list_history;
 use commands::list::list_dir;
 use commands::print::{print_current_window, print_html};
 use commands::root::set_root;
+use commands::search::{search_in_folder, search_in_folder_page, SearchResults};
 use commands::video::get_video_frame_index;
 use commands::wav_waveform::analyze_wav_waveform;
 use commands::waveform::extract_waveform_audio;
-use commands::window::new_window;
+use commands::window::{new_tab, new_window, set_tab_title};
 use commands::AppState;
 use fs::registry::FileProviderRegistry;
 use ipc::handler::spawn_command_handler;
@@ -97,8 +101,17 @@ pub fn run_with_args(initial_args: WindowArgs) {
     // E2E tests. The `debug_assertions` gate is a defence-in-depth: even
     // if someone passes `--release --features webdriver` the plugin is
     // not registered.  See `docs/implementation.md` §10 (E2E).
+    // Labels of the windows built as tabs (requirements.md #62 追補a). The
+    // window-state plugin's filter reads the set and `new_tab` writes to it
+    // through managed state, so both hold the same `Arc`.
+    let tab_window_labels = window::tab::TabWindowLabels::default();
+    let tab_labels_for_filter = tab_window_labels.clone();
+
     let builder = tauri::Builder::default()
         .manage(app_state)
+        .manage(tab_window_labels)
+        // フォルダ横断検索の結果の保持(要件#55 追補a・窓ラベル×世代)。
+        .manage(SearchResults::default())
         // 印刷文書のストア(要件#38)は AppState とは別に管理する。protocol
         // ハンドラとコマンドの2箇所からしか触らないうえ、窓・監視・注釈と違って
         // アプリの状態ではなく「いま印刷しようとしている1文書」の置き場なので。
@@ -108,7 +121,14 @@ pub fn run_with_args(initial_args: WindowArgs) {
     let builder = builder.plugin(tauri_plugin_webdriver::init());
 
     let builder = builder
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // A tab is neither restored nor saved: restoring would move it — and
+        // its whole tab group — to where a window of the same label sat in an
+        // earlier launch (requirements.md #62 追補a).
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(move |label| !tab_labels_for_filter.contains(label))
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // --- SpaceMouse focus tracking (要件#25) ---
@@ -124,6 +144,12 @@ pub fn run_with_args(initial_args: WindowArgs) {
                     .try_state::<spacemouse::SpaceMouseHandle>()
                 {
                     spacemouse.set_window_focus(window.label(), *focused);
+                }
+            }
+            // A closed window's folder-search results are dropped (要件#55 追補a).
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(results) = window.app_handle().try_state::<SearchResults>() {
+                    results.0.lock().map(|mut store| store.forget(window.label())).ok();
                 }
             }
         })
@@ -158,6 +184,10 @@ pub fn run_with_args(initial_args: WindowArgs) {
         save_document,
         set_root,
         new_window,
+        new_tab,
+        set_tab_title,
+        search_in_folder,
+        search_in_folder_page,
         list_dir,
         subscribe_dir,
         unsubscribe_dir,
@@ -187,6 +217,10 @@ pub fn run_with_args(initial_args: WindowArgs) {
         save_document,
         set_root,
         new_window,
+        new_tab,
+        set_tab_title,
+        search_in_folder,
+        search_in_folder_page,
         list_dir,
         subscribe_dir,
         unsubscribe_dir,
@@ -233,6 +267,45 @@ pub fn run_with_args(initial_args: WindowArgs) {
                 id if id == menu::NEW_WINDOW_ITEM_ID => {
                     menu::handle_new_window_click(app_handle);
                 }
+                id if id == menu::NEW_TAB_ITEM_ID => {
+                    // 新しいタブの root と展開は窓の側にしかないので、Duplicate
+                    // Window と同じくフォーカス中の窓へ投げて任せる(要件#62 契約3)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_NEW_TAB_EVENT);
+                }
+                id if id == menu::PREVIOUS_TAB_ITEM_ID => {
+                    // どのタブが隣かは AppKit が知っている。前面の NSWindow に
+                    // selectPreviousTab: を送るだけ(要件#62 契約7)。
+                    menu::handle_select_tab_click(
+                        app_handle,
+                        window::tab::TabDirection::Previous,
+                    );
+                }
+                id if id == menu::NEXT_TAB_ITEM_ID => {
+                    menu::handle_select_tab_click(app_handle, window::tab::TabDirection::Next);
+                }
+                id if id == menu::SHOW_TAB_BAR_ITEM_ID => {
+                    // AppKit's own tab items, which it never adds to a menu
+                    // built in code (requirements.md #62 追補b).
+                    menu::handle_tab_menu_click(app_handle, window::tab::TabMenuAction::ShowTabBar);
+                }
+                id if id == menu::SHOW_ALL_TABS_ITEM_ID => {
+                    menu::handle_tab_menu_click(
+                        app_handle,
+                        window::tab::TabMenuAction::ShowAllTabs,
+                    );
+                }
+                id if id == menu::MOVE_TAB_TO_NEW_WINDOW_ITEM_ID => {
+                    menu::handle_tab_menu_click(
+                        app_handle,
+                        window::tab::TabMenuAction::MoveTabToNewWindow,
+                    );
+                }
+                id if id == menu::MERGE_ALL_WINDOWS_ITEM_ID => {
+                    menu::handle_tab_menu_click(
+                        app_handle,
+                        window::tab::TabMenuAction::MergeAllWindows,
+                    );
+                }
                 id if id == menu::DUPLICATE_WINDOW_ITEM_ID => {
                     // 複製の中身(root・文書・展開)は窓しか知らないので、
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#34)。
@@ -270,10 +343,20 @@ pub fn run_with_args(initial_args: WindowArgs) {
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#54 契約①)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_FIND_EVENT);
                 }
+                id if id == menu::FIND_IN_FOLDER_ITEM_ID => {
+                    // 開いている root も検索パネルも窓の側にしかないので、Find… と
+                    // 同じくフォーカス中の窓へ投げて任せる(要件#55 契約①)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_FIND_IN_FOLDER_EVENT);
+                }
                 id if id == menu::SAVE_ITEM_ID => {
                     // 編集中かどうかも保存する中身も窓の側にしかないので、
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#48)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_SAVE_EVENT);
+                }
+                id if id == menu::SETTINGS_ITEM_ID => {
+                    // 設定ファイルの置き場も既定値も Rust が知っているので、窓へは投げず
+                    // Rust の中で「無ければ書き出して新しい窓で開く」まで済ませる(要件#65 契約6)。
+                    menu::handle_settings_click(app_handle);
                 }
                 _ => {}
             });

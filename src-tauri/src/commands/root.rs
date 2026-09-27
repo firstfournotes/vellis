@@ -3,6 +3,7 @@
 use serde::Serialize;
 use tauri::{Manager, Window};
 
+use crate::exclude::filter_tree_entries;
 use crate::fs::entry::Entry;
 use crate::fs::uri::Uri;
 use crate::watch::hub::WindowId;
@@ -20,7 +21,8 @@ pub struct RootPayload {
 
 /// Switch the explorer root for the calling window.
 ///
-/// - Lists entries in the new root via `FileProvider::list`.
+/// - Lists entries in the new root via `FileProvider::list`, minus what the
+///   exclude settings hide from the tree (requirements.md #65 契約9).
 /// - Checks whether the current document URI is a prefix-child of the new root.
 ///   - If yes: session is kept (`document_retained = true`).
 ///   - If no: session is dropped (`document_retained = false`), which triggers
@@ -43,6 +45,7 @@ pub async fn set_root(
         .resolve(&new_root)
         .map_err(|e| e.to_string())?;
     let entries = provider.list(&new_root).await.map_err(|e| e.to_string())?;
+    let entries = filter_tree_entries(&new_root, &new_root, entries);
 
     let mut wm = state.window_manager.lock().await;
     let win_state = wm.get_mut(&label).ok_or_else(|| {
@@ -90,6 +93,14 @@ pub async fn set_root(
     if let Err(e) = window.set_title(&title) {
         tracing::warn!("set_root: failed to set window title to '{}': {}", title, e);
     }
+    // The tab group key follows the root (requirements.md #62 契約2・9): after
+    // Open Folder…, ↑ or a pick from the history, a tab that shared a tab bar
+    // with other tabs of the old root moves out to a window of its own.
+    crate::window::tab::set_tabbing_identifier(
+        window.app_handle(),
+        &label,
+        &crate::window::tab::tab_group_key(Some(&new_root.raw), &label),
+    );
 
     let coordinator = state.coordinator.clone();
     let app_handle = window.app_handle().clone();

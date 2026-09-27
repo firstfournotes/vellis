@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, tick, untrack } from 'svelte';
 	import Explorer from '../components/Explorer.svelte';
+	import FindInFolder from '../components/FindInFolder.svelte';
 	import GoToBar from '../components/GoToBar.svelte';
 	import Viewer from '../components/Viewer.svelte';
 	import HtmlViewer from '../components/HtmlViewer.svelte';
@@ -60,14 +61,25 @@
 		type DuplicateSnapshot
 	} from '$lib/duplicate-window';
 	import { openInNewWindow, openInNewWindowFailedMessage } from '$lib/open-in-new-window';
+	import { newTabFailedMessage, registerNewTabListener } from '$lib/new-tab';
 	import type { NewWindowAction } from '$lib/context-menu';
 	import { MENU_EDIT_EVENT } from '$lib/document-edit';
 	import { MENU_FIND_EVENT } from '$lib/find-in-document';
+	import { MENU_FIND_IN_FOLDER_EVENT, shouldShowFindInFolder } from '$lib/find-in-folder';
 	import { MENU_GO_TO_EVENT, revealPath } from '$lib/go-to-path';
+	import { SETTINGS_CHANGED_EVENT, reloadTree } from '$lib/settings';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { handleCloseRequested } from '$lib/close-window';
 	import { MENU_SAVE_EVENT, saveDocument } from '$lib/save-document';
-	import { DEFAULT_ZOOM, isZoomTarget, loadZoom, registerZoomListeners } from '$lib/zoom';
+	import { DEFAULT_ZOOM, isZoomTarget, loadZoom } from '$lib/zoom';
+	import {
+		loadExplorerZoom,
+		nextPointerRegion,
+		regionOf,
+		registerRoutedZoomListeners,
+		resolveZoomTarget,
+		type ZoomRegion
+	} from '$lib/zoom-target';
 	import { printFailedMessage, registerPrintListener } from '$lib/print-html';
 	import { videoViewMode } from '$lib/video-viewing';
 	import {
@@ -187,17 +199,50 @@
 			isZoomTarget(detectFileType(windowState.currentDocument.uri))
 	);
 
+	// --- Explorer zoom (要件#63) ------------------------------------------
+	// ツリーの倍率は本文とは別に持つ。表示中の倍率は窓(=タブ)ごとにこのページの
+	// メモリにあり、保存値(全窓共有)は onMount で1回だけ読む — 他の窓の書き込みは
+	// 追いかけない(契約7)。判別・振り分け・保存は `$lib/zoom-target` の持ち場。
+	let explorerZoomLevel = $state(DEFAULT_ZOOM);
+
+	// 最後にポインタが入った領域(契約3)。押した時点で読むだけなので $state にしない。
+	// 未確定(null)は本文側として扱われる。
+	let pointerRegion: ZoomRegion | null = null;
+
+	// Explorer が出ている画面か。履歴選択画面ではツリーが無いので本文側に倒す(契約3)。
+	let explorerShown = $derived(!rootPicker.open);
+
+	// ポインタが領域に入るたびに「最後の領域」を更新する。pointerover は要素に入った
+	// ときだけ発火するので pointermove より軽い。仕切り・ステータスバー・更新バナーは
+	// 目印が無い(null)ので直前を保つ。窓の外へ出ても pointerover は来ないので保たれる。
+	// 捕獲段階で聞くのは、途中の要素が伝播を止めても取りこぼさないため。
+	onMount(() => {
+		const trackPointer = (event: PointerEvent) => {
+			const hit = regionOf(event.target instanceof Element ? event.target : null);
+			pointerRegion = nextPointerRegion(pointerRegion, hit);
+		};
+		document.addEventListener('pointerover', trackPointer, true);
+		return () => document.removeEventListener('pointerover', trackPointer, true);
+	});
+
 	// メニュー起点のズーム。Rust 側はフォーカス中の窓へイベントを投げるだけで、
 	// 倍率を持つのも保存するのもこちら側(menu-open・duplicate-window と同じ分担)。
+	// 要件#63: 押した時点のポインタの領域で本文とツリーのどちらを動かすかを決める。
+	// 本文側の意味論は要件#36 のまま(非対象ビューアでは no-op・頭打ちなら書かない・
+	// 保存キー vellis.viewer-zoom)。本文側が非対象でもツリーへは回さない(契約4)。
 	// 購読の解除があるので await を挟まない専用の onMount に分けている。
 	onMount(() => {
 		zoomLevel = loadZoom();
+		explorerZoomLevel = loadExplorerZoom();
 		let unlisten: (() => void) | null = null;
 		let disposed = false;
-		void registerZoomListeners({
-			isTarget: () => zoomTarget,
-			getLevel: () => zoomLevel,
-			onChange: (level) => (zoomLevel = level)
+		void registerRoutedZoomListeners({
+			getTarget: () => resolveZoomTarget({ region: pointerRegion, explorerShown }),
+			isViewerZoomable: () => zoomTarget,
+			getViewerLevel: () => zoomLevel,
+			getExplorerLevel: () => explorerZoomLevel,
+			onViewerChange: (level) => (zoomLevel = level),
+			onExplorerChange: (level) => (explorerZoomLevel = level)
 		}).then((off) => {
 			if (disposed) off();
 			else unlisten = off;
@@ -228,11 +273,26 @@
 	 */
 	let findRequest = $state(0);
 
+	/**
+	 * `findRequest` と一緒に Viewer へ渡す語(要件#55 契約⑦)。フォルダ横断検索の
+	 * 結果から開いたときだけ入り、それ以外の前進(⌘F の回り道・文書の切り替え)では
+	 * 空に戻す=従来どおり語に触らない。
+	 */
+	let findInitialQuery = $state('');
+
+	/**
+	 * `findInitialQuery` と一緒に Viewer へ渡す番目(0 始まり・要件#55 追補b)。
+	 * 結果から開いたときだけクリックした一致の番目が入り、それ以外の前進では 0。
+	 */
+	let findInitialIndex = $state(0);
+
 	function handleMenuFind() {
 		if (windowState.editMode !== 'view') return;
 		const doc = windowState.currentDocument;
 		if (!doc || detectFileType(doc.uri) !== 'html') return;
 		htmlFindOpen = true;
+		findInitialQuery = '';
+		findInitialIndex = 0;
 		findRequest += 1;
 	}
 
@@ -252,11 +312,74 @@
 		untrack(() => {
 			if (uri && viewerFindOpen && detectFileType(uri) === 'html') {
 				htmlFindOpen = true;
+				findInitialQuery = '';
+				findInitialIndex = 0;
 				findRequest += 1;
 				return;
 			}
 			htmlFindOpen = false;
 			findRequest = 0;
+		});
+	});
+
+	// --- フォルダ横断検索(要件#55) ------------------------------------------
+	// 走査は Rust の `search_in_folder`、パネル(入力・結果・世代番号)は
+	// `FindInFolder.svelte`。ここが持つのは「いつパネルを出すか」(⌘⇧F・root の有無)と、
+	// 結果から文書を開いた後に**同じ語で要件#54 の検索を起動する**口だけ。
+	// パネルはウインドウ単位・揮発で、左ペインの Explorer と入れ替わる(Explorer は無改変)。
+
+	/** 左ペインに検索パネルを出しているか(false = Explorer)。 */
+	let findInFolderOpen = $state(false);
+
+	/** root が無い(履歴選択画面)ときは出さない。root が戻れば出ていた方が戻る。 */
+	let showFindInFolder = $derived(
+		findInFolderOpen && shouldShowFindInFolder(windowState.root, rootPicker.open)
+	);
+
+	/**
+	 * 結果から開いた文書で、レンダリングが済むのを待っている #54 の起動(契約⑦)。
+	 * Viewer は表示テキスト(`html`)が届くまで検索バーを出せないので、その文書の
+	 * レンダリング結果が揃ってから `findRequest` を進める。
+	 */
+	let pendingFolderFind = $state<{ uri: string; query: string; index: number } | null>(null);
+
+	async function handleMenuFindInFolder() {
+		if (!shouldShowFindInFolder(windowState.root, rootPicker.open)) return;
+		findInFolderOpen = true;
+		await tick();
+		document.querySelector<HTMLInputElement>('[data-testid="find-in-folder-input"]')?.focus();
+	}
+
+	function handleFolderResultOpened(uri: string, query: string, index: number) {
+		pendingFolderFind = { uri, query, index };
+	}
+
+	$effect(() => {
+		const pending = pendingFolderFind;
+		if (!pending) return;
+		const current = windowState.currentDocument?.uri;
+		const rendered = windowState.renderedUri;
+		untrack(() => {
+			// 待っている間に別の文書へ移った=この起動はもう要らない。
+			if (current !== pending.uri) {
+				pendingFolderFind = null;
+				return;
+			}
+			if (rendered !== pending.uri) return;
+			pendingFolderFind = null;
+			// 1 拍おく: 同じ文書を開き直したときは、上の「別の文書を開いた」effect が
+			// 同じ flush で `findRequest` を 0 へ戻す。同じ flush の中で進め直すと
+			// Viewer からは前進に見えないので、0 が届いた後で進める。
+			void tick().then(() => {
+				if (windowState.currentDocument?.uri !== pending.uri) return;
+				// html の閲覧中は Viewer が居ないので、⌘F と同じ回り道(複製面)へ切り替える。
+				if (windowState.editMode === 'view' && detectFileType(pending.uri) === 'html') {
+					htmlFindOpen = true;
+				}
+				findInitialQuery = pending.query;
+				findInitialIndex = pending.index;
+				findRequest += 1;
+			});
 		});
 	});
 
@@ -514,6 +637,10 @@
 			listen(MENU_GO_TO_EVENT, () => {
 				void handleMenuGoTo();
 			}),
+			// 要件#55 契約①: ⌘⇧F で左ペインに検索パネル。root が無ければ何もしない。
+			listen(MENU_FIND_IN_FOLDER_EVENT, () => {
+				void handleMenuFindInFolder();
+			}),
 		]).then((offs) => {
 			const off = () => offs.forEach((f) => f());
 			if (disposed) off();
@@ -537,6 +664,29 @@
 				if (disposed) off();
 				else unlisten = off;
 			});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
+	// 要件#65 契約7: Vellis で設定ファイル(除外リスト)を保存したら、Rust が全窓へ
+	// `settings_changed` を送る。除外の判定は Rust の一覧に当たっているので、root と
+	// 展開中のフォルダを `list_dir` で読み直して当て直すだけでツリーが変わる
+	// (当て方は監視の `directory_changed` と同じ=展開状態は保つ)。警告は Rust が出す。
+	// 購読の解除があるので await を挟まない専用の onMount に分けている。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void listen(SETTINGS_CHANGED_EVENT, () => {
+			void reloadTree(windowState.root, windowState.expandedDirs, {
+				listDir: (uri) => invoke<Entry[]>('list_dir', { uri }),
+				apply: (uri, entries) => windowState.applyDirectoryEvent(uri, entries)
+			});
+		}).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
 		return () => {
 			disposed = true;
 			unlisten?.();
@@ -772,6 +922,39 @@
 			disposed = true;
 			unlisten?.();
 		};
+	});
+
+	// 要件#62: File ▸ New Tab(Command + T)。複製と同じく、今の窓の root・展開は
+	// ここにしかないので集めて `$lib/new-tab` の実行列へ渡す(文書は引き継がない)。
+	// 履歴選択画面では currentSnapshot が root を null にするので何もしない。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void registerNewTabListener({
+			getSnapshot: currentSnapshot,
+			// 新しいタブが開くだけで、この窓(タブ)には何も反映しない。
+			onOpened: () => {},
+			onError: (err) => alert(newTabFailedMessage(err))
+		}).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
+	// 要件#62 契約8: タブの見出し=開いている文書のファイル名(無ければ root フォルダ名)。
+	// 文書を開く・閉じる・消えるたびに Rust へ伝え、NSWindow の tab.title を差し替える
+	// (窓タイトルは root 名のまま=要件#17)。$derived で値が変わったときだけ呼ぶ
+	// (同じ文書の再読み込みでは呼ばない)。失敗は見出しが古いままになるだけなので黙る。
+	const tabTitleRoot = $derived(rootPicker.open ? null : windowState.root || null);
+	const tabTitleDoc = $derived(windowState.currentDocument?.uri ?? null);
+	$effect(() => {
+		const root = tabTitleRoot;
+		const docUri = tabTitleDoc;
+		invoke('set_tab_title', { root, docUri }).catch(() => {});
 	});
 
 	onMount(async () => {
@@ -1036,14 +1219,30 @@
 				onPickFolder={pickFolderAndSetRoot}
 			/>
 		{:else}
-			<Explorer
-				root={windowState.root}
-				entries={windowState.entries}
-				selectedUri={windowState.selectedUri}
-				width={explorerWidth}
-				onDuplicateWindow={duplicateCurrentWindow}
-				onOpenInNewWindow={openPlanInNewWindow}
-			/>
+			{#if showFindInFolder}
+				<!--
+					要件#55 契約①: 検索パネルは Explorer と入れ替わる(Close で戻る)。幅は
+					Explorer と同じ `explorerWidth`(要件#9)を薄い枠で当て、仕切りもそのまま効く。
+				-->
+				<div class="find-in-folder-pane" style="width: {explorerWidth}px">
+					<FindInFolder
+						rootUri={windowState.root}
+						onOpen={handleFolderResultOpened}
+						onClose={() => (findInFolderOpen = false)}
+					/>
+				</div>
+			{:else}
+				<Explorer
+					root={windowState.root}
+					entries={windowState.entries}
+					selectedUri={windowState.selectedUri}
+					width={explorerWidth}
+					explorerZoom={explorerZoomLevel}
+					onDuplicateWindow={duplicateCurrentWindow}
+					onOpenInNewWindow={openPlanInNewWindow}
+					onFindInFolder={() => void handleMenuFindInFolder()}
+				/>
+			{/if}
 			<!--
 				Explorer と Viewer の仕切り(要件#9)。ドラッグ専用のハンドルで、
 				既定幅へ戻す手段(ダブルクリック等)は設けない。
@@ -1065,7 +1264,8 @@
 				ここに置くのは、文書が開いていなくても(EmptyState のときこそ)出るため。
 				ビューアとバーを縦に積むので、行の中では今までのビューアと同じ場所を占める。
 			-->
-			<div class="viewer-stack">
+			<!-- data-zoom-region=要件#63 契約3の領域の目印(Go to バーの上も本文側とみなす)。 -->
+			<div class="viewer-stack" data-zoom-region="viewer">
 				{#if goToOpen}
 					<GoToBar
 						onGo={(input) => void runGoTo(input)}
@@ -1193,6 +1393,8 @@
 								marksOpen={showMarks}
 								zoom={zoomTarget ? zoomLevel : DEFAULT_ZOOM}
 								{findRequest}
+								{findInitialQuery}
+								{findInitialIndex}
 								onFindOpenChange={handleFindOpenChange}
 								{goToOpen}
 							/>
@@ -1280,6 +1482,17 @@
 	 * ペインの仕切り(要件#9)。Explorer 側の border-right が見た目の線で、
 	 * この要素は掴みやすさのための当たり判定。掴んでいる間だけ色が付く。
 	 */
+	/* 検索パネルの枠(要件#55)。Explorer の `aside.explorer` と同じ置かれ方・見た目。 */
+	.find-in-folder-pane {
+		flex: 0 0 auto;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		border-right: 1px solid var(--color-border);
+		background-color: var(--color-bg-secondary);
+		overflow: hidden;
+	}
+
 	.pane-divider {
 		flex: 0 0 auto;
 		width: 5px;

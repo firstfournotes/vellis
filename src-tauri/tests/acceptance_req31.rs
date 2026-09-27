@@ -25,7 +25,8 @@
 //!   実装裁量(機械固定は list の分類のみ)。
 //!
 //! 判定範囲(本ファイル): list の symlink 分類(①)・壊れたリンクの温存(②)・
-//! 判定後 kind でのソート(③)・通常エントリと隠しファイルスキップの回帰ガード・
+//! 判定後 kind でのソート(③)・通常エントリの回帰ガード(隠しファイルは要件#65 で
+//! `list` が返すようになり、隠すのは除外の設定=2026-09-25 要件側更新)・
 //! stat の dir リンク(④の固定=現行でも通るはず)・循環リンク下でも list が
 //! 正常に返ること(⑥)。
 //! 契約外(機械判定しない): ⑤ ssh.rs 現状維持・⑦ フロント無変更 — reviewer 照合。
@@ -261,11 +262,13 @@ async fn list_keeps_real_entry_classification_and_order() {
     assert_eq!(find(&entries, "readme.md").kind, FileKind::File);
 }
 
-/// 回帰ガード: 隠しエントリ(ドット始まり)はスキップされる — リンクでも同じ。
-/// ドット始まりの壊れたリンクが listing 全体を失敗させないことも兼ねて固定する
-/// (隠し判定はリンク先を辿る前に効くべき)。
+/// 要件側更新(要件#65 契約2・11・2026-09-25): `list` は隠しエントリ(ドット始まり)も返す。
+/// 隠すのは除外の設定(`files.exclude` の既定 `**/.*`)の判定であって `list` ではない
+/// (固定は acceptance_req65.rs の AC-65-7 / AC-65-9 へ移った)。
+/// ドット始まりの壊れたリンクが listing 全体を失敗させないこと(契約②)はそのまま保ち、
+/// そのリンクは `Symlink` として一覧に残る。
 #[tokio::test]
-async fn list_still_skips_hidden_entries_including_symlinks() {
+async fn list_returns_hidden_entries_and_survives_hidden_broken_symlinks() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("root");
     fs::create_dir(&root).unwrap();
@@ -286,8 +289,19 @@ async fn list_still_skips_hidden_entries_including_symlinks() {
 
     assert_eq!(
         names_in_order(&entries),
-        vec!["visible.txt"],
-        "dot-prefixed entries (files and symlinks alike) must be skipped"
+        vec![".hidden-link", ".broken-link", ".hidden.md", "visible.txt"],
+        "dot-prefixed entries (files and symlinks alike) are listed; hiding is the exclude judgement (要件#65)"
+    );
+    assert_eq!(find(&entries, ".hidden.md").kind, FileKind::File);
+    assert_eq!(
+        find(&entries, ".hidden-link").kind,
+        FileKind::Dir,
+        "a hidden link to a directory resolves to Dir like any other link (契約①)"
+    );
+    assert_eq!(
+        find(&entries, ".broken-link").kind,
+        FileKind::Symlink,
+        "a hidden broken link stays FileKind::Symlink in the listing (契約②)"
     );
 }
 

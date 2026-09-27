@@ -10,6 +10,7 @@ use tracing;
 
 use crate::commands::root::RootPayload;
 use crate::commands::AppState;
+use crate::exclude::filter_tree_entries;
 use crate::fs::uri::Uri;
 use crate::ipc::protocol::{Request, Response};
 use crate::ipc::server::IpcCommand;
@@ -130,9 +131,17 @@ async fn handle_open_path(
         wm.register_window(label.clone(), args);
         label
     };
+    // Every window carries a tab group key from birth (requirements.md #62
+    // 契約2). Like `create_window`'s standalone windows it is the window's own
+    // no-root key, even for a directory URI, and `init_window` re-keys it to
+    // the root (追補c): with the root's key AppKit may tab it into a same-root
+    // window while it is still being built (full screen, "prefer tabs") and
+    // hang the app.
+    let tab_key = crate::window::tab::tab_group_key(None, &label);
 
     match WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
         .title(title)
+        .tabbing_identifier(&tab_key)
         // Match the default from `tauri.conf.json` (issue #16) so
         // IPC-spawned windows aren't smaller than first-launch ones.
         .inner_size(1280.0, 800.0)
@@ -192,6 +201,9 @@ async fn handle_switch_root(
             }
         }
     };
+    // Same as `set_root`: the tree never sees what the exclude settings hide
+    // (requirements.md #65 契約9).
+    let entries = filter_tree_entries(&new_root, &new_root, entries);
 
     let mut wm = state.window_manager.lock().await;
     let active_label = match wm.active_label() {
@@ -285,6 +297,13 @@ async fn handle_switch_root(
             );
         }
     }
+    // The tab group key follows the root (requirements.md #62 契約2・9): a
+    // tab whose root changed leaves a shared tab bar for a window of its own.
+    crate::window::tab::set_tabbing_identifier(
+        app,
+        &active_label,
+        &crate::window::tab::tab_group_key(Some(&new_root.raw), &active_label),
+    );
 
     // Emit `root_changed` event to the active window.
     // For IPC-originated root switches, we use events (not command return values).

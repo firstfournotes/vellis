@@ -59,6 +59,21 @@
  * 計画・実行列は open-in-new-window.acceptance.test.ts の持ち場。
  * 空白部メニュー(buildTreePaneMenu)は不変=duplicate-window 1項目のまま(契約#59⑧)。
  *
+ * ## 要件#62 追補(docs/requirements/req-62.md・2026-09-23 登録・契約3・12)
+ * 「Open in New Tab」をアイテムメニューの **Open With… の直後・Open in New Window の
+ * 直前**に追加する(id は 'open-in-new-tab'・ラベル 'Open in New Tab'・ファイルと symlink
+ * だけ・**フォルダには出さない**・ssh でも enabled=アプリの中で完結する=契約#59⑥と同じ理由)。
+ * 本要件により #19/#21/#34/#59 の項目数固定(ファイル/symlink 6項目)は
+ * ファイル/symlink 7項目へ**要件側更新**(承認済み=契約12)。フォルダは4項目のまま。
+ * 更新するのは**ファイル・symlink の項目数・順序・ラベル・ssh の enabled の列挙だけ**。
+ * 既存項目の enabled の出し分け・planContextAction の既存の対応・pathForCopy /
+ * pathForReveal / clampMenuPosition / capability の各テストは無改変。
+ * `planContextAction('open-in-new-tab', file)` → `{ command: 'new-tab', path: <その URI> }`
+ * (AC-62-12)は本ファイル末尾の「要件#62」describe に足す。実行列(planNewTab →
+ * invoke('new_tab'))は new-tab.acceptance.test.ts の持ち場。
+ * 下の「意味論」1・3・5・6 の「6項目」は本追補により7項目と読み替える(過去の記述は
+ * 書き換えない=本追補が正)。
+ *
  * ## 確定契約(公開 API・implementer はこれに従う)
  *
  * ```ts
@@ -213,12 +228,13 @@ const sshDir: ContextMenuEntry = {
 // ---------------------------------------------------------------------------
 
 describe('buildContextMenu — local アイテムの項目構成', () => {
-	test('local ファイル → reveal・open・open-with・open-in-new-window・copy-path・duplicate-window の6項目・この順・すべて有効', () => {
+	test('local ファイル → reveal・open・open-with・open-in-new-tab・open-in-new-window・copy-path・duplicate-window の7項目・この順・すべて有効', () => {
 		const items = buildContextMenu(localFile);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-tab',
 			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
@@ -237,24 +253,26 @@ describe('buildContextMenu — local アイテムの項目構成', () => {
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('ラベル文言は英語の推奨文言(要件#35①・#59①=local ファイルの6項目)', () => {
+	test('ラベル文言は英語の推奨文言(要件#35①・#59①・#62=local ファイルの7項目)', () => {
 		const labels = buildContextMenu(localFile).map((i) => i.label);
 		expect(labels).toEqual([
 			'Reveal in Finder',
 			'Open with Default App',
 			'Open With…',
+			'Open in New Tab',
 			'Open in New Window',
 			'Copy Path',
 			'Duplicate Window',
 		]);
 	});
 
-	test('symlink はファイルと同じ6項目に固定(実装裁量の確定=一貫性)', () => {
+	test('symlink はファイルと同じ7項目に固定(実装裁量の確定=一貫性)', () => {
 		const items = buildContextMenu(localSymlink);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-tab',
 			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
@@ -264,17 +282,18 @@ describe('buildContextMenu — local アイテムの項目構成', () => {
 });
 
 describe('buildContextMenu — ssh リモートは reveal / open をグレーアウト(契約⑤)', () => {
-	test('ssh ファイル → 6項目とも出すが reveal / open / open-with は disabled・open-in-new-window / copy-path / duplicate-window は有効', () => {
+	test('ssh ファイル → 7項目とも出すが reveal / open / open-with は disabled・open-in-new-tab / open-in-new-window / copy-path / duplicate-window は有効', () => {
 		const items = buildContextMenu(sshFile);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-tab',
 			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
 		]);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true, true]);
 	});
 
 	test('ssh フォルダ → reveal(disabled)+open-in-new-window・copy-path・duplicate-window(有効)の4項目', () => {
@@ -288,17 +307,18 @@ describe('buildContextMenu — ssh リモートは reveal / open をグレーア
 		expect(items.map((i) => i.enabled)).toEqual([false, true, true, true]);
 	});
 
-	test('ssh symlink もファイル同等(6項目・reveal / open / open-with disabled)=一貫性', () => {
+	test('ssh symlink もファイル同等(7項目・reveal / open / open-with disabled)=一貫性', () => {
 		const items = buildContextMenu({ ...sshFile, kind: 'symlink' });
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
+			'open-in-new-tab',
 			'open-in-new-window',
 			'copy-path',
 			'duplicate-window',
 		]);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true, true]);
 	});
 
 	test('判別は URI スキーム(user なし・ポートなしの ssh URI でも disabled)', () => {
@@ -307,7 +327,7 @@ describe('buildContextMenu — ssh リモートは reveal / open をグレーア
 			name: 'plan.md',
 			kind: 'file',
 		});
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true, true]);
 	});
 });
 
@@ -539,6 +559,85 @@ describe('要件#34: planContextAction(duplicate-window)— entry 非依存の�
 		});
 		expect(planContextAction('duplicate-window', sshDir)).toEqual({
 			command: 'duplicate-window',
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#62 — 「Open in New Tab」(位置・出し分け・計画=AC-62-12・契約3・12)
+// ---------------------------------------------------------------------------
+
+describe('要件#62 AC-62-12: buildContextMenu — "Open in New Tab" はファイル・symlink にちょうど1つ・Open With… の直後・Open in New Window の直前', () => {
+	const newTabIndex = (entry: ContextMenuEntry) =>
+		buildContextMenu(entry).findIndex((i) => i.id === 'open-in-new-tab');
+
+	test('local ファイル: open-with の直後・open-in-new-window の直前に1つ・ラベル "Open in New Tab"・enabled', () => {
+		const items = buildContextMenu(localFile);
+		const idx = items.findIndex((i) => i.id === 'open-in-new-tab');
+		expect(items.filter((i) => i.id === 'open-in-new-tab')).toHaveLength(1);
+		expect(items[idx - 1]?.id).toBe('open-with');
+		expect(items[idx + 1]?.id).toBe('open-in-new-window');
+		expect(items[idx]).toEqual({ id: 'open-in-new-tab', label: 'Open in New Tab', enabled: true });
+	});
+
+	test('symlink もファイルと同じ位置に1つ', () => {
+		const items = buildContextMenu(localSymlink);
+		const idx = items.findIndex((i) => i.id === 'open-in-new-tab');
+		expect(items.filter((i) => i.id === 'open-in-new-tab')).toHaveLength(1);
+		expect(items[idx - 1]?.id).toBe('open-with');
+		expect(items[idx + 1]?.id).toBe('open-in-new-window');
+	});
+
+	test('フォルダには出さない(local / ssh とも4項目のまま)', () => {
+		expect(newTabIndex(localDir)).toBe(-1);
+		expect(newTabIndex(sshDir)).toBe(-1);
+		expect(buildContextMenu(localDir)).toHaveLength(4);
+		expect(buildContextMenu(sshDir)).toHaveLength(4);
+	});
+
+	test('ssh のファイル / symlink でも enabled: true(アプリの中で完結する=契約#59⑥と同じ理由)', () => {
+		const fromFile = buildContextMenu(sshFile).find((i) => i.id === 'open-in-new-tab');
+		const fromSymlink = buildContextMenu({ ...sshFile, kind: 'symlink' }).find(
+			(i) => i.id === 'open-in-new-tab'
+		);
+		expect(fromFile).toEqual({ id: 'open-in-new-tab', label: 'Open in New Tab', enabled: true });
+		expect(fromSymlink).toEqual({ id: 'open-in-new-tab', label: 'Open in New Tab', enabled: true });
+	});
+
+	test('空白部メニュー(buildTreePaneMenu)には出ない(不変)', () => {
+		expect(buildTreePaneMenu().some((i) => i.id === 'open-in-new-tab')).toBe(false);
+	});
+});
+
+describe("要件#62 AC-62-12: planContextAction('open-in-new-tab', file) → { command: 'new-tab', path: <その URI> }", () => {
+	test('local ファイル → URI のまま(正規化しない)', () => {
+		expect(planContextAction('open-in-new-tab', localFile)).toEqual({
+			command: 'new-tab',
+			path: 'file:///Users/x/notes/plan.md',
+		});
+	});
+
+	test('symlink もファイルと同じ計画', () => {
+		expect(planContextAction('open-in-new-tab', localSymlink)).toEqual({
+			command: 'new-tab',
+			path: 'file:///Users/x/notes/link',
+		});
+	});
+
+	test('パーセントエンコードされたファイルも URI のまま(復号しない=new_tab へは URI で渡す)', () => {
+		expect(
+			planContextAction('open-in-new-tab', {
+				uri: 'file:///Users/x/My%20Docs/read%20me.md',
+				name: 'read me.md',
+				kind: 'file',
+			})
+		).toEqual({ command: 'new-tab', path: 'file:///Users/x/My%20Docs/read%20me.md' });
+	});
+
+	test('ssh ファイルでも null にしない(ssh でも有効=enabled と対になる)', () => {
+		expect(planContextAction('open-in-new-tab', sshFile)).toEqual({
+			command: 'new-tab',
+			path: 'ssh://alice@host:22/srv/notes/plan.md',
 		});
 	});
 });

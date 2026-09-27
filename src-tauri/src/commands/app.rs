@@ -3,6 +3,7 @@
 use serde::Serialize;
 use tauri::{Manager, Window};
 
+use crate::exclude::filter_tree_entries;
 use crate::fs::entry::Entry;
 use crate::fs::uri::Uri;
 use crate::watch::hub::WindowId;
@@ -83,9 +84,11 @@ pub async fn init_window(
 
     let root_uri = Uri::parse(&root_uri_str).map_err(|e| e.to_string())?;
 
-    // List entries in the root directory.
+    // List entries in the root directory, minus what the exclude settings
+    // hide from the tree (requirements.md #65 契約9).
     let provider = state.fs_registry.resolve(&root_uri).map_err(|e| e.to_string())?;
     let entries = provider.list(&root_uri).await.map_err(|e| e.to_string())?;
+    let entries = filter_tree_entries(&root_uri, &root_uri, entries);
 
     // Store the resolved root URI before we await the coordinator, so
     // we don't hold the WindowManager mutex across an unrelated await
@@ -118,6 +121,18 @@ pub async fn init_window(
             e
         );
     }
+    // Key the window's tab group by the same root (requirements.md #62
+    // 契約2): the first window starts as `vellis-noroot:main` and a window
+    // opened on a file has no root until here. While the history picker is
+    // up the window keeps a key of its own, so it merges with nobody.
+    crate::window::tab::set_tabbing_identifier(
+        window.app_handle(),
+        &label,
+        &crate::window::tab::tab_group_key(
+            (!needs_root_selection).then_some(root_uri.raw.as_str()),
+            &label,
+        ),
+    );
 
     // Subscribe to directory changes for the new root so the Explorer
     // auto-refreshes when files / folders are added, removed or

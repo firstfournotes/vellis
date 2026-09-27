@@ -11,6 +11,18 @@ pub const INSTALL_CLI_ITEM_ID: &str = "install-cli";
 /// Stable identifier for the "Toggle Developer Tools" menu item.
 pub const TOGGLE_DEVTOOLS_ITEM_ID: &str = "toggle-devtools";
 
+/// Stable identifier for the App menu's "Settings…" item (requirements.md #65
+/// 契約6).
+pub const SETTINGS_ITEM_ID: &str = "settings";
+
+/// Accelerator for the Settings… item (requirements.md #65 契約6): Command + ,
+/// — the key every macOS app uses for its settings.
+///
+/// A constant for the same reason as `FIND_ACCELERATOR`: tauri drops an
+/// unparseable accelerator silently, so the test and the menu read the same
+/// literal.
+pub const SETTINGS_ACCELERATOR: &str = "CmdOrCtrl+,";
+
 /// Stable identifier for the "Print…" menu item (issue #24).
 pub const PRINT_ITEM_ID: &str = "print";
 
@@ -69,6 +81,26 @@ pub const MENU_FIND_EVENT: &str = "menu_find";
 /// read the same literal.
 pub const FIND_ACCELERATOR: &str = "CmdOrCtrl+F";
 
+/// Stable identifier for the Edit menu's "Find in Folder…" item
+/// (requirements.md #55 契約①).
+pub const FIND_IN_FOLDER_ITEM_ID: &str = "find-in-folder";
+
+/// Event emitted to the focused window when "Find in Folder…" is clicked
+/// (requirements.md #55 契約①).
+///
+/// Same division of labour as Find…: the menu only reports the gesture. Which
+/// root is open (or whether any is — the history picker ignores it) and the
+/// search panel itself live in the frontend (`src/lib/find-in-folder.ts`).
+/// Name must stay in sync with `MENU_FIND_IN_FOLDER_EVENT` there.
+pub const MENU_FIND_IN_FOLDER_EVENT: &str = "menu_find_in_folder";
+
+/// Accelerator for the Find in Folder… item (requirements.md #55 契約①).
+///
+/// A constant for the same reason as `FIND_ACCELERATOR`: tauri drops an
+/// unparseable accelerator silently, so the test and the menu read the same
+/// literal.
+pub const FIND_IN_FOLDER_ACCELERATOR: &str = "CmdOrCtrl+Shift+F";
+
 /// Accelerator for the Save item (requirements.md #48 契約⑤).
 ///
 /// Spelled out as a constant for the same reason the zoom ones are: tauri
@@ -78,6 +110,55 @@ pub const SAVE_ACCELERATOR: &str = "CmdOrCtrl+S";
 
 /// Stable identifier for the "New Window" menu item (requirements.md #12).
 pub const NEW_WINDOW_ITEM_ID: &str = "new-window";
+
+/// Stable identifier for the "New Tab" menu item (requirements.md #62 契約3).
+pub const NEW_TAB_ITEM_ID: &str = "new-tab";
+
+/// Event emitted to the focused window when "New Tab" is clicked
+/// (requirements.md #62 契約3・4).
+///
+/// Same shape and same reason as Duplicate Window: the new tab starts from this
+/// window's root and expanded directories, which only the window knows, so the
+/// window collects them and calls `new_tab` (`src/lib/new-tab.ts`). Name must
+/// stay in sync with `MENU_NEW_TAB_EVENT` there. A window with no root (the
+/// history picker) ignores it — there is nothing to open a tab on.
+pub const MENU_NEW_TAB_EVENT: &str = "menu_new_tab";
+
+/// Accelerator for the New Tab item (requirements.md #62 契約3). Spelled out as
+/// a constant for the same reason the zoom ones are: tauri drops an
+/// unparseable accelerator silently, so the test and the menu read the same
+/// literal.
+pub const NEW_TAB_ACCELERATOR: &str = "CmdOrCtrl+T";
+
+/// Stable identifiers for the Window menu's "Show Previous Tab" / "Show Next
+/// Tab" items (requirements.md #62 契約7).
+pub const PREVIOUS_TAB_ITEM_ID: &str = "previous-tab";
+pub const NEXT_TAB_ITEM_ID: &str = "next-tab";
+
+/// Accelerators for Show Previous / Next Tab: Shift+Command+[ and
+/// Shift+Command+], the keys Safari, Terminal and Xcode use (requirements.md
+/// #62 起案時判断 (g)). AppKit's own Control+Tab / Control+Shift+Tab keep
+/// working next to them.
+pub const PREVIOUS_TAB_ACCELERATOR: &str = "CmdOrCtrl+Shift+[";
+pub const NEXT_TAB_ACCELERATOR: &str = "CmdOrCtrl+Shift+]";
+
+/// Stable identifiers for the tab items AppKit adds on its own only to a nib
+/// menu, never to one built in code like this one (requirements.md #62
+/// 追補b): View ▸ Show Tab Bar / Show All Tabs and Window ▸ Move Tab to New
+/// Window / Merge All Windows.
+pub const SHOW_TAB_BAR_ITEM_ID: &str = "show-tab-bar";
+pub const SHOW_ALL_TABS_ITEM_ID: &str = "show-all-tabs";
+pub const MOVE_TAB_TO_NEW_WINDOW_ITEM_ID: &str = "move-tab-to-new-window";
+pub const MERGE_ALL_WINDOWS_ITEM_ID: &str = "merge-all-windows";
+
+/// Accelerators for Show Tab Bar (Shift+Command+T) and Show All Tabs
+/// (Shift+Command+Backslash), AppKit's own keys (requirements.md #62 追補b).
+/// Backslash is spelled out by name: an escaped backslash would parse too,
+/// but the accelerator collision scan of `acceptance_req60.rs` reads the
+/// literal without unescaping it and would miss it. Move Tab to New Window and Merge All
+/// Windows have no key, as in AppKit.
+pub const SHOW_TAB_BAR_ACCELERATOR: &str = "CmdOrCtrl+Shift+T";
+pub const SHOW_ALL_TABS_ACCELERATOR: &str = "CmdOrCtrl+Shift+Backslash";
 
 /// Stable identifier for the "Duplicate Window" menu item (requirements.md #34).
 pub const DUPLICATE_WINDOW_ITEM_ID: &str = "duplicate-window";
@@ -194,6 +275,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .website_label(Some("GitHub".to_string()))
         .build();
     let about = PredefinedMenuItem::about(app, Some("About Vellis"), Some(about_metadata))?;
+    // Settings… sits right under About, after its separator — where macOS apps
+    // put it (requirements.md #65 契約6).
+    let settings_item = MenuItem::with_id(
+        app,
+        SETTINGS_ITEM_ID,
+        "Settings…",
+        true,
+        Some(SETTINGS_ACCELERATOR),
+    )?;
     let install_cli = MenuItem::with_id(
         app,
         INSTALL_CLI_ITEM_ID,
@@ -216,6 +306,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         &[
             &about,
             &sep1,
+            &settings_item,
             &install_cli,
             &sep2,
             &hide,
@@ -237,6 +328,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         "New Window",
         true,
         Some("CmdOrCtrl+N"),
+    )?;
+    // New Tab sits between New Window and Duplicate Window (requirements.md #62
+    // 契約3), the way Safari lines up its "new" items.
+    let new_tab_item = MenuItem::with_id(
+        app,
+        NEW_TAB_ITEM_ID,
+        "New Tab",
+        true,
+        Some(NEW_TAB_ACCELERATOR),
     )?;
     // Duplicate Window sits right after New Window (requirements.md #34): the
     // two are the same gesture, one starting empty and one starting from what
@@ -283,6 +383,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         &[
             &new_window_item,
+            &new_tab_item,
             &duplicate_window_item,
             &new_window_sep,
             &open_file_item,
@@ -322,6 +423,16 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // knows whether what it displays has any text to search, so a PDF or an
     // image window simply ignores the event.
     let find_item = MenuItem::with_id(app, FIND_ITEM_ID, "Find…", true, Some(FIND_ACCELERATOR))?;
+    // フォルダ横断検索 (requirements.md #55 契約①). Directly after Find…, the
+    // in-document search it builds on. Enabled unconditionally: a window with no
+    // root open (the history picker) simply ignores the event.
+    let find_in_folder_item = MenuItem::with_id(
+        app,
+        FIND_IN_FOLDER_ITEM_ID,
+        "Find in Folder…",
+        true,
+        Some(FIND_IN_FOLDER_ACCELERATOR),
+    )?;
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
@@ -337,17 +448,63 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &edit_mode_sep,
             &edit_mode_item,
             &find_item,
+            &find_in_folder_item,
         ],
     )?;
 
     let minimize = PredefinedMenuItem::minimize(app, None)?;
     let close = PredefinedMenuItem::close_window(app, None)?;
+    // Tab switching (requirements.md #62 契約7). A tab is a window, and Close
+    // Window already closes just that tab; these two move between the tabs of
+    // the front window. Enabled unconditionally: a window without tabs simply
+    // has nowhere to move.
+    let tab_sep = PredefinedMenuItem::separator(app)?;
+    let previous_tab_item = MenuItem::with_id(
+        app,
+        PREVIOUS_TAB_ITEM_ID,
+        "Show Previous Tab",
+        true,
+        Some(PREVIOUS_TAB_ACCELERATOR),
+    )?;
+    let next_tab_item = MenuItem::with_id(
+        app,
+        NEXT_TAB_ITEM_ID,
+        "Show Next Tab",
+        true,
+        Some(NEXT_TAB_ACCELERATOR),
+    )?;
+    // Moving a tab out and merging windows back (requirements.md #62 追補b),
+    // right after the tab switching, where AppKit's own menu has them. Merge
+    // All Windows only merges windows with the same tab group key, i.e. the
+    // same root (契約6).
+    let move_tab_to_new_window_item = MenuItem::with_id(
+        app,
+        MOVE_TAB_TO_NEW_WINDOW_ITEM_ID,
+        "Move Tab to New Window",
+        true,
+        None::<&str>,
+    )?;
+    let merge_all_windows_item = MenuItem::with_id(
+        app,
+        MERGE_ALL_WINDOWS_ITEM_ID,
+        "Merge All Windows",
+        true,
+        None::<&str>,
+    )?;
     let window_menu = Submenu::with_id_and_items(
         app,
         WINDOW_MENU_ID,
         "Window",
         true,
-        &[&minimize, &close],
+        &[
+            &minimize,
+            &close,
+            &tab_sep,
+            &previous_tab_item,
+            &next_tab_item,
+            &move_tab_to_new_window_item,
+            &merge_all_windows_item,
+        ],
     )?;
 
     // View menu — the zoom items (requirements.md #36) sit at the top, the way
@@ -355,6 +512,26 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // bottom behind a separator. All three are enabled unconditionally
     // (contract ⑧): the menu does not know which viewer is on screen, and a
     // non-text viewer simply ignores the event.
+    //
+    // Above them, Show Tab Bar and Show All Tabs (requirements.md #62 追補b),
+    // where AppKit's own View menu has them. A window with a single tab shows
+    // no tab bar, so Show Tab Bar is what lets another window be dragged into
+    // it. The title stays "Show Tab Bar" even while the bar is shown.
+    let show_tab_bar_item = MenuItem::with_id(
+        app,
+        SHOW_TAB_BAR_ITEM_ID,
+        "Show Tab Bar",
+        true,
+        Some(SHOW_TAB_BAR_ACCELERATOR),
+    )?;
+    let show_all_tabs_item = MenuItem::with_id(
+        app,
+        SHOW_ALL_TABS_ITEM_ID,
+        "Show All Tabs",
+        true,
+        Some(SHOW_ALL_TABS_ACCELERATOR),
+    )?;
+    let view_tab_sep = PredefinedMenuItem::separator(app)?;
     let zoom_in_item = MenuItem::with_id(
         app,
         ZOOM_IN_ITEM_ID,
@@ -389,6 +566,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         "View",
         true,
         &[
+            &show_tab_bar_item,
+            &show_all_tabs_item,
+            &view_tab_sep,
             &zoom_in_item,
             &zoom_out_item,
             &actual_size_item,
@@ -538,10 +718,81 @@ pub fn handle_menu_open_click(app: &AppHandle<Wry>, event: &str) {
 pub fn handle_new_window_click(app: &AppHandle<Wry>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::commands::window::create_window(&app, None, None, Vec::new()).await {
+        if let Err(e) = crate::commands::window::create_window(
+            &app,
+            None,
+            None,
+            Vec::new(),
+            crate::window::tab::WindowKind::Standalone,
+        )
+        .await
+        {
             tracing::warn!("failed to open a new window from the menu: {}", e);
         }
     });
+}
+
+/// Handle the App menu's "Settings…" click (requirements.md #65 契約6).
+///
+/// Everything stays in Rust: when `settings.json` is missing it is written with
+/// the defaults first (an existing file — even a broken one — is left as it
+/// is), then a new window opens with the settings folder as its root and the
+/// file as its document, built the same way as File ▸ New Window. The file is
+/// JSON, i.e. text, so it is edited and saved with the editor of
+/// requirements.md #48. Failures are logged: the menu has nowhere to return an
+/// error to.
+pub fn handle_settings_click(app: &AppHandle<Wry>) {
+    let Some(path) = crate::settings::default_settings_path() else {
+        tracing::warn!("Settings…: no home directory to keep the settings file in");
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::settings::ensure_settings_file(&path) {
+            tracing::warn!("Settings…: could not create {}: {}", path.display(), e);
+            return;
+        }
+        let Some(folder) = path.parent() else {
+            tracing::warn!("Settings…: {} has no parent folder", path.display());
+            return;
+        };
+        let document = format!("file://{}", path.display());
+        let root = format!("file://{}", folder.display());
+        if let Err(e) = crate::commands::window::create_window(
+            &app,
+            Some(document),
+            Some(root),
+            Vec::new(),
+            crate::window::tab::WindowKind::Standalone,
+        )
+        .await
+        {
+            tracing::warn!("Settings…: failed to open the settings window: {}", e);
+        }
+    });
+}
+
+/// Handle Show Previous Tab / Show Next Tab (requirements.md #62 契約7) — move
+/// to the neighbouring tab of the front window.
+///
+/// Unlike New Tab this never reaches the frontend: which tab comes next is
+/// AppKit's knowledge, not the window's, so the front `NSWindow` is sent
+/// `selectPreviousTab:` / `selectNextTab:` directly.
+pub fn handle_select_tab_click(app: &AppHandle<Wry>, direction: crate::window::tab::TabDirection) {
+    let Some(window) = focused_or_first_window(app) else {
+        return;
+    };
+    crate::window::tab::select_adjacent_tab(app, window.label(), direction);
+}
+
+/// Handle View ▸ Show Tab Bar / Show All Tabs and Window ▸ Move Tab to New
+/// Window / Merge All Windows (requirements.md #62 追補b). Same route as Show
+/// Previous / Next Tab: the front `NSWindow` is sent AppKit's own action.
+pub fn handle_tab_menu_click(app: &AppHandle<Wry>, action: crate::window::tab::TabMenuAction) {
+    let Some(window) = focused_or_first_window(app) else {
+        return;
+    };
+    crate::window::tab::perform_tab_menu_action(app, window.label(), action);
 }
 
 /// Handle the "Toggle Developer Tools" menu click — opens or closes the

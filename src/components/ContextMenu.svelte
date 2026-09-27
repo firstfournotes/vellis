@@ -22,7 +22,8 @@
 
 	let {
 		onDuplicateWindow,
-		onOpenInNewWindow
+		onOpenInNewWindow,
+		onOpenInNewTab
 	}: {
 		/**
 		 * 「ウィンドウを複製」(要件#34)。中身(root・文書・展開)を知っているのは
@@ -35,6 +36,12 @@
 		 * `new_window` の呼び出しと失敗の通知はページ側 — 複製とまったく同じ分担。
 		 */
 		onOpenInNewWindow: (plan: NewWindowAction) => void;
+		/**
+		 * 「Open in New Tab」(要件#62)。受け取るのはファイルの URI だけで、root と
+		 * 展開を足して `new_tab` を呼ぶのは Explorer 側 — ツリーの Command + クリックと
+		 * 同じ関数を通る。省略時は何もしない(メニュー単体のマウント用)。
+		 */
+		onOpenInNewTab?: (path: string) => void;
 	} = $props();
 
 	let el = $state<HTMLDivElement | null>(null);
@@ -84,6 +91,8 @@
 				onDuplicateWindow();
 			} else if (action.command === 'new-window') {
 				onOpenInNewWindow(action);
+			} else if (action.command === 'new-tab') {
+				onOpenInNewTab?.(action.path);
 			} else if (action.command === 'reveal_item_in_dir') {
 				await revealItemInDir(action.path);
 			} else if (action.command === 'open_path') {

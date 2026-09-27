@@ -1,6 +1,6 @@
 [package]
 name = "vellis"
-version = "0.3.1"
+version = "0.4.0"
 description = "A desktop viewer and text editor for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"
@@ -65,6 +65,26 @@ toml = "1.1.2"
 # Upstream: https://github.com/Choochmeque/tauri-plugin-webdriver
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 tauri-plugin-window-state = "2"
+
+# macOS window tabs (requirements.md #62). Tauri only exposes the tab group key
+# at window creation (`tabbing_identifier`); re-keying a window, adding one as a
+# tab of another, the tab's own title and Show Previous / Next Tab are sent to
+# the NSWindow behind `ns_window()` instead. All three crates are already in the
+# tree via tao / wry (same versions), so this only declares the direct use — the
+# same arrangement as `percent-encoding` and `muda`. `default-features = false`
+# on the AppKit / Foundation bindings keeps the feature set to what is named
+# here, so no optional dependency enters Cargo.lock.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSResponder",
+    "NSWindow",
+    "NSWindowTab",
+    "NSWindowTabGroup",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
 
 [features]
 default = ["provider-ssh"]
