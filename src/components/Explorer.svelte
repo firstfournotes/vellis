@@ -196,10 +196,11 @@
 
 	.explorer-header {
 		padding: 6px 8px 6px 12px;
-		font-size: 11px;
-		font-weight: 600;
+		/* 要件#64 追補b: 文字は下の区画の見出しと同じトークン(theme.css)。 */
+		font-size: var(--pane-header-font-size);
+		font-weight: var(--pane-header-font-weight);
 		text-transform: uppercase;
-		letter-spacing: 0.05em;
+		letter-spacing: var(--pane-header-letter-spacing);
 		color: var(--color-text-secondary);
 		border-bottom: 1px solid var(--color-border);
 		flex-shrink: 0;

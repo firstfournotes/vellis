@@ -1,9 +1,13 @@
 //! Native macOS menu bar for the Vellis app.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::cli_install::InstallCliResult;
+use crate::update_check::ManualCheckOutcome;
 use tauri::menu::{AboutMetadataBuilder, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, Wry};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_opener::OpenerExt;
 
 /// Stable identifier for the "Install 'vellis' Command in PATH" menu item.
 pub const INSTALL_CLI_ITEM_ID: &str = "install-cli";
@@ -14,6 +18,10 @@ pub const TOGGLE_DEVTOOLS_ITEM_ID: &str = "toggle-devtools";
 /// Stable identifier for the App menu's "Settings…" item (requirements.md #65
 /// 契約6).
 pub const SETTINGS_ITEM_ID: &str = "settings";
+
+/// Stable identifier for the App menu's "Check for Updates…" item
+/// (requirements.md #67 契約6). No accelerator, as is usual on macOS.
+pub const CHECK_FOR_UPDATES_ITEM_ID: &str = "check-for-updates";
 
 /// Accelerator for the Settings… item (requirements.md #65 契約6): Command + ,
 /// — the key every macOS app uses for its settings.
@@ -192,6 +200,27 @@ pub const MENU_GO_TO_EVENT: &str = "menu_go_to";
 /// accelerator silently, so the test and the menu read the same literal.
 pub const GO_TO_ACCELERATOR: &str = "CmdOrCtrl+Shift+G";
 
+/// Stable identifier for the Go menu's "Recent Files" item (requirements.md #64
+/// 契約5).
+pub const RECENT_FILES_ITEM_ID: &str = "recent-files";
+
+/// Event emitted to the focused window when "Recent Files" is clicked
+/// (requirements.md #64 契約5).
+///
+/// Same division of labour as Go to Path…: the menu only reports the gesture.
+/// The Recent Files section lives at the bottom of the window's Explorer, and
+/// whether there is one (a root, no history picker), whether the search panel
+/// has to make way for it and which row gets the focus are all the window's to
+/// decide (`src/lib/recent-files.ts`). Name must stay in sync with
+/// `MENU_RECENT_FILES_EVENT` there. No payload.
+pub const MENU_RECENT_FILES_EVENT: &str = "menu_recent_files";
+
+/// Accelerator for the Recent Files item (requirements.md #64 契約5): Command +
+/// Shift + R — R for "Recent". A constant for the same reason as
+/// `GO_TO_ACCELERATOR`: tauri drops an unparseable accelerator silently, so the
+/// test and the menu read the same literal.
+pub const RECENT_FILES_ACCELERATOR: &str = "CmdOrCtrl+Shift+R";
+
 /// Events emitted to the focused window when the Open items are clicked.
 ///
 /// The dialog, the root derivation and the command sequence all live in the
@@ -275,6 +304,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .website_label(Some("GitHub".to_string()))
         .build();
     let about = PredefinedMenuItem::about(app, Some("About Vellis"), Some(about_metadata))?;
+    // Check for Updates… sits right under About, above the first separator —
+    // the usual place in macOS apps (requirements.md #67 契約6).
+    let check_for_updates_item = MenuItem::with_id(
+        app,
+        CHECK_FOR_UPDATES_ITEM_ID,
+        "Check for Updates…",
+        true,
+        None::<&str>,
+    )?;
     // Settings… sits right under About, after its separator — where macOS apps
     // put it (requirements.md #65 契約6).
     let settings_item = MenuItem::with_id(
@@ -305,6 +343,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         &[
             &about,
+            &check_for_updates_item,
             &sep1,
             &settings_item,
             &install_cli,
@@ -586,7 +625,16 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // the history picker ignores the event.
     let go_to_item =
         MenuItem::with_id(app, GO_TO_ITEM_ID, "Go to Path…", true, Some(GO_TO_ACCELERATOR))?;
-    let go_menu = Submenu::with_items(app, "Go", true, &[&go_to_item])?;
+    // Recent Files sits right under Go to Path… (requirements.md #64 契約5). No
+    // ellipsis: it opens the Explorer's Recent Files section, not a dialog.
+    let recent_files_item = MenuItem::with_id(
+        app,
+        RECENT_FILES_ITEM_ID,
+        "Recent Files",
+        true,
+        Some(RECENT_FILES_ACCELERATOR),
+    )?;
+    let go_menu = Submenu::with_items(app, "Go", true, &[&go_to_item, &recent_files_item])?;
 
     Menu::with_items(
         app,
@@ -835,6 +883,72 @@ pub fn install_cli_success_body(result: &InstallCliResult) -> String {
 /// 失敗ダイアログの本文(要件#35 ③)。`install_cli()` の Err をそのまま挟む。
 pub fn install_cli_failure_body(err: &str) -> String {
     format!("Failed to install the CLI:\n{}", err)
+}
+
+/// Set while a Check for Updates… is in flight, from the click until its
+/// dialog is dismissed (requirements.md #67 契約10).
+static CHECK_FOR_UPDATES_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Clears [`CHECK_FOR_UPDATES_IN_FLIGHT`] when dropped, so every path out of
+/// the check — including one that never reaches the dialog — releases it.
+struct CheckForUpdatesInFlight;
+
+impl Drop for CheckForUpdatesInFlight {
+    fn drop(&mut self) {
+        CHECK_FOR_UPDATES_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// Handle the App menu's "Check for Updates…" click (requirements.md #67
+/// 契約7・8・10): check right away and always answer with a native dialog —
+/// Download / Later when a newer release exists, otherwise a single OK.
+///
+/// A click while a check (or its dialog) is still up is ignored, so a
+/// double press never sends a second request or stacks a second dialog.
+/// `show` (not `blocking_show`) keeps an async-runtime worker from being
+/// parked for as long as the dialog stays open; the in-flight guard rides
+/// into its callback and is released there.
+pub fn handle_check_for_updates_click(app: &AppHandle<Wry>) {
+    if CHECK_FOR_UPDATES_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let guard = CheckForUpdatesInFlight;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let outcome = crate::update_check::run_manual_check(&app).await;
+        let dialog = crate::update_check::manual_check_dialog(&outcome, env!("CARGO_PKG_VERSION"));
+        let kind = match outcome {
+            ManualCheckOutcome::Failed => MessageDialogKind::Error,
+            _ => MessageDialogKind::Info,
+        };
+        let mut builder = app
+            .dialog()
+            .message(dialog.body)
+            .title(dialog.title)
+            .kind(kind);
+        if let [ok, cancel] = dialog.buttons.as_slice() {
+            builder = builder.buttons(MessageDialogButtons::OkCancelCustom(
+                ok.clone(),
+                cancel.clone(),
+            ));
+        }
+        let opener_app = app.clone();
+        builder.show(move |pressed_default| {
+            let _guard = guard;
+            let ManualCheckOutcome::Available { url, .. } = outcome else {
+                return;
+            };
+            if !pressed_default {
+                return;
+            }
+            if let Err(e) = opener_app.opener().open_url(&url, None::<&str>) {
+                tracing::warn!("Check for Updates…: cannot open {}: {}", url, e);
+            }
+        });
+    });
 }
 
 /// Handle the "Install 'vellis' Command in PATH" menu click — runs the shared

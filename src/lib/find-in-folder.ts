@@ -19,6 +19,9 @@ export const SEARCH_IN_FOLDER_COMMAND = 'search_in_folder';
 /** 続きのページを取る Tauri command 名(追補a)。 */
 export const SEARCH_IN_FOLDER_PAGE_COMMAND = 'search_in_folder_page';
 
+/** パネルを開いたときにその窓の検索状態(保持中の結果と最新世代)を捨てる Tauri command 名(追補e)。 */
+export const SEARCH_IN_FOLDER_RESET_COMMAND = 'search_in_folder_reset';
+
 /** 走査の途中の一致を運ぶ Tauri イベント名(Rust の `search::SEARCH_PROGRESS_EVENT` と同綴り=追補d)。 */
 export const SEARCH_PROGRESS_EVENT = 'search_progress';
 

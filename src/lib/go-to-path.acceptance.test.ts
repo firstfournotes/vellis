@@ -842,6 +842,8 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		// 要件#62(契約 12 追補・2026-09-24)で `new_tab` / `set_tab_title` を追加(new_window の直後)。
 		// 要件#55(契約⑨・2026-09-24)で `search_in_folder` を追加(set_tab_title の直後)。
 		// 要件#55 追補a(契約⑨の追加・2026-09-25)で `search_in_folder_page` を追加(search_in_folder の直後)。
+		// 要件#55 追補e(2026-10-01)で `search_in_folder_reset` を追加(search_in_folder_page の直後)。
+		// 要件#64(契約11・2026-09-28)で `list_recent_files` / `clear_recent_files` を追加(list_history の直後)。
 		const libRs = readFileSync(resolve(REPO_ROOT, 'src-tauri/src/lib.rs'), 'utf-8');
 		const blocks = [...libRs.matchAll(/generate_handler!\[([^\]]*)\]/g)].map((m) =>
 			(m[1] ?? '')
@@ -861,6 +863,7 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'set_tab_title',
 			'search_in_folder',
 			'search_in_folder_page',
+			'search_in_folder_reset',
 			'list_dir',
 			'subscribe_dir',
 			'unsubscribe_dir',
@@ -875,6 +878,8 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'revert_to_snapshot',
 			'get_build_info',
 			'list_history',
+			'list_recent_files',
+			'clear_recent_files',
 			'get_video_frame_index',
 			'extract_waveform_audio',
 			'analyze_wav_waveform',

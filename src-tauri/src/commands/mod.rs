@@ -7,6 +7,7 @@ pub mod document;
 pub mod history;
 pub mod list;
 pub mod print;
+pub mod recent_files;
 pub mod root;
 pub mod search;
 #[cfg(feature = "webdriver")]

@@ -2,6 +2,7 @@
 	import { onMount, tick, untrack } from 'svelte';
 	import Explorer from '../components/Explorer.svelte';
 	import FindInFolder from '../components/FindInFolder.svelte';
+	import RecentFiles from '../components/RecentFiles.svelte';
 	import GoToBar from '../components/GoToBar.svelte';
 	import Viewer from '../components/Viewer.svelte';
 	import HtmlViewer from '../components/HtmlViewer.svelte';
@@ -67,6 +68,7 @@
 	import { MENU_FIND_EVENT } from '$lib/find-in-document';
 	import { MENU_FIND_IN_FOLDER_EVENT, shouldShowFindInFolder } from '$lib/find-in-folder';
 	import { MENU_GO_TO_EVENT, revealPath } from '$lib/go-to-path';
+	import { MENU_RECENT_FILES_EVENT, ancestorDirs, shouldShowRecentFiles } from '$lib/recent-files';
 	import { SETTINGS_CHANGED_EVENT, reloadTree } from '$lib/settings';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { handleCloseRequested } from '$lib/close-window';
@@ -515,6 +517,63 @@
 		scrollTreeItemIntoView(revealed);
 	}
 
+	// --- 最近開いたファイル(要件#64) ----------------------------------------
+	// 記録は Rust の `open_in_window`(開く経路はすべてそこを通る)、区画(開閉・高さ・
+	// 一覧・クリック)は `RecentFiles.svelte`、開閉と高さの保存は `$lib/recent-files-section`。
+	// ここが持つのは「区画をどこに積むか」(Explorer の下・検索パネルの間は隠す)と、
+	// Command + Shift + R の受け口と、区画から開いた後にツリーのその行を見せる口だけ。
+
+	/** 区画の実体(Go メニューから「開いて先頭の行へフォーカス」を頼む相手)。 */
+	let recentFilesSection = $state<ReturnType<typeof RecentFiles> | undefined>(undefined);
+
+	/** 左ペイン(Explorer と区画を縦に積む器)の高さ。区画の高さの上限の材料。 */
+	let explorerPaneHeight = $state(0);
+
+	/** 区画を出すか(root があり・履歴選択画面でなく・検索パネルを出していない)。 */
+	let showRecentFiles = $derived(
+		shouldShowRecentFiles(windowState.root, rootPicker.open, findInFolderOpen)
+	);
+
+	/**
+	 * Go メニュー「Recent Files」(Command + Shift + R・契約5)。root が無い・履歴選択画面
+	 * なら何もしない。検索パネルを出していたら閉じて Explorer と区画に戻してから
+	 * (起案時判断 (l))、区画を開いて先頭の行へフォーカスを移す。
+	 */
+	async function handleMenuRecentFiles() {
+		if (!shouldShowRecentFiles(windowState.root, rootPicker.open, false)) return;
+		if (findInFolderOpen) {
+			findInFolderOpen = false;
+			await tick();
+		}
+		await recentFilesSection?.reveal();
+	}
+
+	/**
+	 * 区画からこの窓に開いた後(契約7): 祖先フォルダを展開に足し、描画を待ってツリーの
+	 * その行へ運ぶ(要件#60 の Go to が跳んだ後と同じ)。展開直後のツリーには子の行が
+	 * まだ無いので、まだ読んでいない祖先の子を先に読んでおく(`revealPath` と同じ)。
+	 * 読めない祖先があれば、そこまでで止める(開いた文書はそのまま)。
+	 */
+	async function handleRecentFileOpened(uri: string) {
+		const root = windowState.root;
+		const ancestors = ancestorDirs(uri, root);
+		for (const dir of ancestors) {
+			if (windowState.childEntries[dir]) continue;
+			try {
+				windowState.setChildEntries(dir, await invoke<Entry[]>('list_dir', { uri: dir }));
+			} catch {
+				break;
+			}
+		}
+		// 読んでいる間に root が変わった(↑ など)なら、もう運ぶ先が無い。
+		if (windowState.root !== root) return;
+		const expanded = [...windowState.expandedDirs];
+		for (const dir of ancestors) if (!expanded.includes(dir)) expanded.push(dir);
+		windowState.setExpandedDirs(expanded);
+		await tick();
+		scrollTreeItemIntoView(uri);
+	}
+
 	/**
 	 * 契約⑦: Esc の宛先。Go to バーが開いていれば**バーが先に食う**(バーは編集より
 	 * 手前の一時 UI)。編集の破棄より先に決着させるため `document` の capture 段で
@@ -640,6 +699,11 @@
 			// 要件#55 契約①: ⌘⇧F で左ペインに検索パネル。root が無ければ何もしない。
 			listen(MENU_FIND_IN_FOLDER_EVENT, () => {
 				void handleMenuFindInFolder();
+			}),
+			// 要件#64 契約5: Command + Shift + R で Explorer の下の Recent Files の区画を開いて
+			// 先頭の行へフォーカス。root が無い・履歴選択画面なら何もしない。
+			listen(MENU_RECENT_FILES_EVENT, () => {
+				void handleMenuRecentFiles();
 			}),
 		]).then((offs) => {
 			const off = () => offs.forEach((f) => f());
@@ -1232,16 +1296,37 @@
 					/>
 				</div>
 			{:else}
-				<Explorer
-					root={windowState.root}
-					entries={windowState.entries}
-					selectedUri={windowState.selectedUri}
-					width={explorerWidth}
-					explorerZoom={explorerZoomLevel}
-					onDuplicateWindow={duplicateCurrentWindow}
-					onOpenInNewWindow={openPlanInNewWindow}
-					onFindInFolder={() => void handleMenuFindInFolder()}
-				/>
+				<!--
+					要件#64 契約6: 左ペインは上=Explorer(残りの高さ全部)・下=Recent Files の区画の
+					縦 2 段。幅は Explorer と同じ `explorerWidth`(要件#9)。Explorer 自身は無改変で、
+					縦に積むのはこの器の持ち場。器の高さは区画の高さの上限の材料になる。
+				-->
+				<div
+					class="explorer-pane"
+					style="width: {explorerWidth}px"
+					bind:clientHeight={explorerPaneHeight}
+				>
+					<Explorer
+						root={windowState.root}
+						entries={windowState.entries}
+						selectedUri={windowState.selectedUri}
+						width={explorerWidth}
+						explorerZoom={explorerZoomLevel}
+						onDuplicateWindow={duplicateCurrentWindow}
+						onOpenInNewWindow={openPlanInNewWindow}
+						onFindInFolder={() => void handleMenuFindInFolder()}
+					/>
+					{#if showRecentFiles}
+						<RecentFiles
+							bind:this={recentFilesSection}
+							rootUri={windowState.root}
+							currentUri={windowState.currentDocument?.uri ?? null}
+							paneHeight={explorerPaneHeight}
+							explorerZoom={explorerZoomLevel}
+							onOpened={(uri) => void handleRecentFileOpened(uri)}
+						/>
+					{/if}
+				</div>
 			{/if}
 			<!--
 				Explorer と Viewer の仕切り(要件#9)。ドラッグ専用のハンドルで、
@@ -1490,6 +1575,23 @@
 		min-height: 0;
 		border-right: 1px solid var(--color-border);
 		background-color: var(--color-bg-secondary);
+		overflow: hidden;
+	}
+
+	/*
+	 * 要件#64 契約6: Explorer と Recent Files の区画を縦に積む器。上の段(Explorer)は残りの
+	 * 高さを全部使い、区画は下端に自分の高さで座る。grid にしているのは、Explorer の
+	 * `aside.explorer`(行方向で置かれる前提の `flex: 0 0 auto`)に手を入れずに縦へ縮める
+	 * ため —— 段を `minmax(0, 1fr)` にすると、中身の長いツリーでも段の高さを超えない
+	 * (はみ出しは Explorer の中の一覧がスクロールで受ける)。区画が無いときは下の段が 0。
+	 * Explorer の右クリックメニューは position: fixed なので段を取らない。
+	 */
+	.explorer-pane {
+		flex: 0 0 auto;
+		display: grid;
+		grid-template-rows: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr);
+		min-height: 0;
 		overflow: hidden;
 	}
 

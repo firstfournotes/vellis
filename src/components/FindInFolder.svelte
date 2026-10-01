@@ -39,6 +39,7 @@
 		FIND_IN_FOLDER_SHOW_MORE,
 		SEARCH_IN_FOLDER_COMMAND,
 		SEARCH_IN_FOLDER_PAGE_COMMAND,
+		SEARCH_IN_FOLDER_RESET_COMMAND,
 		SEARCH_DONE_EVENT,
 		SEARCH_PROGRESS_EVENT,
 		SearchSession,
@@ -81,6 +82,13 @@
 	const SEARCH_FAILED = 'Search failed';
 
 	const session = new SearchSession();
+
+	/**
+	 * マウント時に投げる `search_in_folder_reset` の完了(追補e)。世代は 1 から振り直すので、
+	 * Rust 側に残る前回の最新世代を捨て終わるまで検索を投げない。失敗しても resolve する
+	 * (黙って続行)。マウント前は待つものが無いので解決済み。
+	 */
+	let resetDone: Promise<void> = Promise.resolve();
 
 	/**
 	 * 表示用のファイルごとのまとまり。`groupHits` と同じ規則(path の初出順・入力順)だが、
@@ -241,6 +249,9 @@
 	}
 
 	async function run(generation: number, root: string, value: string, scope: SearchScopeArgs) {
+		await resetDone;
+		// reset を待つ間に語が変わった(または閉じた)なら、この世代は投げない。
+		if (!session.isCurrent(generation)) return;
 		try {
 			const response = await invoke<SearchResponse>(SEARCH_IN_FOLDER_COMMAND, {
 				root,
@@ -407,6 +418,10 @@
 	}
 
 	onMount(() => {
+		resetDone = invoke(SEARCH_IN_FOLDER_RESET_COMMAND).then(
+			() => undefined,
+			() => undefined,
+		);
 		inputEl?.focus();
 		subscribe<SearchProgressPayload>(SEARCH_PROGRESS_EVENT, handleProgress);
 		subscribe<SearchDonePayload>(SEARCH_DONE_EVENT, handleDone);
@@ -576,13 +591,13 @@
 		font-size: 13px;
 	}
 
-	/* 見出し行は Explorer の `.explorer-header` と同じ見た目に揃える。 */
+	/* 見出し行は Explorer の `.explorer-header` と同じ見た目に揃える(文字は theme.css のトークン=要件#64 追補b)。 */
 	.find-in-folder-header {
 		padding: 6px 8px 6px 12px;
-		font-size: 11px;
-		font-weight: 600;
+		font-size: var(--pane-header-font-size);
+		font-weight: var(--pane-header-font-weight);
 		text-transform: uppercase;
-		letter-spacing: 0.05em;
+		letter-spacing: var(--pane-header-letter-spacing);
 		color: var(--color-text-secondary);
 		border-bottom: 1px solid var(--color-border);
 		flex-shrink: 0;

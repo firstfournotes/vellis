@@ -13,6 +13,7 @@ pub mod history;
 pub mod ipc;
 pub mod menu;
 pub mod print;
+pub mod recent_files;
 pub mod search;
 pub mod session;
 pub mod settings;
@@ -45,8 +46,9 @@ use commands::document::{open_binary_document, open_document, save_document};
 use commands::history::list_history;
 use commands::list::list_dir;
 use commands::print::{print_current_window, print_html};
+use commands::recent_files::{clear_recent_files, list_recent_files};
 use commands::root::set_root;
-use commands::search::{search_in_folder, search_in_folder_page, SearchResults};
+use commands::search::{search_in_folder, search_in_folder_page, search_in_folder_reset, SearchResults};
 use commands::video::get_video_frame_index;
 use commands::wav_waveform::analyze_wav_waveform;
 use commands::waveform::extract_waveform_audio;
@@ -188,6 +190,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         set_tab_title,
         search_in_folder,
         search_in_folder_page,
+        search_in_folder_reset,
         list_dir,
         subscribe_dir,
         unsubscribe_dir,
@@ -202,6 +205,8 @@ pub fn run_with_args(initial_args: WindowArgs) {
         revert_to_snapshot,
         get_build_info,
         list_history,
+        list_recent_files,
+        clear_recent_files,
         get_video_frame_index,
         extract_waveform_audio,
         analyze_wav_waveform,
@@ -221,6 +226,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         set_tab_title,
         search_in_folder,
         search_in_folder_page,
+        search_in_folder_reset,
         list_dir,
         subscribe_dir,
         unsubscribe_dir,
@@ -235,6 +241,8 @@ pub fn run_with_args(initial_args: WindowArgs) {
         revert_to_snapshot,
         get_build_info,
         list_history,
+        list_recent_files,
+        clear_recent_files,
         get_video_frame_index,
         extract_waveform_audio,
         analyze_wav_waveform,
@@ -255,6 +263,9 @@ pub fn run_with_args(initial_args: WindowArgs) {
             #[cfg(target_os = "macos")]
             menu::attach_windows_menu_to_nsapp(&window_menu_owner);
             app.on_menu_event(|app_handle, event| match event.id().as_ref() {
+                id if id == menu::CHECK_FOR_UPDATES_ITEM_ID => {
+                    menu::handle_check_for_updates_click(app_handle);
+                }
                 id if id == menu::INSTALL_CLI_ITEM_ID => {
                     menu::handle_install_cli_click(app_handle);
                 }
@@ -332,6 +343,12 @@ pub fn run_with_args(initial_args: WindowArgs) {
                     // 今の root も展開も、打たれたパスの解決も窓の側にしかないので、
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#60 契約①)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_GO_TO_EVENT);
+                }
+                id if id == menu::RECENT_FILES_ITEM_ID => {
+                    // 区画は窓の Explorer の下にあり、出せるか(root・履歴選択画面)も
+                    // どの行へフォーカスするかも窓の側にしかないので、Go to Path… と
+                    // 同じくフォーカス中の窓へ投げて任せる(要件#64 契約5)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_RECENT_FILES_EVENT);
                 }
                 id if id == menu::EDIT_ITEM_ID => {
                     // 編集に入れる文書かも、いま編集中かも窓の側にしかないので、

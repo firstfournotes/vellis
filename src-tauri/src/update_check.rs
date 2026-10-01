@@ -137,6 +137,29 @@ pub fn should_check(last_check_unix: Option<i64>, now_unix: i64) -> bool {
     }
 }
 
+/// What woke an *automatic* check (requirements.md #67 契約5).  The menu's
+/// Check for Updates… is not a trigger: it bypasses this decision entirely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckTrigger {
+    /// The first pass after the process started.
+    Startup,
+    /// Every later [`POLL_TICK`] re-evaluation.
+    Poll,
+}
+
+/// Whether an automatic check is due (requirements.md #67 契約1・2・5).
+///
+/// A launch always checks, however recent the last check was: relaunching
+/// within six hours used to skip the check altogether, so a newer release —
+/// or a banner the user closed — stayed hidden until the next interval.  The
+/// periodic tick keeps the six-hour rule of [`should_check`] unchanged.
+pub fn should_check_on(trigger: CheckTrigger, last_check_unix: Option<i64>, now_unix: i64) -> bool {
+    match trigger {
+        CheckTrigger::Startup => true,
+        CheckTrigger::Poll => should_check(last_check_unix, now_unix),
+    }
+}
+
 /// Dev builds never call out.  The check is on by default with no opt-out
 /// (`docs/update-notification.md` §6-Q6), so this channel guard is what
 /// keeps development and test runs off the network.
@@ -144,6 +167,85 @@ pub fn channel_allows_check(channel: Channel) -> bool {
     match channel {
         Channel::Release => true,
         Channel::Dev => false,
+    }
+}
+
+/// Result of a check the user asked for from the menu (requirements.md #67
+/// 契約8・10).  Unlike the automatic check, every outcome reaches the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ManualCheckOutcome {
+    /// A newer release exists.  `version` is the bare `x.y.z` (no `v`);
+    /// `url` is the release page.
+    Available { version: String, url: String },
+    /// The latest release is the running version or older.  `current` is the
+    /// running version as given.
+    UpToDate { current: String },
+    /// The fetch failed, or the release's tag is not a readable `x.y.z`.
+    Failed,
+}
+
+/// Sort a fetch result into a [`ManualCheckOutcome`].
+///
+/// An unreadable tag is `Failed`, not `UpToDate`: [`is_newer`] answers
+/// `false` for a tag it cannot parse, which is the right silence for the
+/// automatic check but would make the menu claim "up to date" without
+/// knowing (契約8).
+pub fn manual_check_outcome(
+    fetched: Result<ReleaseInfo, UpdateCheckError>,
+    current: &str,
+) -> ManualCheckOutcome {
+    let info = match fetched {
+        Ok(info) => info,
+        Err(_) => return ManualCheckOutcome::Failed,
+    };
+    if is_newer(&info.tag_name, current) {
+        return ManualCheckOutcome::Available {
+            version: info
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&info.tag_name)
+                .to_string(),
+            url: info.html_url,
+        };
+    }
+    if parse_version(&info.tag_name).is_none() {
+        return ManualCheckOutcome::Failed;
+    }
+    ManualCheckOutcome::UpToDate {
+        current: current.to_string(),
+    }
+}
+
+/// Text of the dialog that answers the menu's check.  `buttons` are labels;
+/// the first one is the default button.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManualCheckDialog {
+    pub title: String,
+    pub body: String,
+    pub buttons: Vec<String>,
+}
+
+/// The dialog for an outcome (requirements.md #67 契約8; English, #51).
+/// `current` only feeds the `Available` body — `UpToDate` names the version
+/// it carries itself.  The failure body never spells out the reason; that
+/// goes to the log.
+pub fn manual_check_dialog(outcome: &ManualCheckOutcome, current: &str) -> ManualCheckDialog {
+    match outcome {
+        ManualCheckOutcome::Available { version, .. } => ManualCheckDialog {
+            title: "A new version of Vellis is available".to_string(),
+            body: format!("Vellis v{version} is available. You have v{current}."),
+            buttons: vec!["Download".to_string(), "Later".to_string()],
+        },
+        ManualCheckOutcome::UpToDate { current } => ManualCheckDialog {
+            title: "You're up to date".to_string(),
+            body: format!("Vellis v{current} is the latest version."),
+            buttons: vec!["OK".to_string()],
+        },
+        ManualCheckOutcome::Failed => ManualCheckDialog {
+            title: "Couldn't check for updates".to_string(),
+            body: "Check your internet connection and try again.".to_string(),
+            buttons: vec!["OK".to_string()],
+        },
     }
 }
 
@@ -305,10 +407,12 @@ struct UpdateAvailablePayload {
     url: String,
 }
 
-/// Start the update-check poller: one check shortly after launch, then a
+/// Start the update-check poller: one check shortly after launch — always,
+/// whatever the last check time (requirements.md #67 契約1) — then a
 /// re-evaluation every [`POLL_TICK`] that runs a check whenever six hours
 /// have passed.  A single Vellis process owns every window (flock), so this
-/// one task covers the whole app.
+/// one task covers the whole app, and only a process launch counts as a
+/// launch.
 ///
 /// Does nothing on the dev channel.
 pub fn spawn_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
@@ -318,21 +422,23 @@ pub fn spawn_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(STARTUP_DELAY).await;
+        check_once(&app, CheckTrigger::Startup).await;
         loop {
-            check_once(&app).await;
             tokio::time::sleep(POLL_TICK).await;
+            check_once(&app, CheckTrigger::Poll).await;
         }
     });
 }
 
-/// One pass: is a check due, and if so does the answer mean a newer release?
-async fn check_once<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+/// One automatic pass: is a check due, and if so does the answer mean a
+/// newer release?
+async fn check_once<R: tauri::Runtime>(app: &tauri::AppHandle<R>, trigger: CheckTrigger) {
     let Some(path) = default_path(app) else {
         return;
     };
     let store = LastCheckStore::new(&path);
     let now = now_unix();
-    if !should_check(store.last_check(), now) {
+    if !should_check_on(trigger, store.last_check(), now) {
         return;
     }
 
@@ -381,6 +487,35 @@ async fn check_once<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             e
         );
     }
+}
+
+/// The check behind the menu's Check for Updates… (requirements.md #67
+/// 契約7・8・9): runs now, with no six-hour rule and no startup delay.
+///
+/// Three deliberate departures from [`check_once`]:
+/// - no [`channel_allows_check`] gate — the user asked, so dev builds call
+///   out too (契約9);
+/// - no emit — the answer is the caller's dialog, never the banner (契約8);
+/// - a missing store path or a failed stamp does not stop the fetch.  The
+///   automatic check may stay silent, but the user pressed the item and must
+///   always get an answer (契約8).
+///
+/// The last-check time is still stamped *before* the request, so the next
+/// automatic check comes six hours after this one (契約7).
+pub(crate) async fn run_manual_check<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> ManualCheckOutcome {
+    if let Some(path) = default_path(app) {
+        if let Err(e) = LastCheckStore::new(&path).set_last_check(now_unix()) {
+            tracing::warn!("update check (menu): cannot persist last-check time: {}", e);
+        }
+    }
+    let fetched = fetch_latest_release().await;
+    match &fetched {
+        Ok(info) => tracing::info!("update check (menu): latest is {}", info.tag_name),
+        Err(e) => tracing::warn!("update check (menu): {}", e),
+    }
+    manual_check_outcome(fetched, env!("CARGO_PKG_VERSION"))
 }
 
 /// Wall-clock seconds since the unix epoch (0 if the clock predates it).

@@ -9,6 +9,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use crate::annotation::SnapshotManager;
 use crate::fs::local::ensure_within_root;
 use crate::fs::uri::Uri;
+use crate::recent_files;
 use crate::session::document::{DocumentPayload, DocumentSession};
 use crate::settings::{is_settings_file, read_settings, SETTINGS_CHANGED_EVENT};
 use crate::watch::hub::WindowId;
@@ -190,7 +191,7 @@ async fn open_in_window(
     let opened = if binary {
         DocumentSession::open_binary(
             window_id,
-            parsed_uri,
+            parsed_uri.clone(),
             &state.fs_registry,
             &state.coordinator,
             &app_handle,
@@ -199,14 +200,41 @@ async fn open_in_window(
     } else {
         DocumentSession::open(
             window_id,
-            parsed_uri,
+            parsed_uri.clone(),
             &state.fs_registry,
             &state.coordinator,
             &app_handle,
         )
         .await
     };
-    let (session, payload) = opened.map_err(|e| e.to_string())?;
+    let (session, payload) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            // 要件#64 契約8: 「見つからない」で開けなかったファイルは Recent Files から
+            // 除く(権限・ssh の切断など一時的かもしれない失敗では除かない)。
+            //
+            // 開いたときのエラーの種類では判定しない: 開くのは監視の登録が先で、ローカルの
+            // 消えたファイルは notify の失敗(`FsError::Io`)として返り、`NotFound` に
+            // ならない。そこで失敗したときだけ同じ URI をそのプロバイダで 1 回 stat し、
+            // その失敗が「見つからない」かで決める(ローカルも ssh も同じ経路)。
+            // best-effort=除去も stat の失敗もログして飲み、元のエラーをそのまま返す。
+            match state.fs_registry.resolve(&parsed_uri) {
+                Ok(provider) => match provider.stat(&parsed_uri).await {
+                    Ok(_) => {}
+                    Err(stat_err) if recent_files::should_forget_on_open_error(&stat_err) => {
+                        recent_files::forget_file(&app_handle, &uri);
+                    }
+                    Err(stat_err) => {
+                        tracing::debug!("recent files: kept '{}' (stat failed: {})", uri, stat_err);
+                    }
+                },
+                Err(resolve_err) => {
+                    tracing::debug!("recent files: kept '{}' ({})", uri, resolve_err);
+                }
+            }
+            return Err(e.to_string());
+        }
+    };
 
     // Store the new session in the window manager.
     {
@@ -215,6 +243,11 @@ async fn open_in_window(
             win_state.session = Some(session);
         }
     }
+
+    // 要件#64 契約1・2: 開けたファイルを Recent Files に記録する。開く経路(ツリー・
+    // Go to・検索結果・リンク・起動時引数・新しいタブ/窓)はすべてここに集まるので、
+    // 記録はこの 1 か所だけ。best-effort=記録の失敗は文書を開くのを妨げない。
+    recent_files::record_file(&app_handle, &uri);
 
     Ok(payload)
 }

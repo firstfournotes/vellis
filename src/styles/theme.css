@@ -52,4 +52,15 @@
 
 	/* Drop shadow of a floating surface (context menu). */
 	--color-shadow: rgba(0, 0, 0, 0.18);
+
+	/* --- Pane header typography (not colours) --- */
+
+	/*
+	 * Section titles of the left pane (Explorer / Recent Files / Find in Folder)
+	 * share one type style so they cannot drift apart (要件#64 追補b). Case and
+	 * colour stay with each component.
+	 */
+	--pane-header-font-size: 13px;
+	--pane-header-font-weight: 500;
+	--pane-header-letter-spacing: 0.04em;
 }

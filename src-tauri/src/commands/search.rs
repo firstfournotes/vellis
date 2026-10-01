@@ -1,4 +1,4 @@
-//! `search_in_folder` / `search_in_folder_page` commands — フォルダ横断検索(要件#55 契約⑤⑧・追補a)。
+//! `search_in_folder` / `search_in_folder_page` / `search_in_folder_reset` commands — フォルダ横断検索(要件#55 契約⑤⑧・追補a)。
 //!
 //! 走査の本体は [`crate::search::search_in_folder_streaming`]。ここは URI の解釈と
 //! provider の取り出し(`list_dir` と同じ方法)、世代番号の往復、進捗イベントの送信、
@@ -119,4 +119,16 @@ pub fn search_in_folder_page(
     let store = results.0.lock().map_err(|e| e.to_string())?;
     let hits = store.page(window.label(), generation, offset, limit);
     Ok(PageResponse { generation, hits })
+}
+
+/// パネルを開いたとき(マウント時)にその窓の検索状態を捨てる(追補e)。フロントの世代は
+/// パネルごとに 1 から振り直すので、窓に残った最新世代と結果を `forget` で消す(窓が
+/// 閉じたときと同じ)。
+#[tauri::command]
+pub fn search_in_folder_reset(
+    window: tauri::Window,
+    results: tauri::State<'_, SearchResults>,
+) -> Result<(), String> {
+    results.0.lock().map_err(|e| e.to_string())?.forget(window.label());
+    Ok(())
 }
