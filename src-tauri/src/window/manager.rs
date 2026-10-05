@@ -269,6 +269,31 @@ impl<R: tauri::Runtime> WindowManager<R> {
         self.windows.get_mut(label)
     }
 
+    /// Swap the document session of the window `label` for `session` and hand
+    /// back the session the window no longer holds (requirements.md #71 契約1).
+    ///
+    /// Callers open the new session first and call this only once it opened,
+    /// so a failed open never touches the window's current session — its
+    /// watch subscription, and with it the change tracking, stays.  The
+    /// returned session is the caller's to drop: dropping it releases the
+    /// previous watch (RAII).  Opening the same document again therefore
+    /// briefly holds two subscriptions and settles back to one.
+    ///
+    /// - `None` when the window held no session before.
+    /// - When `label` is not registered (the window closed while the document
+    ///   was opening), `session` itself is handed back: nothing keeps it, and
+    ///   the caller's drop releases its watch like any replaced session.
+    pub fn replace_session(
+        &mut self,
+        label: &str,
+        session: DocumentSession<R>,
+    ) -> Option<DocumentSession<R>> {
+        match self.windows.get_mut(label) {
+            Some(state) => state.session.replace(session),
+            None => Some(session),
+        }
+    }
+
     /// Set the active (most recently focused) window.
     pub fn set_active(&mut self, label: &str) {
         if self.windows.contains_key(label) {

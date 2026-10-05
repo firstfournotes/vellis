@@ -105,6 +105,24 @@ export function printFailedMessage(err: unknown): string {
 	return `Could not print: ${err}`;
 }
 
+/**
+ * この窓は印刷できる文書を開いているか(純関数・要件#38 追補f)。
+ *
+ * 文書があり、履歴選択画面を出していないときだけ true。履歴選択画面と空の
+ * 状態は印刷から隠してある(追補e)ので、そこで ⌘P を通すと白紙1枚の印刷
+ * ダイアログが開くだけになる(backlog 251)。文書の種類は見ない — markdown /
+ * text はメインフレーム印刷、HTML は印刷窓で、どれも従来どおり印刷できる。
+ *
+ * 結果は `set_print_available` で本体へ知らせ、本体が前面の窓に合わせて
+ * File > Print… の有効・無効を切り替える(+page.svelte)。
+ */
+export function isPrintAvailable(
+	currentDocument: { uri: string } | null | undefined,
+	rootPickerOpen: boolean
+): boolean {
+	return currentDocument != null && !rootPickerOpen;
+}
+
 /** メニュー起点の印刷を受け取る配線側のハンドラ。 */
 export type PrintHandlers = {
 	/**
@@ -117,6 +135,13 @@ export type PrintHandlers = {
 	 * 表示中の HTML の生テキストと文書 URI。html 経路のときだけ呼ばれる。
 	 */
 	getHtmlSource: () => { content: string; docUri: string };
+	/**
+	 * いま印刷できるか(要件#38 追補f の念のための止め)。発火のたびに呼ばれ、
+	 * false なら何もしない — 失敗ではなく「対象外」なので `onError` も呼ばない。
+	 * 本体側でも Print… を無効にしてイベントを止めているが、知らせと押下が
+	 * 行き違ったときにここで受け止める。省略時は従来どおり印刷する。
+	 */
+	canPrint?: () => boolean;
 	/** 失敗の通知先。省略可 — 省略しても例外は外へ出さない。 */
 	onError?: (err: unknown) => void;
 };
@@ -134,6 +159,7 @@ export type PrintHandlers = {
  */
 export async function registerPrintListener(handlers: PrintHandlers): Promise<() => void> {
 	const run = async (): Promise<void> => {
+		if (handlers.canPrint && !handlers.canPrint()) return;
 		try {
 			if (printRouteFor(handlers.getFileType()) === 'main-frame') {
 				// 従来の終端。Rust 側は invoke 元=この窓の `Webview::print()` を

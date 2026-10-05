@@ -151,6 +151,82 @@ impl Default for PrintDocumentStore {
     }
 }
 
+/// What the File > Print… item should do when a window comes to the front
+/// (requirements.md #38 追補f).
+///
+/// `Unchanged` is the print window's answer: it carries no frontend, never
+/// reports, and is kept out of every other menu decision too
+/// (`menu::focused_or_first_window`), so it leaves the item as the document
+/// window before it set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintItemState {
+    Enabled,
+    Disabled,
+    Unchanged,
+}
+
+/// Which windows have a printable document open, as each window last reported
+/// it through `set_print_available` (requirements.md #38 追補f).
+///
+/// The menu is one for the whole app, while "is there anything to print"
+/// belongs to each window — the history picker and the empty state have
+/// nothing to put on paper (backlog 251). So every window tells the app, the
+/// app remembers per label, and the Print… item is re-applied from the
+/// frontmost window's entry whenever that window changes or reports.
+///
+/// A window that has never reported counts as "nothing open": a window starts
+/// on the picker or the empty state, and enabling Print… for a window whose
+/// frontend has not spoken yet would bring the blank sheet back. Methods take
+/// `&self` for the same reason as [`PrintDocumentStore`]: the command and the
+/// window events reach it through managed state.
+pub struct PrintAvailability {
+    windows: Mutex<HashMap<String, bool>>,
+}
+
+impl PrintAvailability {
+    pub fn new() -> Self {
+        Self {
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Remember what window `label` reported; the latest report wins.
+    pub fn set(&self, label: &str, available: bool) {
+        self.windows().insert(label.to_string(), available);
+    }
+
+    /// Drop what window `label` reported, once the window is gone. Unknown
+    /// labels are a no-op.
+    pub fn forget(&self, label: &str) {
+        self.windows().remove(label);
+    }
+
+    /// The Print… item's state while window `label` is frontmost.
+    pub fn print_item_state(&self, label: &str) -> PrintItemState {
+        if is_print_window(label) {
+            return PrintItemState::Unchanged;
+        }
+        match self.windows().get(label) {
+            Some(true) => PrintItemState::Enabled,
+            Some(false) | None => PrintItemState::Disabled,
+        }
+    }
+
+    /// The map, recovered from a poisoned lock for the same reason as the
+    /// print document store's: nothing here is worth a panic.
+    fn windows(&self) -> std::sync::MutexGuard<'_, HashMap<String, bool>> {
+        self.windows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Default for PrintAvailability {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The URL the print window loads for the document registered under `id`.
 ///
 /// A real URL, navigated to normally — see the module docs for why nothing

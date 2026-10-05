@@ -26,12 +26,46 @@
 	}
 
 	/* Hide every chrome element. Anything inside the article > markdown-body
-	   subtree is the document; everything else is UI. */
+	   subtree is the document; everything else is UI. The left pane's
+	   container, its sections and the divider are hidden too (req #64
+	   addendum d / backlog 225): sections such as .recent-files sit outside
+	   .explorer, so hiding .explorer alone leaves them on the paper. */
 	.explorer,
+	.explorer-pane,
+	.find-in-folder-pane,
+	.recent-files,
+	.pane-divider,
 	.viewer-toolbar,
 	.status-bar,
 	.mark-list,
 	.dialog-overlay {
+		display: none !important;
+	}
+
+	/* Transient UI that may be open when Cmd+P is hit — find bar, Go to bar,
+	   update banner, DiffView (backdrop + panel) and InstructionDialog
+	   (backdrop + dialog) — stays off the paper too (req #38 addendum c /
+	   backlog 237). These class names are generic enough that a document's
+	   own HTML may use them, so `:not(.markdown-body *)` keeps the rule from
+	   ever hiding anything inside the rendered body. Child combinators are
+	   avoided on purpose: SvelteKit mounts the app under a wrapper div, so
+	   DiffView / InstructionDialog are not direct children of <body>. The
+	   ContextMenu is already covered by the hidden .explorer-pane above.
+	   The edit-mode external-change banner and structure-change notice are
+	   hidden the same way (req #38 addendum d / backlog 242), as are the
+	   RootPicker and the no-document EmptyState (req #38 addendum e /
+	   backlog 243). */
+	.find-bar:not(.markdown-body *),
+	.go-to-bar:not(.markdown-body *),
+	.update-banner:not(.markdown-body *),
+	.overlay:not(.markdown-body *),
+	section.diff-view:not(.markdown-body *),
+	.backdrop:not(.markdown-body *),
+	.dialog:not(.markdown-body *),
+	.external-change:not(.markdown-body *),
+	.structure-notice:not(.markdown-body *),
+	.root-picker:not(.markdown-body *),
+	.empty-state:not(.markdown-body *) {
 		display: none !important;
 	}
 

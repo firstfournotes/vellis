@@ -29,7 +29,7 @@
 	import { marksStore } from '../stores/marks.svelte';
 	import { featureFlags } from '$lib/flags.svelte';
 	import { detectFileType, renderForDisplay, type FileType } from '$lib/file-type';
-	import { openForDisplay } from '$lib/open-document';
+	import { openForDisplay, openInitialDocument } from '$lib/open-document';
 	import { imageSrcWithVersion } from '$lib/image-watch';
 	import {
 		DEFAULT_PANE_WIDTH,
@@ -39,7 +39,9 @@
 	} from '$lib/pane-resize';
 	import {
 		loadHistory,
+		openFolderFailedMessage,
 		openHistoryEntry,
+		pickFolderAndSetRoot,
 		toPickerEntries,
 		type RootPickerEntry
 	} from '$lib/root-picker';
@@ -82,7 +84,7 @@
 		resolveZoomTarget,
 		type ZoomRegion
 	} from '$lib/zoom-target';
-	import { printFailedMessage, registerPrintListener } from '$lib/print-html';
+	import { isPrintAvailable, printFailedMessage, registerPrintListener } from '$lib/print-html';
 	import { videoViewMode } from '$lib/video-viewing';
 	import {
 		loadProvenanceMap,
@@ -617,6 +619,18 @@
 		return { content: doc?.content ?? '', docUri: doc?.uri ?? '' };
 	}
 
+	// 文書を開いていない窓(履歴選択画面・空の状態)では File > Print… を無効にし、
+	// ⌘P でも印刷ダイアログを開かない(要件#38 追補f・backlog 251)。メニューは
+	// アプリ全体で1つなので、この窓は自分の状態を本体へ知らせるだけで、前面の窓に
+	// 合わせて項目を切り替えるのは本体(前面の窓が変わったときも本体が当て直す)。
+	// 本体の既定は「開いていない」なので初期値も1回知らせる($effect の初回実行)。
+	// 失敗は Print… の灰色が古いままになるだけ(購読側の canPrint が止める)なので黙る。
+	const printAvailable = $derived(isPrintAvailable(windowState.currentDocument, rootPicker.open));
+	$effect(() => {
+		const available = printAvailable;
+		invoke('set_print_available', { available }).catch(() => {});
+	});
+
 	// 購読の解除があるので await を挟まない専用の onMount に分けている。
 	onMount(() => {
 		let unlisten: (() => void) | null = null;
@@ -624,6 +638,7 @@
 		void registerPrintListener({
 			getFileType: () => printFileType,
 			getHtmlSource: currentHtmlSource,
+			canPrint: () => isPrintAvailable(windowState.currentDocument, rootPicker.open),
 			onError: (err) => alert(printFailedMessage(err))
 		}).then((off) => {
 			if (disposed) off();
@@ -854,19 +869,27 @@
 		rootPicker = { ...rootPicker, open: false, error: null };
 	}
 
-	async function pickFolderAndSetRoot() {
-		// 要件#48 契約④: root を変えると編集は持ち越せない。選ばせる前に聞く。
-		if (!(await confirmDiscardEdits())) return;
-		const selected = await open({
-			directory: true,
-			multiple: false,
-			title: SELECT_FOLDER_DIALOG_TITLE
+	/**
+	 * 履歴選択画面の「Select Folder…」。手順(編集の始末 → ダイアログ → `set_root`)は
+	 * `$lib/root-picker` の持ち場。開けなかったフォルダは履歴から開けなかったときと
+	 * 同じ画面の中の注記にして、選択画面のまま選び直せるようにする(要件#71 契約3)。
+	 */
+	async function selectFolderFromPicker() {
+		const outcome = await pickFolderAndSetRoot({
+			// 要件#48 契約④: root を変えると編集は持ち越せない。選ばせる前に聞く。
+			confirmDiscard: confirmDiscardEdits,
+			pickFolder: async () => {
+				const selected = await open({
+					directory: true,
+					multiple: false,
+					title: SELECT_FOLDER_DIALOG_TITLE
+				});
+				return typeof selected === 'string' ? selected : null; // 非文字列=取消
+			},
+			setRoot: (uri) => invoke<RootPayload>('set_root', { uri })
 		});
-		if (typeof selected !== 'string') return; // cancelled
-
-		const uri = `file://${selected}`;
-		const res = await invoke<RootPayload>('set_root', { uri });
-		applyRoot(res);
+		if (outcome.kind === 'applied') applyRoot(outcome.root);
+		else if (outcome.kind === 'failed') rootPicker = { ...rootPicker, error: outcome.message };
 	}
 
 	/**
@@ -880,7 +903,7 @@
 		try {
 			applyRoot(await openHistoryEntry<RootPayload>(uri));
 		} catch (err) {
-			rootPicker = { ...rootPicker, error: `Could not open the folder: ${err}` };
+			rootPicker = { ...rootPicker, error: openFolderFailedMessage(err) };
 		}
 	}
 
@@ -1064,9 +1087,13 @@
 			// If there is an initial document, open it (Main starts watch implicitly).
 			// ラスタ画像(要件#16 ⑦)だけは読まずに開く — CLI の `vellis photo.png` と
 			// ツリーの Shift+クリック(新しいウインドウ)もこの経路を通る。
-			if (init.initial_path) {
-				windowState.setDocument(await openForDisplay(init.initial_path));
-			}
+			// 要件#71 契約5: 開けなくても alert で知らせて先へ進む(下の購読の登録と
+			// 起動の完了まで行く=窓はツリーを見せたまま生きている)。
+			await openInitialDocument(init.initial_path, {
+				open: openForDisplay,
+				setDocument: (doc) => windowState.setDocument(doc),
+				onOpenFailed: (message) => alert(message)
+			});
 
 			// 要件#34: 複製で生まれた窓は、複製元の展開ディレクトリを引き継いで開く。
 			// root と初期文書の後に渡すのは reload の復元と同じ順序 — 各ディレクトリの
@@ -1280,7 +1307,7 @@
 				entries={rootPicker.entries}
 				error={rootPicker.error}
 				onSelect={openFromHistory}
-				onPickFolder={pickFolderAndSetRoot}
+				onPickFolder={selectFolderFromPicker}
 			/>
 		{:else}
 			{#if showFindInFolder}

@@ -3,7 +3,9 @@
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { newTabFailedMessage, openNewTab, planNewTab } from '$lib/new-tab';
 	import { detectFileType } from '$lib/file-type';
-	import { openForDisplay } from '$lib/open-document';
+	import { openFileFailedMessage, openForDisplay } from '$lib/open-document';
+	import { openInNewWindowFailedMessage } from '$lib/open-in-new-window';
+	import { openFolderFailedMessage } from '$lib/root-picker';
 	import { DEFAULT_PANE_WIDTH } from '$lib/pane-resize';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
 	import { parentUri } from '$lib/uri';
@@ -61,7 +63,14 @@
 		if (!parent) return;
 		// 要件#48 契約④: root を上げると編集は持ち越せない。先に始末を聞く。
 		if (!(await confirmDiscardEdits())) return;
-		const res = await invoke<RootPayload>('set_root', { uri: parent });
+		let res: RootPayload;
+		try {
+			res = await invoke<RootPayload>('set_root', { uri: parent });
+		} catch (err) {
+			// 要件#71 契約3: 開けなかったら知らせて、root はそのまま。
+			alert(openFolderFailedMessage(err));
+			return;
+		}
 		windowState.applyRoot(res.root_uri, res.entries, res.document_retained);
 	}
 
@@ -96,11 +105,21 @@
 		if (!e.shiftKey && !(await confirmDiscardEdits())) return;
 		if (e.shiftKey) {
 			// Open in a new window -- current window state is unaffected.
-			await invoke('new_window', { path: entry.uri, root });
+			try {
+				await invoke('new_window', { path: entry.uri, root });
+			} catch (err) {
+				// 要件#71 契約4
+				alert(openInNewWindowFailedMessage(err));
+			}
 		} else {
-			// Open in this window. Main drops the old DocumentSession (auto watch
-			// cleanup). ラスタ画像だけは `open_document` を通らない(要件#16 ⑦)。
-			windowState.setDocument(await openForDisplay(entry.uri));
+			// Open in this window. Main swaps the DocumentSession only once the new
+			// one opened (要件#71 契約1). ラスタ画像だけは `open_document` を通らない(要件#16 ⑦)。
+			try {
+				windowState.setDocument(await openForDisplay(entry.uri));
+			} catch (err) {
+				// 要件#71 契約2: 知らせて、表示中の文書とツリーの選択は前のまま。
+				alert(openFileFailedMessage(err));
+			}
 		}
 	}
 

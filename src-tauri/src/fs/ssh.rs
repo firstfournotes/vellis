@@ -18,9 +18,13 @@
 //!       and emit a warn-level log entry. This matches OpenSSH's default
 //!       `StrictHostKeyChecking=accept-new` behaviour.
 //! - SFTP-backed `list` / `stat` / `read_bytes`.
-//! - Cache one `SftpSession` per `user@host:port` for the lifetime of the
-//!   provider (a minimal connection pool — a dedicated follow-up will handle
-//!   reconnect, idle timeout, and concurrent transfers).
+//! - Keep one SSH + SFTP connection per `user@host:port` in a
+//!   `ConnectionPool` (`super::ssh_pool`). Before a kept connection is handed
+//!   out its SSH transport is checked, and a closed one (sleep, network
+//!   switch, server-side idle cut) is dropped and opened again. An SFTP
+//!   operation that fails with a disconnection error drops the connection it
+//!   used, opens a fresh one and runs once more — only once, so an
+//!   unreachable host fails fast (要件#5 追補a / backlog 261).
 //!
 //! Authentication tries every identity ssh-agent offers; if none of those
 //! succeeds, falls back to **unencrypted** `IdentityFile` keys read directly
@@ -29,15 +33,20 @@
 //!
 //! `watch()` polls the remote path every two seconds and emits Modify /
 //! Remove events when size or mtime changes — the closest equivalent to
-//! notify's local FS events given that SFTP has no push notification.
+//! notify's local FS events given that SFTP has no push notification. Each
+//! round takes its connection from the pool afresh rather than holding one,
+//! so a dropped connection is opened again by the next round. A round that
+//! hits a disconnection emits nothing and keeps the last size / mtime; only
+//! an error the server answered (the file is gone) emits Remove.
 //!
 //! Out of scope (tracked in follow-ups)
 //! -----------------------------------
+//! - Idle timeout for pooled connections, and concurrent transfers on one
+//!   host.
 //! - Passphrase prompt for encrypted IdentityFile keys.
 //! - `IdentityAgent` ssh_config directive.
 //! - `StrictHostKeyChecking=yes|ask` honouring (we default to TOFU).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -52,13 +61,14 @@ use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, FileType, OpenFlags};
 use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::errors::FsError;
 
 use super::entry::{Entry, FileKind};
 use super::provider::{FileProvider, WatchEvent, WatchEventKind, WatchHandle};
+use super::ssh_pool::{ConnectionPool, OpError, PooledConnection};
 use super::uri::{Authority, Uri};
 
 /// Monotonic id assigned to every SshProvider watch handle for diagnostics.
@@ -163,40 +173,31 @@ impl Handler for KnownHostsVerifier {
 /// does not get dropped while the `SftpSession` is in use.
 struct Session {
     /// The underlying SSH connection. Dropping ends the SFTP channel.
-    _handle: Handle<KnownHostsVerifier>,
+    handle: Handle<KnownHostsVerifier>,
     /// SFTP session reused for every operation on this authority.
-    sftp: Arc<SftpSession>,
+    sftp: SftpSession,
+}
+
+/// The pool's liveness check: the SSH transport's background task has ended
+/// (EOF, reset, disconnect), so nothing sent on this session can arrive.
+impl PooledConnection for Session {
+    fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
 }
 
 /// SSH / SFTP `FileProvider`.
 pub struct SshProvider {
-    /// Cached sessions keyed by `user@host:port`. One session per authority.
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Sessions keyed by `user@host:port`. One session per authority.
+    /// Shared with the poll watchers, which take a session every round.
+    pool: Arc<ConnectionPool<Session>>,
 }
 
 impl SshProvider {
     pub fn new() -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            pool: Arc::new(ConnectionPool::new()),
         }
-    }
-
-    /// Return the cached SFTP session for this authority, opening a new one
-    /// on first use.
-    async fn sftp(&self, authority: &Authority) -> Result<Arc<SftpSession>, FsError> {
-        let key = authority.to_string();
-        {
-            let cache = self.sessions.lock().await;
-            if let Some(sess) = cache.get(&key) {
-                return Ok(sess.sftp.clone());
-            }
-        }
-
-        let session = Self::open(authority).await?;
-        let sftp = session.sftp.clone();
-        let mut cache = self.sessions.lock().await;
-        cache.insert(key, Arc::new(session));
-        Ok(sftp)
     }
 
     /// Open a new SSH + SFTP session to `authority`, authenticating via
@@ -275,10 +276,7 @@ impl SshProvider {
             .await
             .map_err(sftp_to_fs)?;
 
-        Ok(Session {
-            _handle: handle,
-            sftp: Arc::new(sftp),
-        })
+        Ok(Session { handle, sftp })
     }
 
     /// Convert an SFTP `FileAttributes` + name into an `Entry`.
@@ -350,10 +348,16 @@ impl FileProvider for SshProvider {
             .authority
             .as_ref()
             .ok_or_else(|| FsError::NotFound(uri.raw.clone()))?;
-        let sftp = self.sftp(authority).await?;
         let dir = path_to_string(&uri.path)?;
+        let dir = dir.as_str();
+        let key = authority.to_string();
 
-        let entries_iter = sftp.read_dir(&dir).await.map_err(sftp_to_fs)?;
+        let entries_iter = self
+            .pool
+            .run(&key, || Self::open(authority), |session| async move {
+                session.sftp.read_dir(dir).await.map_err(classify_sftp_error)
+            })
+            .await?;
         let mut out: Vec<Entry> = Vec::new();
         for entry in entries_iter {
             let name = entry.file_name();
@@ -400,10 +404,16 @@ impl FileProvider for SshProvider {
             .authority
             .as_ref()
             .ok_or_else(|| FsError::NotFound(uri.raw.clone()))?;
-        let sftp = self.sftp(authority).await?;
         let path = path_to_string(&uri.path)?;
+        let path = path.as_str();
+        let key = authority.to_string();
 
-        let attrs = sftp.metadata(&path).await.map_err(sftp_to_fs)?;
+        let attrs = self
+            .pool
+            .run(&key, || Self::open(authority), |session| async move {
+                session.sftp.metadata(path).await.map_err(classify_sftp_error)
+            })
+            .await?;
         let parent = uri.parent().unwrap_or_else(|| uri.clone());
         let name = uri
             .path
@@ -418,21 +428,35 @@ impl FileProvider for SshProvider {
             .authority
             .as_ref()
             .ok_or_else(|| FsError::NotFound(uri.raw.clone()))?;
-        let sftp = self.sftp(authority).await?;
         let path = path_to_string(&uri.path)?;
+        let path = path.as_str();
+        let key = authority.to_string();
 
-        let mut file = sftp
-            .open_with_flags(&path, OpenFlags::READ)
-            .await
-            .map_err(sftp_to_fs)?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).await.map_err(FsError::Io)?;
+        // The whole open + read is one operation: a connection that drops
+        // mid-read is retried from the open on a fresh connection.
+        let buf = self
+            .pool
+            .run(&key, || Self::open(authority), |session| async move {
+                let mut file = session
+                    .sftp
+                    .open_with_flags(path, OpenFlags::READ)
+                    .await
+                    .map_err(classify_sftp_error)?;
+                let mut buf = Vec::new();
+                file.read_to_end(&mut buf).await.map_err(classify_io_error)?;
+                Ok(buf)
+            })
+            .await?;
         Ok(buf)
     }
 
     /// Poll the remote path every `POLL_INTERVAL` and emit `Modify` /
     /// `Remove` events when the size or mtime changes. Dropping the
     /// returned `WatchHandle` ends the polling task.
+    ///
+    /// No connection is taken here: the polling task takes one from the
+    /// pool every round, so a host that is unreachable right now is picked
+    /// up from the first round it answers.
     async fn watch(
         &self,
         uri: &Uri,
@@ -442,7 +466,6 @@ impl FileProvider for SshProvider {
             .authority
             .as_ref()
             .ok_or_else(|| FsError::NotFound(uri.raw.clone()))?;
-        let sftp = self.sftp(authority).await?;
         let path = path_to_string(&uri.path)?;
         let uri_raw = uri.raw.clone();
 
@@ -452,7 +475,14 @@ impl FileProvider for SshProvider {
         // terminates.
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-        tokio::spawn(poll_loop(sftp, path, uri_raw, tx, stop_rx));
+        tokio::spawn(poll_loop(
+            self.pool.clone(),
+            authority.clone(),
+            path,
+            uri_raw,
+            tx,
+            stop_rx,
+        ));
 
         let id = SSH_WATCH_ID.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(id, host = %authority.host, "started ssh poll watch");
@@ -460,19 +490,54 @@ impl FileProvider for SshProvider {
     }
 }
 
-/// Polling task body. Re-stats `path` on `sftp` every `POLL_INTERVAL`
-/// and forwards `Modify` / `Remove` to `tx` whenever (size, mtime)
-/// changes. Exits cleanly when `stop_rx` errors (paired Sender dropped)
-/// or when the event channel is closed.
+/// Size and mtime of a watched remote file, as one poll round sees it.
+pub type PollSnapshot = (Option<u64>, Option<SystemTime>);
+
+/// Decide one poll round (要件#5 追補a 契約5): given the last snapshot and
+/// this round's stat outcome, return the event to send (if any) and the
+/// snapshot to remember.
+///
+/// - A snapshot that differs from the last one → `Modify`. The first one, or
+///   an unchanged one, sends nothing.
+/// - An error the server answered (`OpError::Failed` — the file is gone) →
+///   `Remove`, once per disappearance: the snapshot is forgotten, so further
+///   failures stay silent until the file reappears.
+/// - A disconnection (including a connection that could not be reopened) →
+///   nothing, and the last snapshot is kept so a change made while the
+///   connection was down shows up as `Modify` once it is back.
+pub fn poll_step(
+    prev: Option<PollSnapshot>,
+    outcome: Result<PollSnapshot, OpError>,
+) -> (Option<WatchEventKind>, Option<PollSnapshot>) {
+    match outcome {
+        Ok(snapshot) => {
+            let event = match prev {
+                Some(prev) if prev != snapshot => Some(WatchEventKind::Modify),
+                _ => None,
+            };
+            (event, Some(snapshot))
+        }
+        Err(e) if e.is_disconnected() => (None, prev),
+        Err(_) => (prev.map(|_| WatchEventKind::Remove), None),
+    }
+}
+
+/// Polling task body. Every `POLL_INTERVAL` takes the session for
+/// `authority` from `pool` (reopening a dropped one), re-stats `path` and
+/// forwards whatever `poll_step` decides to `tx`. Exits cleanly when
+/// `stop_rx` errors (paired Sender dropped) or when the event channel is
+/// closed.
 async fn poll_loop(
-    sftp: Arc<SftpSession>,
+    pool: Arc<ConnectionPool<Session>>,
+    authority: Authority,
     path: String,
     uri_raw: String,
     tx: mpsc::Sender<WatchEvent>,
     mut stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    type Snapshot = (Option<u64>, Option<SystemTime>);
-    let mut last: Option<Snapshot> = None;
+    let key = authority.to_string();
+    let path = path.as_str();
+    let mut last: Option<PollSnapshot> = None;
     loop {
         tokio::select! {
             _ = &mut stop_rx => {
@@ -482,38 +547,24 @@ async fn poll_loop(
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
         }
 
-        match sftp.metadata(&path).await {
-            Ok(attrs) => {
-                let snapshot: Snapshot = (attrs.size, attrs.modified().ok());
-                if let Some(prev) = &last {
-                    if *prev != snapshot {
-                        if tx
-                            .send(WatchEvent {
-                                kind: WatchEventKind::Modify,
-                                uri: uri_raw.clone(),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                }
-                last = Some(snapshot);
-            }
-            Err(_) => {
-                // Treat any stat failure as "file went away". We only
-                // emit Remove once per disappearance; subsequent failed
-                // polls stay silent until the file reappears.
-                if last.is_some() {
-                    let _ = tx
-                        .send(WatchEvent {
-                            kind: WatchEventKind::Remove,
-                            uri: uri_raw.clone(),
-                        })
-                        .await;
-                    last = None;
-                }
+        let outcome = pool
+            .run(&key, || SshProvider::open(&authority), |session| async move {
+                let attrs = session.sftp.metadata(path).await.map_err(classify_sftp_error)?;
+                Ok((attrs.size, attrs.modified().ok()))
+            })
+            .await;
+        let (event, next) = poll_step(last, outcome);
+        last = next;
+        if let Some(kind) = event {
+            if tx
+                .send(WatchEvent {
+                    kind,
+                    uri: uri_raw.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return;
             }
         }
     }
@@ -699,6 +750,33 @@ fn ssh_to_fs(e: russh::Error) -> FsError {
         russh::Error::IO(io) => FsError::Io(io),
         other => FsError::PermissionDenied(format!("ssh: {}", other)),
     }
+}
+
+/// Sort an SFTP error into a disconnection (retried once on a fresh
+/// connection) or a failure to return as is (要件#5 追補a 契約3). The
+/// `FsError` inside is the `sftp_to_fs` mapping either way, so messages are
+/// unchanged.
+///
+/// - Disconnection: `UnexpectedBehavior` (`session closed`, `recv none
+///   message`, a failed send / receive on the channel), `Timeout`, `IO`.
+/// - Not a disconnection: `Status` (the server answered — not found,
+///   permission denied, failure), `Limited`, `UnexpectedPacket`.
+pub fn classify_sftp_error(e: russh_sftp::client::error::Error) -> OpError {
+    use russh_sftp::client::error::Error;
+    match &e {
+        Error::UnexpectedBehavior(_) | Error::Timeout | Error::IO(_) => {
+            OpError::Disconnected(sftp_to_fs(e))
+        }
+        Error::Status(_) | Error::Limited(_) | Error::UnexpectedPacket => {
+            OpError::Failed(sftp_to_fs(e))
+        }
+    }
+}
+
+/// An I/O error while reading an opened remote file (`read_to_end`) means the
+/// channel broke mid-transfer: a disconnection.
+pub fn classify_io_error(e: std::io::Error) -> OpError {
+    OpError::Disconnected(FsError::Io(e))
 }
 
 fn sftp_to_fs(e: russh_sftp::client::error::Error) -> FsError {

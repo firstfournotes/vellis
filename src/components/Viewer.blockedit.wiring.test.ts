@@ -1329,3 +1329,464 @@ describe('Viewer — 同じブロックを2回編集して確定しても内部 
 		expect(windowState.dirty).toBe(true);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// 追補d(2026-10-02・backlog 152・155・157)— 閲覧へ戻るときの画面の巻き戻しと
+// inline code の繰り上げ
+// ---------------------------------------------------------------------------
+//
+// - **AC-49-26(契約②・追補d(1))**: ブロックをダブルクリックして文字を打ち、確定しない
+//   まま ⌘E トグル / 「編集を終える」で閲覧へ戻ると、そのブロックの表示は編集前の文字に
+//   戻る。`{@html}` は文字列が同じだと DOM を作り直さないので、掴みを捨てるだけでは
+//   打った文字が画面に残り、再入場でそれが「編集前」として掴まれて確定で原文へ書かれる
+//   (backlog 157)。再入場して何も打たずに確定しても `document.content` は元の原文のまま
+// - **AC-49-27(契約②・追補d(2))**: ブロックを確定(dirty)したあと「編集を終える」で
+//   破棄すると、レンダリング表示が破棄後の原文(`document.content`)のレンダリングに
+//   揃う(backlog 155)。Viewer の `html` prop は `document.content` のレンダリングなので、
+//   閲覧へ戻った本文の文字列はそれを素に載せた DOM と一致する
+// - **AC-49-31(契約①③・追補d(6))**: 段落の中の inline `code` の上をダブルクリックすると
+//   その段落が contenteditable になる(ソース編集モードへ誘導されない。backlog 152)。
+//   純関数側(繰り上げ先の判定)は edit.acceptance.test.ts
+//
+// 表示が「戻った」かは、戻した後に**要素を取り直して**判定する ―― 戻し方が掴んだ
+// ブロックの `innerHTML` の書き戻しでも本文全体の作り直しでも、同じ判定が通るように。
+
+/** inline code を含む段落(AC-49-31)。 */
+const CODE_MD = ['# Title', '', 'Use `inline` code here.', '', 'Tail.', ''].join('\n');
+const CODE_P = 'Use `inline` code here.';
+
+let renderedCode: { html: string; index: SourceIndex };
+
+beforeAll(async () => {
+	const code = await renderMarkdown(CODE_MD, MD_URI);
+	renderedCode = { html: code.html, index: code.index };
+});
+
+/** 打ったが確定しない文字。 */
+const TYPED = 'Typed but never committed.';
+
+/** `html` をそのまま載せた DOM の本文テキスト(= `document.content` のレンダリングの文字列)。 */
+function textOfHtml(html: string): string {
+	const div = document.createElement('div');
+	div.innerHTML = html;
+	return (div.textContent ?? '').trim();
+}
+
+/** 閲覧へ戻った本文が `html`(= `document.content` のレンダリング)と同じ文字列を見せていること。 */
+function expectBodyShows(container: HTMLElement, html: string, paragraphTexts: string[]) {
+	expect(windowState.editMode).toBe('view');
+	expect(sourcePre(container)).toBeNull();
+	expect(editables(container)).toEqual([]);
+	expect(paragraphs(container).map((p) => p.textContent)).toEqual(paragraphTexts);
+	expect((body(container).textContent ?? '').trim()).toBe(textOfHtml(html));
+}
+
+/** 「編集を終える」(非 dirty)。失うものが無いので `ask` は出ず、そのまま閲覧へ戻る。 */
+async function finishEditClean() {
+	await fireEvent.click(screen.getByTestId('edit-done'));
+	await settle();
+	expect(askMock).not.toHaveBeenCalled();
+	expect(windowState.editMode).toBe('view');
+}
+
+// ---------------------------------------------------------------------------
+// AC-49-26 — 未確定の編集は閲覧へ戻ると画面からも消える(契約②・追補d(1))
+// ---------------------------------------------------------------------------
+
+describe('Viewer — 未確定の編集は閲覧へ戻ると画面からも消える(契約②・追補d(1) / AC-49-26)', () => {
+	it('文字を打って確定しないまま ⌘E で閲覧へ戻る: 段落の表示が編集前の文字に戻る', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await typeInto(paragraphs(container)[0], TYPED);
+		expect(windowState.dirty).toBe(false);
+		expect(paragraphs(container)[0].textContent).toBe(TYPED);
+
+		await commandE();
+
+		// reviewer 指摘(backlog 157): 掴みを捨てるだけでは打った文字が画面に残る。
+		expectBodyShows(container, renderedSeq.html, [P1, P2, P3]);
+		expect(container.textContent).not.toContain(TYPED);
+	});
+
+	it('文字を打って確定しないまま「編集を終える」で閲覧へ戻る: 段落の表示が編集前の文字に戻る(ask は出ない)', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await typeInto(paragraphs(container)[1], TYPED);
+		expect(windowState.dirty).toBe(false);
+
+		await finishEditClean();
+
+		expectBodyShows(container, renderedSeq.html, [P1, P2, P3]);
+		expect(container.textContent).not.toContain(TYPED);
+	});
+
+	it('⌘E で閲覧へ戻ったあと同じ段落を再びダブルクリックして何も打たずに確定: 打った文字が原文へ書かれない(reviewer 指摘の再現)', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await typeInto(paragraphs(container)[0], TYPED);
+		await commandE();
+		expect(windowState.editMode).toBe('view');
+
+		// 再入場(閲覧→編集)。戻した後の要素を取り直して掴む。
+		const p1 = paragraphs(container)[0];
+		await beginBlockEdit(p1);
+		expect(isEditable(p1)).toBe(true);
+		await clickOutside(container);
+
+		// reviewer 指摘: 画面に残った文字が「編集前」として掴まれ、確定で原文へ書かれた。
+		expect(windowState.currentDocument?.content).toBe(SEQ_MD);
+		expect(windowState.editBuffer ?? SEQ_MD).toBe(SEQ_MD);
+		expect(windowState.dirty).toBe(false);
+		expect(paragraphs(container)[0].textContent).toBe(P1);
+	});
+
+	it('「編集を終える」で閲覧へ戻ったあと再入場して確定しても同じ', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await typeInto(paragraphs(container)[1], TYPED);
+		await finishEditClean();
+
+		const p2 = paragraphs(container)[1];
+		await beginBlockEdit(p2);
+		expect(isEditable(p2)).toBe(true);
+		await clickOutside(container);
+
+		expect(windowState.currentDocument?.content).toBe(SEQ_MD);
+		expect(windowState.editBuffer ?? SEQ_MD).toBe(SEQ_MD);
+		expect(windowState.dirty).toBe(false);
+		expect(paragraphs(container)[1].textContent).toBe(P2);
+	});
+
+	it('閲覧へ戻した後も、戻した段落を直して確定すれば従来どおり差し替わる(戻しが編集を壊さない)', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await typeInto(paragraphs(container)[0], TYPED);
+		await commandE();
+		// 戻った表示(編集前の文字)を掴み直して直す ―― 戻し方が本文の作り直しでも通る。
+		expect(paragraphs(container)[0].textContent).toBe(P1);
+
+		await editAndCommit(container, paragraphs(container)[0], P1_LONGER);
+
+		expect(windowState.editBuffer).toBe(replaced(SEQ_MD, [P1, P1_LONGER]));
+		expect(windowState.dirty).toBe(true);
+		expect(windowState.currentDocument?.content).toBe(SEQ_MD);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// AC-49-27 — 破棄で閲覧へ戻ったら画面も原文に揃う(契約②・追補d(2))
+// ---------------------------------------------------------------------------
+
+describe('Viewer — 破棄で閲覧へ戻ったら画面も原文に揃う(契約②・追補d(2) / AC-49-27)', () => {
+	it('段落1を確定(dirty)→「編集を終える」で破棄: 表示が document.content のレンダリングに揃う(backlog 155 の再現)', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await editAndCommit(container, paragraphs(container)[0], P1_LONGER);
+		expect(windowState.dirty).toBe(true);
+		expect(paragraphs(container)[0].textContent).toBe(P1_LONGER);
+
+		await finishEditDiscarding();
+		expect(windowState.editBuffer).toBeNull();
+		expect(windowState.currentDocument?.content).toBe(SEQ_MD);
+
+		// test-writer 観察(backlog 155): 原文は戻るのに画面には直した文字が残っていた。
+		expectBodyShows(container, renderedSeq.html, [P1, P2, P3]);
+		expect(container.textContent).not.toContain(P1_LONGER);
+	});
+
+	it('2ブロックを確定→「編集を終える」で破棄: 両方の表示が原文へ戻る', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await editAndCommit(container, paragraphs(container)[0], P1_SHORTER);
+		await editAndCommit(container, paragraphs(container)[1], P2_LONGER);
+		expect(windowState.editBuffer).toBe(replaced(SEQ_MD, [P1, P1_SHORTER], [P2, P2_LONGER]));
+
+		await finishEditDiscarding();
+
+		expectBodyShows(container, renderedSeq.html, [P1, P2, P3]);
+		expect(container.textContent).not.toContain(P1_SHORTER);
+		expect(container.textContent).not.toContain(P2_LONGER);
+	});
+
+	it('⌘E の破棄(同じ confirmDiscardEdits → endEdit の経路)でも表示が原文へ戻る', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await editAndCommit(container, paragraphs(container)[0], P1_LONGER);
+
+		await commandE();
+		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(windowState.editBuffer).toBeNull();
+
+		expectBodyShows(container, renderedSeq.html, [P1, P2, P3]);
+		expect(container.textContent).not.toContain(P1_LONGER);
+	});
+
+	it('破棄で戻した後に段落を編集して確定すると、原文基準で差し替わり画面にも反映される(AC-49-16 との両立)', async () => {
+		const { container } = mountDoc(SEQ_MD, renderedSeq);
+		await editAndCommit(container, paragraphs(container)[0], P1_LONGER);
+		await finishEditDiscarding();
+		expectBodyShows(container, renderedSeq.html, [P1, P2, P3]);
+
+		await editAndCommit(container, paragraphs(container)[1], P2_EDITED);
+
+		expect(windowState.editBuffer).toBe(replaced(SEQ_MD, [P2, P2_EDITED]));
+		expect(windowState.dirty).toBe(true);
+		expect(paragraphs(container)[1].textContent).toBe(P2_EDITED);
+		expect(sourcePre(container)).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// AC-49-31 — inline code はブロックへ繰り上げる(契約①③・追補d(6))
+// ---------------------------------------------------------------------------
+
+describe('Viewer — inline code の上のダブルクリックはその段落をブロック編集にする(契約①③・追補d(6) / AC-49-31)', () => {
+	it('段落の中の <code> をダブルクリック: その段落だけが contenteditable になり、ソース編集の <pre> は出ない', async () => {
+		const { container } = mountDoc(CODE_MD, renderedCode);
+		const p = paragraphs(container)[0];
+		expect(p.textContent).toBe('Use inline code here.');
+		const code = q(p, 'code');
+		expect(code.closest('pre')).toBeNull();
+
+		await beginBlockEdit(code);
+
+		// reviewer 指摘(backlog 152): `code` のタグ名を見た時点で source へ落ちていた。
+		expect(windowState.editMode).toBe('edit');
+		expect(sourcePre(container)).toBeNull();
+		expectOnlyEditable(container, p);
+		expect(isEditable(code)).toBe(false);
+		expect(isEditable(body(container))).toBe(false);
+		expect(windowState.dirty).toBe(false);
+	});
+
+	it('繰り上げた段落の文字を直して確定: editBuffer にその段落だけの差し替えが載り、inline code は保たれる', async () => {
+		const { container } = mountDoc(CODE_MD, renderedCode);
+		const p = paragraphs(container)[0];
+
+		await beginBlockEdit(q(p, 'code'));
+		expect(isEditable(p)).toBe(true);
+		const first = p.firstChild;
+		if (!first || first.nodeType !== Node.TEXT_NODE) throw new Error('先頭がテキストではない');
+		first.textContent = 'Try ';
+		await fireEvent.input(p);
+		await clickOutside(container);
+
+		expect(windowState.editBuffer).toBe(replaced(CODE_MD, [CODE_P, 'Try `inline` code here.']));
+		expect(windowState.dirty).toBe(true);
+		expect(sourcePre(container)).toBeNull();
+	});
+
+	it('リスト項目内の code fence の <code> は従来どおりソース編集モードへ誘導(非退行)', async () => {
+		const { container } = renderMarkdownDoc();
+
+		await beginBlockEdit(q(container, 'li pre > code'));
+
+		expect(windowState.editMode).toBe('edit');
+		const pre = sourcePre(container);
+		expect(pre).not.toBeNull();
+		expectOnlyEditable(container, pre as HTMLElement);
+	});
+});
+
+// ===========================================================================
+// 追補d の2周目(2026-10-02・1周目 reviewer 照合 P1 を受けて (1) に足した一文の固定)
+// ===========================================================================
+//
+// - **AC-49-26(契約②・追補d(1)・入れ子)**: 入れ子のブロック(リスト項目の中のリスト項目・
+//   緩いリストの段落)を**内側→外側の順に掴んで**閲覧へ戻しても、戻した結果は掴む前の
+//   表示である ―― 外側を掴んだときの控えは直した内側を含んでいるので、それで内側の戻しを
+//   上書きしてはならない(reviewer 実測: 画面に `inner EDITED` が残り、再入場→無編集で確定
+//   すると原文へ書かれた)。再入場して何も打たずに確定しても `editBuffer` / `document.content`
+//   は元の原文のまま
+// - **AC-49-26(契約②・追補d(1)・再レンダー)**: 再レンダーで掴みの記録を捨てるときも、DOM が
+//   残っていれば戻してから捨てる。`{@html}` は文字列が同じだと DOM を作り直さないので、
+//   レンダー結果が同じ外部変更(末尾の空行だけが増えた等)が編集中(非 dirty)に apply される
+//   と、`index` だけが差し替わって打った文字が画面に残る。残った文字は再入場で「編集前」として
+//   掴まれ、確定で原文へ書かれる
+//
+// 「未確定の内側を掴んだまま外側を掴む」形は配線上たどれない ―― 外側への mousedown は内側の
+// ブロック**外**なので先に内側が確定する(契約②)。したがって確定済み(dirty)の形だけを固定する。
+
+/** 入れ子のリスト項目(AC-49-26 入れ子)。 */
+const NESTED_MD = ['# Title', '', '- outer item', '  - inner item', '', 'Tail.', ''].join('\n');
+const INNER_ITEM = 'inner item';
+const INNER_EDITED = 'inner EDITED';
+/** 緩いリストの項目の中の段落(AC-49-26 入れ子)。
+ * 追補f(4)(2026-10-04)による改訂: 2段落の緩い項目は追補f(1) で誘導側へ移ったので、
+ * 題材を**段落1つの緩い項目**(`- Inner para.` + 空行 + `- outer item`)に替え、
+ * 「段落→その li」の内側→外側の守りを残す。 */
+const LOOSE_MD = ['# Title', '', '- Inner para.', '', '- outer item', '', 'Tail.', ''].join('\n');
+const INNER_PARA = 'Inner para.';
+const INNER_PARA_EDITED = 'Inner EDITED.';
+/** SEQ_MD の末尾に空行を1つ足したもの ―― レンダー結果の HTML 文字列は SEQ_MD と同じ。 */
+const SEQ_TRAILING_MD = SEQ_MD + '\n';
+
+let renderedNested: { html: string; index: SourceIndex };
+let renderedLoose: { html: string; index: SourceIndex };
+let renderedSeqTrailing: { html: string; index: SourceIndex };
+
+beforeAll(async () => {
+	const [nested, loose, trailing] = await Promise.all([
+		renderMarkdown(NESTED_MD, MD_URI),
+		renderMarkdown(LOOSE_MD, MD_URI),
+		renderMarkdown(SEQ_TRAILING_MD, MD_URI),
+	]);
+	renderedNested = { html: nested.html, index: nested.index };
+	renderedLoose = { html: loose.html, index: loose.index };
+	renderedSeqTrailing = { html: trailing.html, index: trailing.index };
+});
+
+/** 文書順のリスト項目。 */
+function listItems(container: HTMLElement): HTMLElement[] {
+	return [...container.querySelectorAll('li[data-vellis-node-type="listItem"]')] as HTMLElement[];
+}
+
+// ---------------------------------------------------------------------------
+// AC-49-26(追補d(1) 追記)— 入れ子のブロックを内側→外側の順に掴んでも戻した結果は掴む前の表示
+// ---------------------------------------------------------------------------
+
+// 追補f(4)(2026-10-04・由谷「書き換えてよい」)による改訂: 追補f(1) で子リストを持つ外側の
+// 項目と2段落の緩い項目はブロックとして掴めなくなった(ソース編集モードへ誘導)。外側を掴む手順は
+// 「誘導される」確認に置き換え(2件)、緩いリストの題材は段落1つの緩い項目に替える(1件)。
+describe('Viewer — 入れ子のブロックを内側→外側の順に掴んで閲覧へ戻しても表示は掴む前のもの(契約②・追補d(1) / AC-49-26・追補f(4) 改訂)', () => {
+	it('reviewer P1 の再現: 内側 li を直して確定→外側 li を掴む(追補f(4) 改訂: ソース編集モードへ誘導される)→「編集を終える」で破棄: 画面の内側 li は原文のまま・再入場→無編集で確定しても原文に書かれない', async () => {
+		const { container } = mountDoc(NESTED_MD, renderedNested);
+		const [outer, inner] = listItems(container);
+		expect(outer.contains(inner)).toBe(true);
+		expect(inner.textContent).toBe(INNER_ITEM);
+
+		// 1) 内側を直して確定(dirty)。
+		await editAndCommit(container, inner, INNER_EDITED);
+		const afterInner = replaced(NESTED_MD, [INNER_ITEM, INNER_EDITED]);
+		expect(windowState.editBuffer).toBe(afterInner);
+		expect(windowState.dirty).toBe(true);
+
+		// 2) 外側を掴む(何も打たない)。追補f(1)(3): 子リストを持つ外側の項目は contenteditable に
+		//    ならず、ソース編集モードへ誘導される。確定済みの内側の差し替えと dirty は保たれる。
+		await beginBlockEdit(outer);
+		expect(isEditable(outer)).toBe(false);
+		expectSourceEditing(container, afterInner);
+		expect(windowState.editBuffer).toBe(afterInner);
+		expect(windowState.dirty).toBe(true);
+
+		// 3)「編集を終える」→ 破棄。
+		await finishEditDiscarding();
+		expect(windowState.editMode).toBe('view');
+		expect(windowState.editBuffer).toBeNull();
+		expect(windowState.currentDocument?.content).toBe(NESTED_MD);
+
+		// reviewer 実測: 外側の控え(`inner EDITED` 入り)が内側の戻しを上書きし、画面に残った。
+		expect(listItems(container)).toHaveLength(2);
+		expect(listItems(container)[1].textContent).toBe(INNER_ITEM);
+		expect(container.textContent).not.toContain(INNER_EDITED);
+		expect(editables(container)).toEqual([]);
+		expect((body(container).textContent ?? '').trim()).toBe(textOfHtml(renderedNested.html));
+
+		// 再入場(閲覧→編集)して何も打たずに確定しても、原文には何も書かれない。
+		const innerAgain = listItems(container)[1];
+		await beginBlockEdit(innerAgain);
+		expect(isEditable(innerAgain)).toBe(true);
+		await clickOutside(container);
+
+		// reviewer 実測: 再入場→確定で `- inner EDITED` が原文へ書かれた。
+		expect(windowState.currentDocument?.content).toBe(NESTED_MD);
+		expect(windowState.editBuffer ?? NESTED_MD).toBe(NESTED_MD);
+		expect(windowState.dirty).toBe(false);
+		expect(listItems(container)[1].textContent).toBe(INNER_ITEM);
+	});
+
+	it('緩いリスト(段落1つの項目=追補f(4) 改訂の題材)の段落→その li の順に掴んで ⌘E で破棄: 画面の段落は原文のまま・再入場→無編集で確定しても原文に書かれない', async () => {
+		const { container } = mountDoc(LOOSE_MD, renderedLoose);
+		const [li] = listItems(container);
+		// 段落1つの緩い項目: 内側の段落は文書順の先頭(見出しは段落ではない)。
+		const inner = paragraphs(container)[0];
+		expect(inner.textContent).toBe(INNER_PARA);
+		expect(li.contains(inner)).toBe(true);
+		expect(li.querySelectorAll(':scope > p')).toHaveLength(1);
+
+		await editAndCommit(container, inner, INNER_PARA_EDITED);
+		expect(windowState.editBuffer).toBe(replaced(LOOSE_MD, [INNER_PARA, INNER_PARA_EDITED]));
+		expect(windowState.dirty).toBe(true);
+
+		// 段落1つの緩い項目は追補f(1) の後もブロックとして掴める(直下のブロックが1つ)。
+		await beginBlockEdit(li);
+		expectOnlyEditable(container, li);
+
+		await commandE();
+		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(windowState.editMode).toBe('view');
+		expect(windowState.editBuffer).toBeNull();
+		expect(windowState.currentDocument?.content).toBe(LOOSE_MD);
+
+		expect(paragraphs(container).map((p) => p.textContent)).toEqual([INNER_PARA, 'outer item', 'Tail.']);
+		expect(container.textContent).not.toContain(INNER_PARA_EDITED);
+		expect((body(container).textContent ?? '').trim()).toBe(textOfHtml(renderedLoose.html));
+
+		const innerAgain = paragraphs(container)[0];
+		await beginBlockEdit(innerAgain);
+		expect(isEditable(innerAgain)).toBe(true);
+		await clickOutside(container);
+
+		expect(windowState.currentDocument?.content).toBe(LOOSE_MD);
+		expect(windowState.editBuffer ?? LOOSE_MD).toBe(LOOSE_MD);
+		expect(windowState.dirty).toBe(false);
+		expect(paragraphs(container)[0].textContent).toBe(INNER_PARA);
+	});
+
+	it('戻した後に内側を直して確定すれば従来どおり差し替わる(戻しが入れ子の編集を壊さない・追補f(4) 改訂: 外側はソース編集モードへ誘導される)', async () => {
+		const { container } = mountDoc(NESTED_MD, renderedNested);
+		const [outer, inner] = listItems(container);
+		await editAndCommit(container, inner, INNER_EDITED);
+		await beginBlockEdit(outer);
+		// 追補f(1): 外側の項目はブロックとして掴めず、ソース編集モードへ誘導される(確定済みの内側は保たれる)。
+		expectSourceEditing(container, replaced(NESTED_MD, [INNER_ITEM, INNER_EDITED]));
+		await finishEditDiscarding();
+		expect(listItems(container)[1].textContent).toBe(INNER_ITEM);
+
+		await editAndCommit(container, listItems(container)[1], 'inner later');
+
+		expect(windowState.editBuffer).toBe(replaced(NESTED_MD, [INNER_ITEM, 'inner later']));
+		expect(windowState.dirty).toBe(true);
+		expect(windowState.currentDocument?.content).toBe(NESTED_MD);
+		expect(listItems(container)[1].textContent).toBe('inner later');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// AC-49-26(追補d(1) 追記)— 再レンダーで掴みの記録を捨てるときも DOM が残っていれば戻す
+// ---------------------------------------------------------------------------
+
+describe('Viewer — 再レンダーで掴みを捨てるとき、DOM が残っていれば戻してから捨てる(契約②・追補d(1) / AC-49-26)', () => {
+	it('前提の確認: 末尾に空行を足した原文のレンダー結果は HTML 文字列が同じ(`{@html}` は DOM を作り直さない)', () => {
+		expect(SEQ_TRAILING_MD).not.toBe(SEQ_MD);
+		expect(renderedSeqTrailing.html).toBe(renderedSeq.html);
+		expect(renderedSeqTrailing.index).not.toBe(renderedSeq.index);
+	});
+
+	it('打って確定しないまま同じ HTML の外部変更が apply: 段落の表示は編集前へ戻り、再入場→無編集で確定しても打った文字が原文へ書かれない', async () => {
+		const r = mountDoc(SEQ_MD, renderedSeq);
+		const p1 = paragraphs(r.container)[0];
+		await typeInto(p1, TYPED);
+		expect(windowState.dirty).toBe(false);
+
+		// 要件#48 契約⑥: 編集中でも未変更なら apply。ページ側は index だけ差し替わる。
+		expect(
+			windowState.applyFileChanged({ uri: MD_URI, content: SEQ_TRAILING_MD, modified: 2 }),
+		).toBe('apply');
+		await rerenderAs(r.rerender, SEQ_TRAILING_MD, renderedSeqTrailing);
+
+		// DOM は残っている(前提の確認)ので、掴みを捨てる前に戻す。
+		expect(p1.isConnected).toBe(true);
+		expect(windowState.editMode).toBe('edit');
+		expect(windowState.editBuffer).toBe(SEQ_TRAILING_MD);
+		expect(editables(r.container)).toEqual([]);
+		expect(paragraphs(r.container)[0].textContent).toBe(P1);
+		expect(r.container.textContent).not.toContain(TYPED);
+
+		// 再入場して何も打たずに確定(実機の順=mousedown → dblclick)。
+		const again = paragraphs(r.container)[0];
+		await fireEvent.mouseDown(again);
+		await fireEvent.click(again);
+		await settle();
+		await beginBlockEdit(again);
+		expect(isEditable(again)).toBe(true);
+		await clickOutside(r.container);
+
+		expect(windowState.editBuffer).toBe(SEQ_TRAILING_MD);
+		expect(windowState.dirty).toBe(false);
+		expect(windowState.currentDocument?.content).toBe(SEQ_TRAILING_MD);
+		expect(paragraphs(r.container)[0].textContent).toBe(P1);
+	});
+});

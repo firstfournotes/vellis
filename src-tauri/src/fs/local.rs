@@ -269,29 +269,42 @@ impl FileProvider for LocalProvider {
     /// handling, no trailing-newline insertion. The editor buffer round-trips
     /// through `<pre>` unchanged (契約②) and it must survive this step too.
     ///
-    /// The only refusal here is a path carrying `..`. Root containment is
-    /// checked one layer up, by `save_document`, because a `LocalProvider`
+    /// A symlink is written *through*, not over (追補d(1)): the bytes land in
+    /// the file the link resolves to (following a chain of links), the temp
+    /// file is made next to *that* file so the rename stays on its
+    /// filesystem, and the link itself is left as it was — what vim and
+    /// VS Code do. `rename` never follows its destination, so renaming onto
+    /// the link's own path would swap the link for a plain file and leave
+    /// the real document stale. A link whose target is missing is refused
+    /// outright (追補d(2)): writing would either replace the link or create
+    /// a file the user never opened.
+    ///
+    /// The only other refusal here is a path carrying `..`. Root containment
+    /// is checked one layer up, by `save_document`, because a `LocalProvider`
     /// holds no root of its own (追補a).
     async fn write_text(&self, uri: &str, content: &str) -> Result<(), FsError> {
         let parsed = Uri::parse(uri).map_err(|e| FsError::PermissionDenied(e.to_string()))?;
         if parsed.scheme != "file" {
             return Err(FsError::UnsupportedScheme(parsed.scheme.clone()));
         }
-        let target = parsed.path;
 
         // `..` is refused before anything is opened: a path that walks up is
         // never something the user pointed at, and resolving it here would
         // silently write somewhere else (snapshot.rs `resolve_source` refuses
-        // the same shape for the same reason).
-        if target
+        // the same shape for the same reason). It is judged on the path as
+        // given; a link's own target may well contain `..` (`../y/b.md`).
+        if parsed
+            .path
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
             return Err(FsError::PermissionDenied(format!(
                 "path contains a parent-directory component: {}",
-                target.display()
+                parsed.path.display()
             )));
         }
+
+        let target = resolve_write_target(parsed.path).await?;
 
         let parent = target.parent().ok_or_else(|| {
             FsError::PermissionDenied(format!("{} has no parent directory", target.display()))
@@ -315,6 +328,29 @@ impl FileProvider for LocalProvider {
             return Err(e);
         }
         Ok(())
+    }
+}
+
+/// The path `write_text` should actually replace (要件#48 追補d(1)(2)).
+///
+/// A symlink (the final component only) is resolved through the whole chain
+/// to its canonical target; anything else — a plain file, or a path that does
+/// not exist yet (a first save) — is written where it is, as before. A link
+/// that cannot be resolved (missing target, a loop) is an error, so a refused
+/// save neither replaces the link nor creates its target.
+async fn resolve_write_target(path: std::path::PathBuf) -> Result<std::path::PathBuf, FsError> {
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            tokio::fs::canonicalize(&path).await.map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => FsError::NotFound(format!(
+                    "{} is a broken symlink (its target does not exist): {}",
+                    path.display(),
+                    e
+                )),
+                _ => io_to_fs(e),
+            })
+        }
+        _ => Ok(path),
     }
 }
 
@@ -350,6 +386,13 @@ async fn write_then_rename(
 /// A file that does not exist yet (a first save) is resolved through its
 /// parent directory instead, so creating a new file under the root is allowed
 /// while creating one outside is not.
+///
+/// The returned path is also the path to *write* (追補d(3)): for a symlink
+/// it is the link's canonical target, so the root check and the write judge
+/// the same file and a link re-pointed after the check cannot steer the
+/// write elsewhere. A symlink whose target is missing is refused here rather
+/// than resolved through its parent (追補d(2)) — its own location says
+/// nothing about where a write through it would land.
 pub fn ensure_within_root(
     root: &std::path::Path,
     target: &std::path::Path,
@@ -358,7 +401,9 @@ pub fn ensure_within_root(
         FsError::PermissionDenied(format!("cannot resolve root {}: {}", root.display(), e))
     })?;
 
-    let resolved = if target.exists() {
+    // `symlink_metadata`, not `exists()`: the latter follows links and calls
+    // a dangling one absent, which would send it down the first-save branch.
+    let resolved = if std::fs::symlink_metadata(target).is_ok() {
         std::fs::canonicalize(target).map_err(|e| {
             FsError::PermissionDenied(format!("cannot resolve {}: {}", target.display(), e))
         })?

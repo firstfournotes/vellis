@@ -573,9 +573,10 @@ describe('AC-53-11 — 閲覧側の不変(契約①⑧)', () => {
 		);
 	});
 
+	// 要件#49 追補g(3)(2026-10-04)で追補g 確定後の内容に更新
 	test('src/markdown/edit.ts は無改変(SHA-256 固定)', () => {
 		expect(sha256(readRepoFile('src/markdown/edit.ts'))).toBe(
-			'c778520df7a00e1fa0b070a9e13f32ba8188fc0df55c8230a95af2f4b523473b',
+			'9c8a7d37d7918b7454ee270b5ddafa9b9bec8a1a39e78909d3896e0c2c55a294',
 		);
 	});
 

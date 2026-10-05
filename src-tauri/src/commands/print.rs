@@ -8,9 +8,10 @@
 //! The work itself lives in [`crate::print`]; these are the seams that let the
 //! window ask for it.
 
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow, Window};
 
-use crate::print::open_print_window;
+use crate::menu::sync_print_item;
+use crate::print::{open_print_window, PrintAvailability};
 
 /// Print the calling window's main frame — the route Markdown, text and every
 /// other viewer have always taken.
@@ -36,4 +37,25 @@ pub fn print_current_window(window: WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 pub async fn print_html(document: String, app: AppHandle) -> Result<(), String> {
     open_print_window(&app, document).await
+}
+
+/// Tell the app whether the calling window has a printable document open
+/// (要件#38 追補f).
+///
+/// `available` is the frontend's `isPrintAvailable` (`src/lib/print-html.ts`):
+/// a document is showing and the history picker is not. The window is the
+/// caller's own handle — the frontend never names a window. The report is
+/// remembered per label, and File > Print… is re-applied straight away only
+/// when the caller is frontmost; a window in the background changes the item
+/// when it next gains focus (`on_window_event` in `lib.rs`).
+#[tauri::command]
+pub fn set_print_available(
+    available: bool,
+    window: Window,
+    state: State<'_, PrintAvailability>,
+) {
+    state.set(window.label(), available);
+    if window.is_focused().unwrap_or(false) {
+        sync_print_item(window.app_handle(), window.label());
+    }
 }

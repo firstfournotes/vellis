@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cli_install::InstallCliResult;
+use crate::print::{PrintAvailability, PrintItemState};
 use crate::update_check::ManualCheckOutcome;
 use tauri::menu::{AboutMetadataBuilder, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, Wry};
@@ -709,8 +710,67 @@ fn focused_or_first_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWind
 /// Neither route lost anything: `print_current_window` calls the same
 /// `Webview::print()` on the same window for every non-HTML viewer, and HTML
 /// goes to `print_html` and a print window of its own.
+///
+/// Since 追補f (backlog 251) the event goes out only when the frontmost window
+/// has reported a printable document. The item is greyed out for any other
+/// window ([`sync_print_item`]), so this is the second stop, for a click that
+/// races a report — a window on the history picker or the empty state would
+/// otherwise open the print dialog on a blank sheet.
 pub fn handle_print_click(app: &AppHandle<Wry>) {
-    handle_menu_open_click(app, MENU_PRINT_EVENT);
+    let Some(window) = focused_or_first_window(app) else {
+        return;
+    };
+    let enabled = app
+        .try_state::<PrintAvailability>()
+        .is_some_and(|state| state.print_item_state(window.label()) == PrintItemState::Enabled);
+    if !enabled {
+        return;
+    }
+    if let Err(e) = app.emit_to(window.label(), MENU_PRINT_EVENT, ()) {
+        tracing::warn!("failed to emit {} to '{}': {}", MENU_PRINT_EVENT, window.label(), e);
+    }
+}
+
+/// Enable or disable File > Print… for the window `label` that is now
+/// frontmost (requirements.md #38 追補f).
+///
+/// Called when a window gains focus and when the frontmost window reports
+/// whether it has a printable document (`set_print_available`). A print
+/// window answers [`PrintItemState::Unchanged`] and the item is left as it was.
+///
+/// The item sits inside the File submenu, and `Menu::get` only looks at the
+/// top level, so the lookup walks the submenus ([`find_menu_item`]). Failures
+/// are logged: a Print… item stuck in the wrong state is still guarded by
+/// [`handle_print_click`] and by the frontend.
+pub fn sync_print_item(app: &AppHandle<Wry>, label: &str) {
+    let Some(state) = app.try_state::<PrintAvailability>() else {
+        return;
+    };
+    let enabled = match state.print_item_state(label) {
+        PrintItemState::Enabled => true,
+        PrintItemState::Disabled => false,
+        PrintItemState::Unchanged => return,
+    };
+    let Some(item) = app.menu().and_then(|menu| find_menu_item(&menu, PRINT_ITEM_ID)) else {
+        tracing::warn!("Print… item '{}' not found in the app menu", PRINT_ITEM_ID);
+        return;
+    };
+    if let Err(e) = item.set_enabled(enabled) {
+        tracing::warn!("failed to set the Print… item enabled={}: {}", enabled, e);
+    }
+}
+
+/// The plain menu item `id`, looked up at the top level of `menu` and then one
+/// level down in each submenu — where every item of this app's menu bar lives.
+fn find_menu_item<R: Runtime>(menu: &Menu<R>, id: &str) -> Option<MenuItem<R>> {
+    if let Some(item) = menu.get(id).and_then(|kind| kind.as_menuitem().cloned()) {
+        return Some(item);
+    }
+    menu.items().unwrap_or_default().into_iter().find_map(|kind| {
+        kind.as_submenu()
+            .and_then(|submenu| submenu.get(id))
+            .and_then(|found| found.as_menuitem().cloned())
+    })
 }
 
 /// Handle a menu click whose work belongs to the window itself

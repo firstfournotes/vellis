@@ -27,3 +27,44 @@ export function openCommandFor(uri: string): 'open_document' | 'open_binary_docu
 export async function openForDisplay(uri: string): Promise<DocumentPayload> {
 	return await invoke<DocumentPayload>(openCommandFor(uri), { uri });
 }
+
+/**
+ * この窓で文書を開けなかったときの alert の文言(要件#71 契約2・5)。理由は Rust の
+ * エラー文をそのまま挟む(要件#51 の素通し)。値は Recent Files の
+ * `recentFileOpenFailedMessage` と同じ(契約7)。
+ */
+export function openFileFailedMessage(err: unknown): string {
+	return `Could not open the file: ${err}`;
+}
+
+/** `openInitialDocument` が使う手段(+page は openForDisplay / windowState.setDocument / alert)。 */
+export type OpenInitialDocumentDeps<Doc = DocumentPayload> = {
+	open: (uri: string) => Promise<Doc>;
+	setDocument: (doc: Doc) => void;
+	/** 開けなかったとき。整形済みの文言(`openFileFailedMessage`)が渡る。 */
+	onOpenFailed: (message: string) => void;
+};
+
+/**
+ * 起動処理の最初の文書(要件#71 契約5)。`initialPath` が無ければ何もせず `false`。
+ * 開けたら `setDocument` して `true`。開けなければ `onOpenFailed` で 1 回知らせて `false`。
+ *
+ * **決して reject しない**: 起動処理はこのあと変更通知の購読と起動の完了へ進むので、
+ * 最初の文書が開けなくても窓はツリーを見せたまま生きている(新しい窓・新しいタブ・
+ * `vellis <開けないファイル>` の経路)。
+ */
+export async function openInitialDocument<Doc = DocumentPayload>(
+	initialPath: string | null | undefined,
+	deps: OpenInitialDocumentDeps<Doc>
+): Promise<boolean> {
+	if (!initialPath) return false;
+	let doc: Doc;
+	try {
+		doc = await deps.open(initialPath);
+	} catch (err) {
+		deps.onOpenFailed(openFileFailedMessage(err));
+		return false;
+	}
+	deps.setDocument(doc);
+	return true;
+}

@@ -844,6 +844,7 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		// 要件#55 追補a(契約⑨の追加・2026-09-25)で `search_in_folder_page` を追加(search_in_folder の直後)。
 		// 要件#55 追補e(2026-10-01)で `search_in_folder_reset` を追加(search_in_folder_page の直後)。
 		// 要件#64(契約11・2026-09-28)で `list_recent_files` / `clear_recent_files` を追加(list_history の直後)。
+		// 要件#38 追補f(2026-10-02)で `set_print_available` を追加(print_html の直後)。
 		const libRs = readFileSync(resolve(REPO_ROOT, 'src-tauri/src/lib.rs'), 'utf-8');
 		const blocks = [...libRs.matchAll(/generate_handler!\[([^\]]*)\]/g)].map((m) =>
 			(m[1] ?? '')
@@ -885,6 +886,7 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'analyze_wav_waveform',
 			'print_current_window',
 			'print_html',
+			'set_print_available',
 		];
 		// webdriver ブランチはテストヘルパ1つだけ多い(lib.rs のコメントどおり)。
 		expect(blocks).toHaveLength(2);
@@ -952,8 +954,9 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		expect(hash('src/components/Viewer.find.wiring.test.ts')).toBe(
 			'7c94a6251ddd306a0b74ad6027dbf7bf0f08a75cf8c87a73bfc25f6793ba7775'
 		);
+		// 要件#49 追補g(3)(2026-10-04)で AC-54-14 の edit.ts 固定値を更新したため、このファイルの固定値も更新
 		expect(hash('src/lib/find-in-document.acceptance.test.ts')).toBe(
-			'9eb8051b72069fc03fbcd51a75e5cf4f597d7ae6338632a7149aa941f7c49bf3'
+			'e5fec65c2be82584281cf7dca494f42289c0db777e273b1bb4d348a3f623c76e'
 		);
 	});
 });

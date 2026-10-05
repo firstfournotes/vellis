@@ -45,7 +45,7 @@ use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
 use commands::document::{open_binary_document, open_document, save_document};
 use commands::history::list_history;
 use commands::list::list_dir;
-use commands::print::{print_current_window, print_html};
+use commands::print::{print_current_window, print_html, set_print_available};
 use commands::recent_files::{clear_recent_files, list_recent_files};
 use commands::root::set_root;
 use commands::search::{search_in_folder, search_in_folder_page, search_in_folder_reset, SearchResults};
@@ -58,7 +58,7 @@ use fs::registry::FileProviderRegistry;
 use ipc::handler::spawn_command_handler;
 use ipc::lock::FileLock;
 use ipc::server::{default_lock_path, default_socket_path, IpcServer};
-use print::{handle_print_protocol, PrintDocumentStore, PRINT_SCHEME};
+use print::{handle_print_protocol, PrintAvailability, PrintDocumentStore, PRINT_SCHEME};
 use watch::hub::DocumentCoordinator;
 use window::manager::{WindowArgs, WindowManager};
 
@@ -117,7 +117,10 @@ pub fn run_with_args(initial_args: WindowArgs) {
         // 印刷文書のストア(要件#38)は AppState とは別に管理する。protocol
         // ハンドラとコマンドの2箇所からしか触らないうえ、窓・監視・注釈と違って
         // アプリの状態ではなく「いま印刷しようとしている1文書」の置き場なので。
-        .manage(PrintDocumentStore::new());
+        .manage(PrintDocumentStore::new())
+        // 窓ごとの「印刷できる文書を開いているか」(要件#38 追補f)。
+        // set_print_available が書き、窓の前面化と破棄が読む・捨てる。
+        .manage(PrintAvailability::new());
 
     #[cfg(all(feature = "webdriver", debug_assertions))]
     let builder = builder.plugin(tauri_plugin_webdriver::init());
@@ -147,11 +150,20 @@ pub fn run_with_args(initial_args: WindowArgs) {
                 {
                     spacemouse.set_window_focus(window.label(), *focused);
                 }
+                // File > Print… follows the frontmost window: greyed out on the
+                // history picker and the empty state (要件#38 追補f).
+                if *focused {
+                    menu::sync_print_item(window.app_handle(), window.label());
+                }
             }
             // A closed window's folder-search results are dropped (要件#55 追補a).
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(results) = window.app_handle().try_state::<SearchResults>() {
                     results.0.lock().map(|mut store| store.forget(window.label())).ok();
+                }
+                // ...and so is what it reported about printing (要件#38 追補f).
+                if let Some(print) = window.app_handle().try_state::<PrintAvailability>() {
+                    print.forget(window.label());
                 }
             }
         })
@@ -212,6 +224,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         analyze_wav_waveform,
         print_current_window,
         print_html,
+        set_print_available,
         commands::test_helpers::__test_list_windows,
     ]);
     #[cfg(not(feature = "webdriver"))]
@@ -248,6 +261,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         analyze_wav_waveform,
         print_current_window,
         print_html,
+        set_print_available,
     ]);
 
     builder

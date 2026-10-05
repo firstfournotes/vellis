@@ -1875,3 +1875,738 @@ describe('serializeBlock — 同じブロックの再編集でも行き先は初
 		expect(md).not.toContain('file://');
 	});
 });
+
+// ---------------------------------------------------------------------------
+// 追補d(2026-10-02・backlog 149〜152)— 原文が黙って壊れる経路を塞ぐ
+// ---------------------------------------------------------------------------
+//
+// 15. 表セルのパイプ(契約⑥・追補d(3) = AC-49-28): GFM の表のセルに `|` を含む文字列を
+//     入れて確定すると、原文のその行は `\|` を含み、再レンダーした表の列数が変わらず、
+//     そのセルの表示文字列に `|` が入る。未編集の行は byte 等価(backlog 149)
+// 16. タスクリストの印(契約⑥・追補d(4) = AC-49-29): `- [ ] ` / `- [x] ` / `- [X] ` と
+//     `*` / `+` / `1.` / `2)` のマーカーに続く印は**原文の綴りのまま**残り、再レンダーで
+//     チェックボックスが同じ状態で出る(backlog 150)。レンダラがチェックボックスの
+//     後ろに入れる空白は本文ではない ―― 書き戻しに `&#x20;` が混ざれば意味等価
+//     (`expectSameRender`)で落ちる
+// 17. 脚注参照(契約⑥・追補d(5) = AC-49-30): `[^1]` / `[^note]` を含む段落を編集して
+//     確定しても、原文の脚注参照は元の綴りのまま残り `[1](#user-content-fn-1)` へ化けない
+//     (backlog 151)。脚注参照の要素(`sup[data-vellis-node-type="footnoteReference"]`)が
+//     持つ原文範囲から綴りを読めないブロックは契約③の誘導へ回る(追補a(7) と同じ扱い)。
+//     本番パイプラインは常に範囲を stamp するので、読めない形は範囲の属性を落とした
+//     合成 DOM で判定する(生 HTML の `<img>` と同じ「自分のスライスを採れない」形)
+// 18. inline code の繰り上げ(契約①③・追補d(6) = AC-49-31): `pre` の子でない `code` の
+//     上は、それを含む最寄りの編集可能ブロック(段落・見出し・リスト項目・表セル・引用
+//     段落)へ繰り上げる(backlog 152)。ブロックが他の理由(参照リンク)で誘導対象なら
+//     従来どおり source。code fence(`pre > code`)の扱いは要件#52 改訂後の契約③のまま
+
+/** 表の行ごとのセル文字列(`th` / `td` の順)。列数の判定に使う。 */
+function cellTexts(root: ParentNode): string[][] {
+	return [...root.querySelectorAll('tr')].map((tr) =>
+		[...tr.querySelectorAll('th, td')].map((cell) => cell.textContent ?? ''),
+	);
+}
+
+/** tbody の `row` 行目(0 起点)の `col` 列目(0 起点)の `<td>`。 */
+function bodyCell(root: ParentNode, row: number, col: number): HTMLElement {
+	const rows = [...root.querySelectorAll('tbody tr')];
+	const tr = rows[row];
+	if (!tr) throw new Error(`tbody に ${row} 行目が無い`);
+	const td = tr.querySelectorAll('td')[col];
+	if (!td) throw new Error(`${row} 行目に ${col} 列目が無い`);
+	return td as HTMLElement;
+}
+
+/** 確定1回分(Viewer の commitBlockEdit と同じ引数): 行き先・綴りは初回レンダーの
+ * スライス(`index.sliceOf(meta.id)`)から読み、差し替えは `source` と `meta.position`。 */
+function commitWithOrigin(m: Mounted, source: string, el: HTMLElement, meta: NodeMeta): string {
+	return replaceRange(
+		source,
+		meta.position,
+		serializeBlock(el, meta, source, baseUri, m.index.sliceOf(meta.id)),
+	);
+}
+
+/** `index` 行目だけを除いた行の並び(未編集の行が byte 等価かを見る)。 */
+function linesExcept(text: string, index: number): string[] {
+	return text.split('\n').filter((_, i) => i !== index);
+}
+
+// ---------------------------------------------------------------------------
+// AC-49-28 — 表セルのパイプはエスケープして書き戻す(契約⑥・追補d(3))
+// ---------------------------------------------------------------------------
+
+const PIPE_TABLE_MD = ['| A | B |', '| --- | --- |', '| a1 | b1 |', '| a2 | b2 |', ''].join('\n');
+/** 既にエスケープ済みのパイプを持つセル(表示は `a | b`)。 */
+const ESCAPED_TABLE_MD = ['| A | B |', '| --- | --- |', '| a \\| b | c |', ''].join('\n');
+
+describe('serializeBlock — 表セルのパイプは `\\|` にエスケープして書き戻す(契約⑥・追補d(3) / AC-49-28)', () => {
+	test('reviewer 実測の再現: `b1` セルに `b1 | x` を入れて確定しても列が割れない', async () => {
+		const m = await mount(PIPE_TABLE_MD);
+		expect(cellTexts(m.root)).toEqual([
+			['A', 'B'],
+			['a1', 'b1'],
+			['a2', 'b2'],
+		]);
+		const td = bodyCell(m.root, 0, 1);
+		const meta = metaOf(td, m.index);
+		td.textContent = 'b1 | x';
+
+		const next = commitWithOrigin(m, PIPE_TABLE_MD, td, meta);
+
+		// 原文のその行は `\|` を含む。
+		expect(next.split('\n')[2]).toContain('b1 \\| x');
+		// 未編集の行は byte 等価。
+		expect(linesExcept(next, 2)).toEqual(linesExcept(PIPE_TABLE_MD, 2));
+		// 再レンダーした表の列数が変わらず、そのセルの表示文字列に `|` が入る。
+		const again = await mount(next);
+		expect(cellTexts(again.root)).toEqual([
+			['A', 'B'],
+			['a1', 'b1 | x'],
+			['a2', 'b2'],
+		]);
+		await expectSameRender(next, PIPE_TABLE_MD.replace('| b1 |', '| b1 \\| x |'));
+	});
+
+	test('見出し行のセル(th)でも同じ: `B` → `B | C`', async () => {
+		const m = await mount(PIPE_TABLE_MD);
+		const th = [...m.root.querySelectorAll('th[data-vellis-node-type="tableCell"]')][1] as
+			| HTMLElement
+			| undefined;
+		if (!th) throw new Error('見出し行の2列目が無い');
+		const meta = metaOf(th, m.index);
+		th.textContent = 'B | C';
+
+		const next = commitWithOrigin(m, PIPE_TABLE_MD, th, meta);
+
+		expect(next.split('\n')[0]).toContain('B \\| C');
+		expect(linesExcept(next, 0)).toEqual(linesExcept(PIPE_TABLE_MD, 0));
+		const again = await mount(next);
+		expect(cellTexts(again.root)).toEqual([
+			['A', 'B | C'],
+			['a1', 'b1'],
+			['a2', 'b2'],
+		]);
+	});
+
+	test('パイプが複数あっても全部エスケープされる: `a2` → `x | y | z`(列数 2 のまま)', async () => {
+		const m = await mount(PIPE_TABLE_MD);
+		const td = bodyCell(m.root, 1, 0);
+		const meta = metaOf(td, m.index);
+		td.textContent = 'x | y | z';
+
+		const next = commitWithOrigin(m, PIPE_TABLE_MD, td, meta);
+
+		expect(next.split('\n')[3]).toContain('x \\| y \\| z');
+		expect(linesExcept(next, 3)).toEqual(linesExcept(PIPE_TABLE_MD, 3));
+		const again = await mount(next);
+		expect(cellTexts(again.root)).toEqual([
+			['A', 'B'],
+			['a1', 'b1'],
+			['x | y | z', 'b2'],
+		]);
+	});
+
+	test('元からエスケープ済みのパイプを持つセルを直しても `\\|` のまま戻る(表示 `a | b` → `a | b edited`)', async () => {
+		const m = await mount(ESCAPED_TABLE_MD);
+		const td = bodyCell(m.root, 0, 0);
+		expect(td.textContent).toBe('a | b');
+		const meta = metaOf(td, m.index);
+		td.textContent = 'a | b edited';
+
+		const next = commitWithOrigin(m, ESCAPED_TABLE_MD, td, meta);
+
+		expect(next.split('\n')[2]).toContain('a \\| b edited');
+		expect(linesExcept(next, 2)).toEqual(linesExcept(ESCAPED_TABLE_MD, 2));
+		const again = await mount(next);
+		expect(cellTexts(again.root)).toEqual([
+			['A', 'B'],
+			['a | b edited', 'c'],
+		]);
+	});
+
+	test('パイプを含まない編集は従来どおり(非退行: `\\` が増えない)', async () => {
+		const m = await mount(PIPE_TABLE_MD);
+		const td = bodyCell(m.root, 0, 1);
+		const meta = metaOf(td, m.index);
+		td.textContent = 'b1 edited';
+
+		const next = commitWithOrigin(m, PIPE_TABLE_MD, td, meta);
+
+		expect(next).not.toContain('\\');
+		await expectSameRender(next, PIPE_TABLE_MD.replace('| b1 |', '| b1 edited |'));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// AC-49-29 — タスクリストのチェックボックスを保つ(契約⑥・追補d(4))
+// ---------------------------------------------------------------------------
+
+/** マーカー5種(`-` `*` `+` `1.` `2)`)× 印3種(`[ ]` `[x]` `[X]`)。異なるマーカーは
+ * 別のリストになる(文書順に 7 項目)。 */
+const TASK_MD = [
+	'- [ ] todo',
+	'- [x] done',
+	'- [X] upper',
+	'',
+	'* [ ] star',
+	'',
+	'+ [x] plus',
+	'',
+	'1. [ ] numbered',
+	'',
+	'2) [x] paren',
+	'',
+].join('\n');
+
+/** 文書順のチェック状態(`[X]` も checked)。 */
+const TASK_CHECKED = [false, true, true, false, true, false, true];
+
+/** 文書順のチェックボックスの状態。 */
+function checkedStates(root: ParentNode): boolean[] {
+	return [...root.querySelectorAll('li input[type="checkbox"]')].map((input) =>
+		input.hasAttribute('checked'),
+	);
+}
+
+/**
+ * タスクリスト項目の文字だけを直す(利用者がチェックボックスの後ろの文字を打ち直す形)。
+ * チェックボックスの `<input>` は DOM に残り、レンダラがその後ろに入れた空白も残る。
+ */
+function editTaskText(li: HTMLElement, text: string): void {
+	const last = li.lastChild;
+	if (!last || last.nodeType !== Node.TEXT_NODE) throw new Error('末尾がテキストではない');
+	last.textContent = ` ${text}`;
+	expect(li.querySelector('input[type="checkbox"]')).not.toBeNull();
+}
+
+describe('AC-49-29 — レンダー結果の DOM ではタスクリストがチェックボックスになっている(前提の確認)', () => {
+	test('7 項目すべてが task-list-item で、`[X]` も checked', async () => {
+		const m = await mount(TASK_MD);
+		expect(m.root.querySelectorAll('li.task-list-item')).toHaveLength(7);
+		expect(checkedStates(m.root)).toEqual(TASK_CHECKED);
+	});
+});
+
+describe('serializeBlock — タスクリストの印は原文の綴りのまま(契約⑥・追補d(4) / AC-49-29)', () => {
+	const CASES: Array<[slice: string, prefix: string, text: string]> = [
+		['- [ ] todo', '- [ ] ', 'todo edited'],
+		['- [x] done', '- [x] ', 'done edited'],
+		['- [X] upper', '- [X] ', 'upper edited'],
+		['* [ ] star', '* [ ] ', 'star edited'],
+		['+ [x] plus', '+ [x] ', 'plus edited'],
+		['1. [ ] numbered', '1. [ ] ', 'numbered edited'],
+		['2) [x] paren', '2) [x] ', 'paren edited'],
+	];
+
+	test.each(CASES)(
+		'`%s` を直して確定: 行頭は `%s` のまま・他の行は byte 等価・再レンダーで同じ状態',
+		async (slice, prefix, text) => {
+			const m = await mount(TASK_MD);
+			const { el, meta } = blockBySlice(m, 'listItem', slice);
+			expectBlock(resolveEditTarget(el, m.index), el, 'listItem');
+			editTaskText(el, text);
+
+			const next = commitWithOrigin(m, TASK_MD, el, meta);
+
+			// reviewer 実測: `- [ ] todo` が `- todo` になり、チェックボックスが消えた。
+			const line = next.split('\n').find((l) => l.endsWith(text));
+			expect(line, `直した行が無い: ${next}`).toBeDefined();
+			expect(line?.startsWith(prefix), `行頭が ${JSON.stringify(prefix)} でない: ${line}`).toBe(
+				true,
+			);
+			// 直した行を元に戻せば原文そのもの = 他の行は 1 byte も動いていない。
+			expect(next.replace(line as string, slice)).toBe(TASK_MD);
+			// 再レンダーでチェックボックスが同じ状態で出る(7 項目とも)。
+			const again = await mount(next);
+			expect(checkedStates(again.root)).toEqual(TASK_CHECKED);
+			await expectSameRender(next, TASK_MD.replace(slice, `${prefix}${text}`));
+		},
+	);
+
+	test('直した項目の文字が再レンダーのチェックボックスの後ろに出る(印が本文へ漏れない)', async () => {
+		const m = await mount(TASK_MD);
+		const { el, meta } = blockBySlice(m, 'listItem', '- [x] done');
+		editTaskText(el, 'done edited');
+
+		const again = await mount(commitWithOrigin(m, TASK_MD, el, meta));
+
+		const li = [...again.root.querySelectorAll('li.task-list-item')][1];
+		expect(li?.textContent?.trim()).toBe('done edited');
+		expect(li?.textContent).not.toContain('[x]');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// AC-49-30 — 脚注参照は原文の綴りで戻す(契約⑥・追補d(5))
+// ---------------------------------------------------------------------------
+
+const FOOTNOTE_MD = [
+	'Intro.',
+	'',
+	'Text with note[^1] and another[^note] here.',
+	'',
+	'[^1]: First note.',
+	'[^note]: Named note.',
+	'',
+].join('\n');
+const FOOTNOTE_SLICE = 'Text with note[^1] and another[^note] here.';
+
+/** 脚注参照の要素(`sup`)とその中のリンク。 */
+function footnoteRefs(el: Element): HTMLElement[] {
+	return [...el.querySelectorAll('sup[data-vellis-node-type="footnoteReference"]')] as HTMLElement[];
+}
+
+describe('AC-49-30 — レンダー結果の DOM では脚注参照が `#user-content-fn-…` へのリンクになっている(前提の確認)', () => {
+	test('段落に脚注参照が2つあり、それぞれ原文範囲を持つ', async () => {
+		const m = await mount(FOOTNOTE_MD);
+		const { el } = blockBySlice(m, 'paragraph', FOOTNOTE_SLICE);
+		const refs = footnoteRefs(el);
+		expect(refs).toHaveLength(2);
+		for (const sup of refs) {
+			expect(sup.getAttribute('data-source-start')).toMatch(/^\d+$/);
+			expect(sup.getAttribute('data-source-end')).toMatch(/^\d+$/);
+			expect(q(sup, 'a').getAttribute('href')).toMatch(/^#user-content-fn-/);
+		}
+	});
+});
+
+describe('serializeBlock — 脚注参照は原文の綴りのまま(契約⑥・追補d(5) / AC-49-30)', () => {
+	test('reviewer 実測の再現: 先頭の文字を直して確定しても `[^1]` / `[^note]` が残り、リンクへ化けない', async () => {
+		const m = await mount(FOOTNOTE_MD);
+		const { el, meta } = blockBySlice(m, 'paragraph', FOOTNOTE_SLICE);
+		// 脚注入りの段落は編集できる(「誘導へ回す」側ではなく逆写像側を採った)。
+		expectBlock(resolveEditTarget(el, m.index), el, 'paragraph');
+		editLeadingText(el, 'Edited text with note');
+
+		const next = commitWithOrigin(m, FOOTNOTE_MD, el, meta);
+
+		// reviewer 実測: `[1](#user-content-fn-1)` / `[2](#user-content-fn-note)` に化けた。
+		expect(next).not.toContain('#user-content-fn');
+		expect(next).toBe(FOOTNOTE_MD.replace('Text with note', 'Edited text with note'));
+	});
+
+	test('末尾の文字を直しても同じ(参照の後ろの本文を直す)', async () => {
+		const m = await mount(FOOTNOTE_MD);
+		const { el, meta } = blockBySlice(m, 'paragraph', FOOTNOTE_SLICE);
+		editTrailingText(el, ' there.');
+
+		const next = commitWithOrigin(m, FOOTNOTE_MD, el, meta);
+
+		expect(next).not.toContain('#user-content-fn');
+		expect(next).toBe(FOOTNOTE_MD.replace(' here.', ' there.'));
+	});
+
+	test('リスト項目の中の脚注参照も同じ', async () => {
+		const src = '- item[^1] one\n- item two\n\n[^1]: Note.\n';
+		const m = await mount(src);
+		const { el, meta } = blockBySlice(m, 'listItem', '- item[^1] one');
+		editTrailingText(el, ' uno');
+
+		const next = commitWithOrigin(m, src, el, meta);
+
+		expect(next).not.toContain('#user-content-fn');
+		expect(next).toBe('- item[^1] uno\n- item two\n\n[^1]: Note.\n');
+	});
+});
+
+describe('resolveEditTarget — 原文の綴りを読めない脚注参照を含むブロックは source(契約③・追補d(5) / AC-49-30)', () => {
+	/**
+	 * 本番パイプラインは脚注参照に必ず原文範囲を stamp するので、「読めない」形は
+	 * 範囲の属性(と索引への鍵)を落とした合成 DOM で作る ―― 生 HTML の `<img>` が
+	 * `data-source-*` を持たない(AC-49-23)のと同じ「自分のスライスを採れない」形。
+	 * 脚注参照であることを示すもの(`data-vellis-node-type` / `data-footnote-ref` /
+	 * `href="#user-content-fn-…"`)はそのまま残す。
+	 */
+	function dropSourceRange(el: Element): void {
+		for (const node of [el, ...el.querySelectorAll('*')]) {
+			node.removeAttribute('data-source-start');
+			node.removeAttribute('data-source-end');
+			node.removeAttribute('data-vellis-node-id');
+		}
+	}
+
+	test('脚注参照の原文範囲を読めない段落 → source(内部リンクが原文へ焼き付かない)', async () => {
+		const m = await mount(FOOTNOTE_MD);
+		const { el } = blockBySlice(m, 'paragraph', FOOTNOTE_SLICE);
+		const [first] = footnoteRefs(el);
+		dropSourceRange(first);
+
+		expect(resolveEditTarget(el, m.index)).toEqual({ kind: 'source' });
+		// その脚注参照の上のダブルクリックでも同じ。
+		expect(resolveEditTarget(q(first, 'a'), m.index)).toEqual({ kind: 'source' });
+	});
+
+	test('読める脚注参照だけの段落は block のまま(誘導へ回さない=非退行)', async () => {
+		const m = await mount(FOOTNOTE_MD);
+		const { el } = blockBySlice(m, 'paragraph', FOOTNOTE_SLICE);
+		expectBlock(resolveEditTarget(el, m.index), el, 'paragraph');
+		expectBlock(resolveEditTarget(q(footnoteRefs(el)[0], 'a'), m.index), el, 'paragraph');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// AC-49-31 — inline code はブロックへ繰り上げる(契約①③・追補d(6))
+// ---------------------------------------------------------------------------
+
+/** 編集可能ブロック5種それぞれに inline code を1つずつ置き、参照リンクと同居する段落・
+ * トップレベル fence・リスト項目内 fence(いずれも従来どおりの行き先)を併せ持つ文書。 */
+const INLINE_CODE_MD = [
+	'# Title `h`',
+	'',
+	'Use `inline` code here.',
+	'',
+	'- item with `code`',
+	'',
+	'| A | B |',
+	'| --- | --- |',
+	'| `a1` | b1 |',
+	'',
+	'> quote `q`',
+	'',
+	'Ref `code` and [other][ref] here.',
+	'',
+	'[ref]: ./other.md',
+	'',
+	'```javascript',
+	'const x = 1;',
+	'```',
+	'',
+	'- listed item with fence:',
+	'  ```javascript',
+	'  const nested = 2;',
+	'  ```',
+	'',
+].join('\n');
+
+describe('resolveEditTarget — inline code の上はそれを含むブロックへ繰り上げる(契約①③・追補d(6) / AC-49-31)', () => {
+	test('reviewer 実測の再現: 段落の中の `<code>` → その段落が block(source へ落ちない)', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const { el: p } = blockBySlice(m, 'paragraph', 'Use `inline` code here.');
+		const code = q(p, 'code');
+		expect(code.closest('pre')).toBeNull();
+
+		expectBlock(resolveEditTarget(code, m.index), p, 'paragraph');
+	});
+
+	test('見出しの中の `<code>` → その見出しが block', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const h1 = q(m.root, 'h1[data-vellis-node-type="heading"]');
+		expectBlock(resolveEditTarget(q(h1, 'code'), m.index), h1, 'heading');
+	});
+
+	test('リスト項目の中の `<code>` → そのリスト項目が block', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const { el: li } = blockBySlice(m, 'listItem', '- item with `code`');
+		expectBlock(resolveEditTarget(q(li, 'code'), m.index), li, 'listItem');
+	});
+
+	test('表セルの中の `<code>` → その表セルが block', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const td = q(m.root, 'td[data-vellis-node-type="tableCell"]');
+		expectBlock(resolveEditTarget(q(td, 'code'), m.index), td, 'tableCell');
+	});
+
+	test('引用段落の中の `<code>` → その引用段落が block', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const p = quoteParagraph(m.root);
+		expectBlock(resolveEditTarget(q(p, 'code'), m.index), p, 'paragraph');
+	});
+
+	test('繰り上げた段落を直して確定しても inline code は保たれる(契約⑥)', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const { el: p, meta } = blockBySlice(m, 'paragraph', 'Use `inline` code here.');
+		const target = resolveEditTarget(q(p, 'code'), m.index);
+		expect(target.kind).toBe('block');
+		if (target.kind !== 'block') return;
+		editLeadingText(target.el, 'Try ');
+
+		const next = commitWithOrigin(m, INLINE_CODE_MD, target.el, target.meta);
+
+		expect(next).toBe(INLINE_CODE_MD.replace('Use `inline`', 'Try `inline`'));
+	});
+
+	test('inline code を含んでいても、参照リンクが同居する段落は従来どおり source(非退行)', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const { el: p } = blockBySlice(m, 'paragraph', 'Ref `code` and [other][ref] here.');
+		expect(resolveEditTarget(q(p, 'code'), m.index)).toEqual({ kind: 'source' });
+		expect(resolveEditTarget(p, m.index)).toEqual({ kind: 'source' });
+	});
+
+	test('code fence の扱いは従来どおり(非退行): トップレベル fence は code・リスト項目内 fence は source', async () => {
+		const m = await mount(INLINE_CODE_MD);
+		const top = [...m.root.querySelectorAll('pre > code')].find((c) => !c.closest('li'));
+		if (!top) throw new Error('トップレベル fence が無い');
+		expect(resolveEditTarget(top, m.index).kind).toBe('code');
+		expect(resolveEditTarget(q(m.root, 'li pre > code'), m.index)).toEqual({ kind: 'source' });
+	});
+});
+
+// ===========================================================================
+// 追補d の2周目(2026-10-02・1周目 reviewer 照合を受けて (4)(5) に足した一文の固定)
+// ===========================================================================
+//
+// 19. 札から綴りへ戻す順序(契約⑥・追補d(5) = AC-49-30・reviewer P3-1): リンクの行き先の
+//     綴りが**脚注参照の札と同じ文字列**を含んでいても、戻した原文で行き先が化けない。
+//     現行の札は `tokenPrefixFor` が DOM(`outerHTML` + `textContent`)だけを見て接頭辞を
+//     決めるが、行き先の綴りは DOM には無い(`rewrite-uri` が正規化した `file:` URI が
+//     載っている)ので、原文の `../xvellisuri0r/../b.md` は衝突検査をすり抜ける。先に
+//     行き先を戻し、後から脚注の札を**位置を限らず**戻すと、行き先の中の `xvellisuri0r`
+//     が `[^1]` へ化ける(reviewer 実測 `../[^1]/../b.md`)。細工は行き先と脚注参照の綴り
+//     以外を書き換えない(追補a(9) と同じ)
+// 20. チェックボックスの手前に打った文字(契約⑥・追補d(4) = AC-49-29・reviewer P3-2):
+//     タスクリストのチェックボックスの**手前**にテキストが打たれても、チェックボックスを
+//     `[ ]` の文字として本文へ書き戻さない ―― 印は行頭の `- [ ] ` の1つだけで、原文に
+//     `\[ ]` も2つ目の `[ ]` も現れない(reviewer 実測 `- [ ] pre \[ ] foo`)
+// 21. 非退行の固定(現行で緑の見込み): 緩いタスクリスト(`li > p` / `li` のどちらを掴んでも
+//     印が残る)・入れ子のタスク項目・タスク項目に脚注参照とリンクが同居する形・表セルの
+//     inline code の中のパイプ(原文 `` `a\|b` ``)・詰めた表 `|a1|b1|` のセル
+
+// ---------------------------------------------------------------------------
+// AC-49-30(追補d(5) 追記)— 行き先の綴りに脚注の札と同じ文字列があっても化けない
+// ---------------------------------------------------------------------------
+
+/** 行き先 `../xvellisuri0r/../b.md` は、札の芽 `xvellisuri` + 脚注の札の番号 `0` + 終端 `r`
+ * = 現行実装が最初の脚注参照に発行する札そのもの。`rewrite-uri` は `..` を正規化するので
+ * DOM の href は `file:///home/user/b.md` になり、接頭辞の衝突検査(DOM だけを見る)には
+ * 掛からない。 */
+const FN_LINK_MD = 'see [a](../xvellisuri0r/../b.md) note[^1]\n\n[^1]: n\n';
+const FN_LINK_SLICE = 'see [a](../xvellisuri0r/../b.md) note[^1]';
+/** 脚注参照が行き先より前にある形(戻す順序が文中の並びに依らないこと)。 */
+const FN_FIRST_MD = 'note[^1] see [a](../xvellisuri0r/../b.md) end\n\n[^1]: n\n';
+const FN_FIRST_SLICE = 'note[^1] see [a](../xvellisuri0r/../b.md) end';
+
+describe('serializeBlock — 行き先の綴りに脚注の札と同じ文字列があっても化けない(契約⑥・追補d(5) / AC-49-30)', () => {
+	test('前提の確認: DOM の href は正規化された内部 URI で、原文の綴り `xvellisuri0r` は DOM のどこにも無い', async () => {
+		const m = await mount(FN_LINK_MD);
+		const { el } = blockBySlice(m, 'paragraph', FN_LINK_SLICE);
+		expect(q(el, 'a[data-vellis-node-type="link"]').getAttribute('href')).toBe('file:///home/user/b.md');
+		expect(el.outerHTML).not.toContain('xvellisuri');
+		expect(el.textContent).not.toContain('xvellisuri');
+		expect(footnoteRefs(el)).toHaveLength(1);
+		expectBlock(resolveEditTarget(el, m.index), el, 'paragraph');
+	});
+
+	test('reviewer 実測の再現: 先頭の文字を直して確定しても、行き先は `../xvellisuri0r/../b.md` のまま・脚注参照は `[^1]` のまま', async () => {
+		const m = await mount(FN_LINK_MD);
+		const { el, meta } = blockBySlice(m, 'paragraph', FN_LINK_SLICE);
+		editLeadingText(el, 'See ');
+
+		const next = commitWithOrigin(m, FN_LINK_MD, el, meta);
+
+		// reviewer 実測: `see [a](../[^1]/../b.md) note[^1]` に化けた。
+		expect(next).not.toContain('[^1]/');
+		expect(next).toContain('[a](../xvellisuri0r/../b.md)');
+		expect(next).not.toContain('#user-content-fn');
+		expect(next).not.toContain('file://');
+		expect(next).toBe(FN_LINK_MD.replace('see ', 'See '));
+	});
+
+	test('脚注参照がリンクより前にあっても同じ(戻す順序は文中の並びに依らない)', async () => {
+		const m = await mount(FN_FIRST_MD);
+		const { el, meta } = blockBySlice(m, 'paragraph', FN_FIRST_SLICE);
+		expectBlock(resolveEditTarget(el, m.index), el, 'paragraph');
+		editTrailingText(el, ' END');
+
+		const next = commitWithOrigin(m, FN_FIRST_MD, el, meta);
+
+		expect(next).not.toContain('[^1]/');
+		expect(next).toContain('[a](../xvellisuri0r/../b.md)');
+		expect(next).toBe(FN_FIRST_MD.replace(' end', ' END'));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// AC-49-29(追補d(4) 追記)— チェックボックスの手前に打った文字
+// ---------------------------------------------------------------------------
+
+/** 文書順の `li.task-list-item` の表示文字列(前後の空白は除く)。 */
+function taskTexts(root: ParentNode): string[] {
+	return [...root.querySelectorAll('li.task-list-item')].map((li) => (li.textContent ?? '').trim());
+}
+
+/** チェックボックスの**手前**にテキストノードを差し込む(キャレットを先頭へ置いて打った形)。 */
+function typeBeforeCheckbox(holder: HTMLElement, text: string): void {
+	const input = q(holder, 'input[type="checkbox"]');
+	holder.insertBefore(document.createTextNode(text), input);
+	expect(holder.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+}
+
+describe('serializeBlock — チェックボックスの手前に打った文字で印が本文へ漏れない(契約⑥・追補d(4) / AC-49-29)', () => {
+	test('reviewer 実測の再現: `- [ ] foo` の `input` の手前に `pre ` を打って確定 → 印は行頭の1つだけで `\\[ ]` が現れない', async () => {
+		const src = '- [ ] foo\n';
+		const m = await mount(src);
+		const { el, meta } = blockBySlice(m, 'listItem', '- [ ] foo');
+		typeBeforeCheckbox(el, 'pre ');
+
+		const next = commitWithOrigin(m, src, el, meta);
+
+		// reviewer 実測: `- [ ] pre \[ ] foo`(チェックボックスが `[ ]` の文字として本文へ漏れた)。
+		expect(next).not.toContain('\\[');
+		expect(next.match(/\[[ xX]\]/g)).toHaveLength(1);
+		const [line, ...rest] = next.split('\n');
+		expect(line).toMatch(/^- \[ \] pre\s+foo$/);
+		expect(rest).toEqual(['']);
+		// 再レンダーでも印は1つのチェックボックスだけで、本文に `[ ]` の文字が出ない。
+		const again = await mount(next);
+		expect(checkedStates(again.root)).toEqual([false]);
+		expect(taskTexts(again.root)).toHaveLength(1);
+		expect(taskTexts(again.root)[0]).toMatch(/^pre\s+foo$/);
+		expect(taskTexts(again.root)[0]).not.toContain('[');
+	});
+
+	test('緩いリストの `li > p` でも同じ: `- [x] foo` の段落の `input` の手前に `pre ` を打って確定 → `[x]` は行頭の1つだけ', async () => {
+		const src = '- [x] foo\n\n- [ ] bar\n';
+		const m = await mount(src);
+		const li = q(m.root, 'li.task-list-item');
+		const p = q(li, 'p[data-vellis-node-type="paragraph"]');
+		const meta = metaOf(p, m.index);
+		expect(meta.type).toBe('paragraph');
+		typeBeforeCheckbox(p, 'pre ');
+
+		const next = commitWithOrigin(m, src, p, meta);
+
+		expect(next).not.toContain('\\[');
+		expect(next.match(/\[[ xX]\]/g)).toHaveLength(2);
+		const [line, ...rest] = next.split('\n');
+		expect(line).toMatch(/^- \[x\] pre\s+foo$/);
+		expect(rest).toEqual(['', '- [ ] bar', '']);
+		const again = await mount(next);
+		expect(checkedStates(again.root)).toEqual([true, false]);
+		expect(taskTexts(again.root)[0]).toMatch(/^pre\s+foo$/);
+		expect(taskTexts(again.root)[1]).toBe('bar');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 非退行の固定(追補d(3)(4)(5) の2周目・現行で緑の見込み)
+// ---------------------------------------------------------------------------
+
+const LOOSE_TASK_MD = '- [ ] foo\n\n- [x] bar\n';
+const NESTED_TASK_MD = '- [ ] foo\n  - [x] nested\n';
+const TASK_FN_LINK_MD = '- [x] done[^1] see [l](./x.md)\n\n[^1]: n\n';
+const TASK_FN_LINK_SLICE = '- [x] done[^1] see [l](./x.md)';
+
+describe('非退行 — 緩いタスクリストは `li > p` / `li` のどちらを掴んでも印を保つ(契約⑥・追補d(4) / AC-49-29)', () => {
+	test('前提の確認: 緩いリストでは `li > p` の先頭にチェックボックスが来て、段落の原文範囲は印の外', async () => {
+		const m = await mount(LOOSE_TASK_MD);
+		const p = q(m.root, 'li.task-list-item > p[data-vellis-node-type="paragraph"]');
+		expect(p.firstElementChild?.matches('input[type="checkbox"]')).toBe(true);
+		expect(m.index.sliceOf(metaOf(p, m.index).id)).toBe('foo');
+		expect(checkedStates(m.root)).toEqual([false, true]);
+	});
+
+	test('`li > p` を掴んで `foo` → `foo edited`: `- [ ] foo edited` になり `[x]` の項目は byte 等価', async () => {
+		const m = await mount(LOOSE_TASK_MD);
+		const p = q(m.root, 'li.task-list-item > p[data-vellis-node-type="paragraph"]');
+		const meta = metaOf(p, m.index);
+		expectBlock(resolveEditTarget(p, m.index), p, 'paragraph');
+		editTaskText(p, 'foo edited');
+
+		const next = commitWithOrigin(m, LOOSE_TASK_MD, p, meta);
+
+		expect(next).toBe('- [ ] foo edited\n\n- [x] bar\n');
+		const again = await mount(next);
+		expect(checkedStates(again.root)).toEqual([false, true]);
+		expect(taskTexts(again.root)).toEqual(['foo edited', 'bar']);
+	});
+
+	test('`li` を掴んで中の段落を `bar` → `bar edited`: `- [x] bar edited` になり `[ ]` の項目は byte 等価', async () => {
+		const m = await mount(LOOSE_TASK_MD);
+		const { el: li, meta } = blockBySlice(m, 'listItem', '- [x] bar');
+		expectBlock(resolveEditTarget(li, m.index), li, 'listItem');
+		editTaskText(q(li, 'p'), 'bar edited');
+
+		const next = commitWithOrigin(m, LOOSE_TASK_MD, li, meta);
+
+		expect(next).toBe('- [ ] foo\n\n- [x] bar edited\n');
+		const again = await mount(next);
+		expect(checkedStates(again.root)).toEqual([false, true]);
+		expect(taskTexts(again.root)).toEqual(['foo', 'bar edited']);
+	});
+});
+
+describe('非退行 — 入れ子のタスク項目の内側を直しても印と入れ子を保つ(契約⑥・追補d(4) / AC-49-29)', () => {
+	test('`- [x] nested` を `nested edited` に: 外側の `- [ ] foo` と字下げは byte 等価・再レンダーで入れ子のまま', async () => {
+		const m = await mount(NESTED_TASK_MD);
+		const { el: inner, meta } = blockBySlice(m, 'listItem', '- [x] nested');
+		expect(inner.closest('li.task-list-item li.task-list-item')).toBe(inner);
+		expectBlock(resolveEditTarget(inner, m.index), inner, 'listItem');
+		editTaskText(inner, 'nested edited');
+
+		const next = commitWithOrigin(m, NESTED_TASK_MD, inner, meta);
+
+		expect(next).toBe('- [ ] foo\n  - [x] nested edited\n');
+		const again = await mount(next);
+		expect(checkedStates(again.root)).toEqual([false, true]);
+		expect(again.root.querySelectorAll('li.task-list-item li.task-list-item')).toHaveLength(1);
+		expect(taskTexts(again.root)[1]).toBe('nested edited');
+	});
+});
+
+describe('非退行 — タスク項目に脚注参照とリンクが同居しても印・脚注・行き先が原文の綴り(契約⑥・追補d(4)(5) / AC-49-29・30)', () => {
+	test('前提の確認: 項目はチェックボックス+脚注参照(`sup`)+内部 URI のリンクを持ち、block と判定される', async () => {
+		const m = await mount(TASK_FN_LINK_MD);
+		const { el } = blockBySlice(m, 'listItem', TASK_FN_LINK_SLICE);
+		expect(el.querySelector('input[type="checkbox"]')).not.toBeNull();
+		expect(footnoteRefs(el)).toHaveLength(1);
+		expect(q(el, 'a[data-vellis-node-type="link"]').getAttribute('href')).toBe('file:///home/user/notes/x.md');
+		expectBlock(resolveEditTarget(el, m.index), el, 'listItem');
+	});
+
+	test('`done` を `finished` に直して確定: `- [x] finished[^1] see [l](./x.md)` になる', async () => {
+		const m = await mount(TASK_FN_LINK_MD);
+		const { el, meta } = blockBySlice(m, 'listItem', TASK_FN_LINK_SLICE);
+		// チェックボックスの直後のテキストノード(` done`)を打ち替える。
+		const text = el.childNodes[1];
+		if (!text || text.nodeType !== Node.TEXT_NODE || text.textContent !== ' done') {
+			throw new Error(`チェックボックスの後ろが " done" ではない: ${el.innerHTML}`);
+		}
+		text.textContent = ' finished';
+
+		const next = commitWithOrigin(m, TASK_FN_LINK_MD, el, meta);
+
+		expect(next).not.toContain('#user-content-fn');
+		expect(next).not.toContain('file://');
+		expect(next).toBe('- [x] finished[^1] see [l](./x.md)\n\n[^1]: n\n');
+		const again = await mount(next);
+		expect(checkedStates(again.root)).toEqual([true]);
+		expect(taskTexts(again.root)[0]).toBe('finished1 see l');
+	});
+});
+
+describe('非退行 — 表セルの inline code のパイプと詰めた表(契約⑥・追補d(3) / AC-49-28)', () => {
+	const CODE_PIPE_TABLE_MD = ['| A |', '| --- |', '| `a\\|b` |', ''].join('\n');
+	const COMPACT_TABLE_MD = ['|A|B|', '|---|---|', '|a1|b1|', ''].join('\n');
+
+	test('原文 `` `a\\|b` `` のセル(表示 `a|b`)の後ろに ` edited` を足して確定: `| `a\\|b` edited |` になり列数は 1 のまま', async () => {
+		const m = await mount(CODE_PIPE_TABLE_MD);
+		const td = bodyCell(m.root, 0, 0);
+		expect(q(td, 'code').textContent).toBe('a|b');
+		const meta = metaOf(td, m.index);
+		td.appendChild(document.createTextNode(' edited'));
+
+		const next = commitWithOrigin(m, CODE_PIPE_TABLE_MD, td, meta);
+
+		expect(next.split('\n')[2]).toBe('| `a\\|b` edited |');
+		expect(linesExcept(next, 2)).toEqual(linesExcept(CODE_PIPE_TABLE_MD, 2));
+		const again = await mount(next);
+		expect(cellTexts(again.root)).toEqual([['A'], ['a|b edited']]);
+		expect(q(bodyCell(again.root, 0, 0), 'code').textContent).toBe('a|b');
+	});
+
+	test('詰めた表 `|a1|b1|` のセルに `a|1` を入れて確定: `|a\\|1|b1|` になり列数は 2 のまま', async () => {
+		const m = await mount(COMPACT_TABLE_MD);
+		const td = bodyCell(m.root, 0, 0);
+		const meta = metaOf(td, m.index);
+		td.textContent = 'a|1';
+
+		const next = commitWithOrigin(m, COMPACT_TABLE_MD, td, meta);
+
+		expect(next).toBe(['|A|B|', '|---|---|', '|a\\|1|b1|', ''].join('\n'));
+		const again = await mount(next);
+		expect(cellTexts(again.root)).toEqual([
+			['A', 'B'],
+			['a|1', 'b1'],
+		]);
+	});
+});

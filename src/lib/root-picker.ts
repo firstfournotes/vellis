@@ -67,3 +67,47 @@ export async function loadHistory(): Promise<string[]> {
 export async function openHistoryEntry<T = unknown>(uri: string): Promise<T> {
 	return invoke<T>('set_root', { uri });
 }
+
+/**
+ * Message for a folder that could not be opened (requirements.md #71 契約3).
+ * Same value as the picker's note when a history entry fails to open; the
+ * reason is the backend's error text, passed through verbatim (#51).
+ */
+export function openFolderFailedMessage(err: unknown): string {
+	return `Could not open the folder: ${err}`;
+}
+
+/** What `pickFolderAndSetRoot` needs from the page (dialog, edit guard, `set_root`). */
+export type PickFolderDeps<Root = unknown> = {
+	/** Ask before dropping unsaved edits (requirements.md #48 契約④). */
+	confirmDiscard: () => Promise<boolean>;
+	/** The OS folder dialog: the chosen **path** (not a URI), or `null` when cancelled. */
+	pickFolder: () => Promise<string | null>;
+	/** Open `uri` as the new root (`set_root`). */
+	setRoot: (uri: string) => Promise<Root>;
+};
+
+export type PickFolderOutcome<Root = unknown> =
+	| { kind: 'applied'; root: Root }
+	| { kind: 'cancelled' }
+	| { kind: 'failed'; message: string };
+
+/**
+ * The picker's "Select Folder…" (requirements.md #4 / #71 契約3).
+ *
+ * A folder that cannot be opened (`set_root` rejects) does not reject here:
+ * it comes back as `failed` with the note to show, so the picker stays open
+ * and the user can choose again — the same treatment as a stale history entry.
+ */
+export async function pickFolderAndSetRoot<Root = unknown>(
+	deps: PickFolderDeps<Root>
+): Promise<PickFolderOutcome<Root>> {
+	if (!(await deps.confirmDiscard())) return { kind: 'cancelled' };
+	const selected = await deps.pickFolder();
+	if (selected === null) return { kind: 'cancelled' };
+	try {
+		return { kind: 'applied', root: await deps.setRoot(`file://${selected}`) };
+	} catch (err) {
+		return { kind: 'failed', message: openFolderFailedMessage(err) };
+	}
+}

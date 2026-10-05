@@ -1001,7 +1001,8 @@ describe('segmentIndexAt — 半開区間 [start.sec, end.sec) の表引き(要�
 	it('区間内はその区間', () => {
 		const segments = specMap().segments;
 		expect(segmentIndexAt(segments, 1.0)).toBe(0);
-		expect(segmentIndexAt(segments, 2.4999999)).toBe(0);
+		// 要件#40 追補3 の許容幅 1e-6 の外の値(境目 2.5 の 2e-6 手前)にした(由谷承認 2026-10-01)
+		expect(segmentIndexAt(segments, 2.499998)).toBe(0);
 		expect(segmentIndexAt(segments, 2.75)).toBe(1);
 		expect(segmentIndexAt(segments, 5.499)).toBe(2);
 	});

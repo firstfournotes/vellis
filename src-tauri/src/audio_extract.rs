@@ -718,6 +718,10 @@ fn find_codec_config(children: &[u8], kind: &[u8; 4]) -> Option<Vec<u8>> {
 /// `ArrayBuffer` already in memory, so there is nothing to gain by putting the
 /// index first.
 ///
+/// 追補f: AAC(stsd の entry が `mp4a`)のときだけ、stbl に合成した roll 群
+/// (`sgpd` + `sbgp`)を足す。roll 群が無いと WebKit が elst とデコーダ既定の遅延を
+/// 二重に削るため(→ `aac_roll_sgpd_box`)。`moov` 後置なので `stco` は変わらない。
+///
 /// `None` when the input cannot make a valid file: no samples, `stts` runs that
 /// do not add up to them, no timescale to time them with, or more bytes than a
 /// 32-bit box can address (the 256 MiB ceiling upstream keeps that out of
@@ -782,18 +786,21 @@ fn build_moov(
     sizes: &[u32],
     chunk_offset: u32,
 ) -> Option<Vec<u8>> {
-    let stbl = container(
-        b"stbl",
-        &[
-            stsd,
-            &stts_box(stts),
-            // One chunk holding every sample: chunk 1, `sample_count` samples,
-            // sample description 1.
-            &stsc_box(sample_count),
-            &stsz_box(sizes),
-            &stco_box(chunk_offset),
-        ],
-    );
+    let stts = stts_box(stts);
+    // One chunk holding every sample: chunk 1, `sample_count` samples,
+    // sample description 1.
+    let stsc = stsc_box(sample_count);
+    let stsz = stsz_box(sizes);
+    let stco = stco_box(chunk_offset);
+    let mut children: Vec<&[u8]> = vec![stsd, &stts, &stsc, &stsz, &stco];
+    // 追補f: AAC のときだけ roll 群(sgpd + sbgp)を足す。ALAC には足さない。
+    let roll = (classify_stsd(stsd) == AudioCodec::Aac)
+        .then(|| (aac_roll_sgpd_box(), aac_roll_sbgp_box(sample_count)));
+    if let Some((sgpd, sbgp)) = &roll {
+        children.push(sgpd);
+        children.push(sbgp);
+    }
+    let stbl = container(b"stbl", &children);
     let minf = container(b"minf", &[&smhd_box(), &dinf_box(), &stbl]);
     let mdia = container(
         b"mdia",
@@ -934,6 +941,32 @@ fn stco_box(offset: u32) -> Vec<u8> {
     p.extend_from_slice(&1u32.to_be_bytes()); // entry_count
     p.extend_from_slice(&offset.to_be_bytes());
     mp4_box(b"stco", &p)
+}
+
+/// 追補f(backlog 235): AAC の roll 群の `sgpd`(v1・`roll`・default_length 2・
+/// 1件=roll_distance −1)。元ファイルの箱は写さず合成する。
+///
+/// WebKit(AudioToolbox)は AAC の m4a に elst と roll 群が両方あれば elst の
+/// media_time だけを削るが、roll 群が無いとデコーダ既定の遅延(LC=2112)を削った
+/// うえで elst のぶんも削る=二重に削り、波形が約 44ms 早く描かれる。stbl を
+/// 組み直すと元の roll 群が落ちるので、ここで付け直す。
+fn aac_roll_sgpd_box() -> Vec<u8> {
+    let mut p = vec![1u8, 0, 0, 0]; // version 1 / flags
+    p.extend_from_slice(b"roll"); // grouping_type
+    p.extend_from_slice(&2u32.to_be_bytes()); // default_length(roll_distance=i16)
+    p.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+    p.extend_from_slice(&(-1i16).to_be_bytes()); // AudioRollRecoveryEntry.roll_distance
+    mp4_box(b"sgpd", &p)
+}
+
+/// 追補f: 全サンプルを `sgpd` の entry 1 に割り付ける `sbgp`(v0・`roll`・1件)。
+fn aac_roll_sbgp_box(sample_count: u32) -> Vec<u8> {
+    let mut p = vec![0u8; 4]; // version 0 / flags
+    p.extend_from_slice(b"roll"); // grouping_type
+    p.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+    p.extend_from_slice(&sample_count.to_be_bytes()); // sample_count
+    p.extend_from_slice(&1u32.to_be_bytes()); // group_description_index
+    mp4_box(b"sbgp", &p)
 }
 
 /// Give a file from `remux_m4a` an edit list that skips the first `edit_start`

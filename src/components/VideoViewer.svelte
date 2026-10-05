@@ -122,6 +122,11 @@
 	let position = $state(0);
 	/** `<video>` が知っている総尺(秒)。0 =まだ判らない。 */
 	let mediaDuration = $state(0);
+	/**
+	 * `mediaDuration` がどの `src` の尺か(要件#37 追補a)。読み込み直しの effect が
+	 * 同じ src の開き直しで尺を捨てないための控え。表示ではないので `$state` にしない。
+	 */
+	let durationSrc: string | null = null;
 	/** シークバーを掴んでいる間の位置(秒)。null =掴んでいない。 */
 	let scrubbing = $state<number | null>(null);
 
@@ -253,23 +258,60 @@
 	// 読み込み直しが起きるたびに失敗状態と再生状態を落とす。ディスク上のファイルが
 	// 直れば版数付きの新しい src が降ってくるので、もう一度再生を試みる。
 	$effect(() => {
-		void src;
+		const key = src;
 		loadFailed = false;
 		playing = false;
 		position = 0;
-		mediaDuration = 0;
+		// 尺だけは「src が前回と同じなら残す」(要件#37 追補a・backlog 224)。同じファイルの
+		// 開き直しでもこの effect は走るが、`{#key src}` は文字列で比べるので `<video>` は
+		// 据え置き=`durationchange` はもう来ない。ここで 0 にすると索引の無い動画(webm)の
+		// シークバーが尺 0 のまま死ぬ。据え置かれた `<video>` の duration を読み直す手も
+		// あるが、src が変わった回では `bind:this` の差し替えより先にここが走りうるので、
+		// 古い要素の尺を拾う恐れがある。文字列の一致は `{#key}` の判定そのものなので、
+		// 「`<video>` が作り直されない ⇔ 尺を残す」がずれない。
+		const reopened = key === durationSrc;
+		if (!reopened) mediaDuration = 0;
+		durationSrc = key;
 		scrubbing = null;
 		requestedFrame = null;
 		initialSeekPending = true;
 		stopRepeat();
+		// 同じ src の開き直しでは、据え置かれた `<video>` も初めて開いたときの状態へ
+		// そろえる(要件#37 追補b・backlog 238)。`loadedmetadata` はもう来ないので、
+		// ここで止めてから先頭への初期シークを当て直す ―― 状態だけ初期化すると、表示は
+		// 先頭なのに画面と再生は途中のまま(再生中なら音は続くのにボタンが Play)になる。
+		// 止めるのは再生中のときだけで、`play()` は呼ばない(要件#39 契約②=自動再生しない)。
+		// 初期シークも初めて開いたときと同じ二段構えにする: ここでは縮退値を当てて
+		// `initialSeekPending` を立てたままにし、精密値は索引の取り直し(下の effect が
+		// 開き直しでも索引を捨てて取り直す)が届いた時点の寄せ直しに任せる。手元の古い
+		// 索引で精密値を当てて役目を終えると、取り直しの間はシークバーの範囲が一瞬 0 に
+		// なり、そこで丸められた値が索引の到着後も戻らない。取り直しの間に触られたら
+		// 寄せ直しは割り込まない(契約⑤は不変)。`src` が変わった回は `<video>` が
+		// 作り直されて `loadedmetadata` からやり直すので触らない(この時点の `video` は
+		// まだ古い要素でありうる)。`video` は追跡しない ―― 追跡すると要素の差し替えの
+		// たびにこの effect が走り、再生状態や波形の控えまで捨ててしまう。
+		if (reopened) {
+			const el = untrack(() => video);
+			if (el) {
+				if (!el.paused) el.pause();
+				el.currentTime = initialSeekTime(null);
+			}
+		}
 		// 別ファイル(または版数の変わった同じファイル)の波形は別物。控えごと捨てる
 		// (要件#44 契約③)。捨てた直後に次の effect が解析し直す。
-		waveform = null;
-		waveformAnalyzing = false;
-		analyzedSrc = null;
+		// 同じ src の開き直しでは捨てない(要件#44 追補a・backlog 239)。素材は同じなので
+		// 解析済みの波形はそのまま使え、捨てると同じ素材を解析し直して帯に「解析中」が
+		// 一瞬出る。解析が終わる前に開き直した場合は、解析の effect が同じ src で走り直す
+		// ときの cleanup が控えを戻すので、そちらで従来どおりやり直しになる。
+		if (!reopened) {
+			waveform = null;
+			waveformAnalyzing = false;
+			analyzedSrc = null;
+		}
 		// 窓は特定の素材の中の位置なので、素材が変われば意味を失う(要件#47 契約①)。
 		// 等倍・先頭へ戻す ―― 前の動画の 40 倍の窓を次の動画に当てても、そこに何がある
-		// かは誰にも判らない。
+		// かは誰にも判らない。窓は波形の控えと違い、開き直しでも戻す(要件#37 追補b の
+		// 「初めて開いたときと同じ状態」)。
 		waveformZoom = 1;
 		waveformWindowStart = 0;
 	});
@@ -1003,6 +1045,11 @@
 					のは先頭フレームぶんの数バイトで、`vellis-asset:` は Range 対応(要件#27)
 					だからシークが必要な範囲だけを取りに行ける — "auto" にして長尺の動画を
 					丸ごと先読みさせる理由がない。
+
+					消音だけは素材ではなく利用者の設定なので、作り直しても `muted={audioMuted}` で
+					新しい要素へ引き継ぐ(要件#37 追補c・要件#50 追補e(2) の AudioViewer と同じ形)。
+					`toggleMute` が要素の `muted` を書き換え → `volumechange` で `audioMuted` に
+					写り → 同じ値の再代入になるだけなので、往復して振動しない。
 				-->
 				{#key src}
 					<!-- svelte-ignore a11y_media_has_caption -->
@@ -1013,6 +1060,7 @@
 						bind:this={video}
 						{src}
 						preload="metadata"
+						muted={audioMuted}
 						onclick={togglePlay}
 						onloadedmetadata={(event) => applyInitialSeek(event.currentTarget)}
 						onplay={() => (playing = true)}

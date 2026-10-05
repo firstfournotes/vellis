@@ -544,8 +544,21 @@ export function parseProvenanceMap(text: string): ProvenanceParse {
  * clamp する(再生位置が末尾 `end` ちょうどに来るのは日常的で、そこで表示が消えるのは
  * 不便でしかない)。
  *
+ * 境目は丸め粒度(`SECOND_EPSILON`)の許容幅で見る(追補3)。再生位置が次の区間の
+ * `start.sec` より 1e-6 秒以内だけ手前なら、その次の区間とみなす。生成側は `sec` を
+ * 小数第6位に丸めて書くので、割り切れない境目(30fps の 31/30 秒など)が切り上がって
+ * 書かれると、区間の頭のフレームの再生位置が `start.sec` をわずかに下回り、許容幅なしの
+ * 比較では1つ前の区間を指してしまう。許容幅は半フレームよりはるかに小さいので、前の区間の
+ * 最後のフレームを後ろの区間と取り違えることはない。先頭より前・末尾 `end` 以降の clamp の
+ * 判定は許容幅なしのまま(末尾 `end` の手前 1e-6 秒以内は最終区間)。
+ *
  * `hint` は**結果を変えない**(契約⑪)。連続再生で直前の添字を渡せば1回の範囲判定で
- * 済むという速さのためだけの引数で、誤った hint を渡しても素引きと同じ答えになる。
+ * 済むという速さのためだけの引数で、誤った hint を渡しても素引きと同じ答えになる
+ * (hint の範囲判定も同じ許容幅で行う)。hint の範囲は二分探索と同じ境目
+ * `[segments[k].start.sec − ε, segments[k+1].start.sec − ε)` で見て、`end.sec` は見ない
+ * (追補6。辻褄の検査は `end_k` と `start_{k+1}` の 1e-6 以内のずれを受け入れるので、
+ * `end.sec` を上限にすると、そのずれの窓で hint あり/なしの結果が食い違う)。最後の区間は
+ * 上限なし(末尾以降の clamp と同じ)。
  */
 export function segmentIndexAt(
 	segments: ProvenanceSegment[],
@@ -556,19 +569,24 @@ export function segmentIndexAt(
 	if (last < 0) return 0;
 
 	if (typeof hint === 'number' && Number.isInteger(hint) && hint >= 0 && hint <= last) {
-		const hinted = segments[hint];
-		if (t >= hinted.start.sec && t < hinted.end.sec) return hint;
+		if (
+			t >= segments[hint].start.sec - SECOND_EPSILON &&
+			(hint === last || t < segments[hint + 1].start.sec - SECOND_EPSILON)
+		) {
+			return hint;
+		}
 	}
 
 	if (!(t >= segments[0].start.sec)) return 0;
 	if (t >= segments[last].end.sec) return last;
 
-	// 不変条件: segments[lo].start.sec <= t < segments[hi].start.sec(hi は番兵=区間列の外)。
+	// 不変条件: segments[lo].start.sec - ε <= t < segments[hi].start.sec - ε
+	// (ε = SECOND_EPSILON。hi は番兵=区間列の外)。
 	let lo = 0;
 	let hi = segments.length;
 	while (hi - lo > 1) {
 		const mid = (lo + hi) >> 1;
-		if (segments[mid].start.sec <= t) lo = mid;
+		if (segments[mid].start.sec - SECOND_EPSILON <= t) lo = mid;
 		else hi = mid;
 	}
 	return lo;
@@ -712,9 +730,16 @@ export function segmentStartSeconds(segment: ProvenanceSegment, index: FrameInde
  *
  * 並びは配列順(`index` 順=重ね順)のまま。オーバーレイはタイムラインを分割しないので、
  * 区間リストとは別枠に置く(スキーマ §オーバーレイ層)。
+ *
+ * 境界は `segmentIndexAt` の追補3 と同じ理由で丸め粒度(`SECOND_EPSILON`)の許容幅で
+ * 見る(追補5)。`start.sec` / `end.sec` が小数第6位で切り上がって書かれても、頭の
+ * フレームで漏れず、終端の次のフレームまで載らないようにする。
  */
 export function overlaysAt(overlays: ProvenanceOverlay[], t: number): ProvenanceOverlay[] {
-	return overlays.filter((overlay) => t >= overlay.start.sec && t < overlay.end.sec);
+	return overlays.filter(
+		(overlay) =>
+			t >= overlay.start.sec - SECOND_EPSILON && t < overlay.end.sec - SECOND_EPSILON,
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -726,9 +751,39 @@ export function overlaysAt(overlays: ProvenanceOverlay[], t: number): Provenance
  *
  * `resolveRelative` は `new URL()` 実装なので `..` は解決の時点で正規化され、導線へ
  * 渡る絶対 URI には残らない(asset プロトコルは `..` を含むパスを 400 で拒否する)。
+ *
+ * `inputs[].path` は vedit が書く**ファイルのパス**であって URL ではない(追補2)。
+ * 生で渡すと `#` 以降がフラグメント・`?` 以降がクエリ・`%XX` がエスケープとして
+ * 読まれ、導線が別のパスを指す。そこで URL として意味を持つこの3文字だけを
+ * パーセントエンコードしてから解決する ―― `/` 区切りと `.` / `..` には触れないので
+ * 正規化は従来どおり `new URL()` に任せられ、3文字を含まないパスでは結果が従来の
+ * `resolveRelative(mapUri, inputPath)` と同じ文字列になる(日本語・空白などのエンコードも
+ * `new URL()` のまま)。`encodeURIComponent` で要素ごとに包むと `+` `&` `,` なども
+ * エンコードされて従来の文字列から外れるため、対象を3文字に絞っている。
+ *
+ * さらに、`/` で始まらない相対パスの先頭の要素が `[A-Za-z][A-Za-z0-9+.-]*:` の形
+ * (`take:2.mov`・`v1.2:final.mov` など)だと、`new URL()` はそれを URL のスキームと読み、
+ * マップの URI を基準にしない(追補4)。macOS では Finder で名前に入れた `/` が POSIX の
+ * `:` になるので、素材の名前としてはあり得る。そこでこの形のときだけ `./` を前に足して
+ * ファイル名として解決させる ―― スキームの形でない名前・`/` で始まる絶対パスには触れない
+ * ので、結果は従来と同じ文字列のまま。判定は3文字のエンコードの後に行うが、エンコードで
+ * 増える `%` はスキームの文字種に入らないので、順序で結果は変わらない(`take:#2.mov` も同じ)。
+ *
+ * URL パーサは、入力の先頭と末尾の空白・制御文字を削り、タブ・改行・CR を黙って取り除き、
+ * file: では `\` を `/` と読み、先頭の `//` をホスト名と読む(追補7)。macOS のファイル名では
+ * どれも普通の文字なので、エンコードの対象に空白・制御文字(U+0000〜U+001F・U+007F)・
+ * バックスラッシュを足して文字どおりのファイル名として解決させる ―― 空白は URL のパスでも
+ * `%20` になるので、名前の途中の空白の結果は従来と同じ文字列のまま。先頭が `/` を2つ以上
+ * 重ねたパスは POSIX と同じく絶対パスなので、`/` の連なりを1つに縮めてから解決する。
+ * 追補4 のスキームの形の判定はこのエンコードの後に行うので、` take:2.mov` は先頭が `%20` に
+ * なってスキームの形にならず、ファイル名 ` take:2.mov` として解決される。
  */
 export function inputUriFor(mapUri: string, inputPath: string): string {
-	return resolveRelative(mapUri, inputPath);
+	const encoded = inputPath
+		.replace(/^\/{2,}/, '/')
+		.replace(/[%#?\\\u0000-\u0020\u007f]/g, encodeURIComponent);
+	const relative = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(encoded) ? `./${encoded}` : encoded;
+	return resolveRelative(mapUri, relative);
 }
 
 /** 「Finder で表示」の実行計画(要件#19 の OS パス変換を再利用)。 */

@@ -11,6 +11,8 @@
 	import { detectFileType } from '$lib/file-type';
 	import { saveDocument } from '$lib/save-document';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
+	import { openFileFailedMessage } from '$lib/open-document';
+	import { openInNewWindowFailedMessage } from '$lib/open-in-new-window';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
 	import {
 		applyHighlights,
@@ -267,7 +269,60 @@
 		positionBase = index;
 		committedEdits.clear();
 		releaseBlockEdit();
+		// 追補d(1): 掴みの記録を捨てる前に画面を戻す。`{@html}` は文字列が同じだと DOM を
+		// 作り直さない(レンダー結果が同じ外部変更の apply)ので、打った文字が残りうる。
+		// 作り直されていれば旧ノードは切り離されていて、戻しは何もしない。
+		restoreGrabbedBlocks();
 	});
+
+	/**
+	 * 追補d(1)(2): この編集の間に掴んだブロックの、**最初に掴んだときの**中身。
+	 * key=`NodeMeta.id`。
+	 *
+	 * `{@html}` は文字列が同じだと DOM を作り直さないので、閲覧へ戻っても打った文字や
+	 * 確定で直した文字が画面に残る ―― 残った文字は再入場で「編集前」として掴まれ、
+	 * 確定で原文へ書かれる(backlog 157)。破棄で原文が `document.content` へ戻っても
+	 * 画面は確定後のまま食い違う(backlog 155)。最初に掴んだときの中身は `html` prop
+	 * (= `document.content` のレンダリング)を載せた DOM そのものなので、閲覧へ戻る
+	 * ときにそれへ書き戻せば画面は原文のレンダリングに揃う。
+	 */
+	const grabbedBlocks = new Map<string, { el: HTMLElement; html: string }>();
+
+	/**
+	 * 掴む直前に、そのブロックの最初の中身を控える(2回目以降の掴みでは上書きしない)。
+	 *
+	 * 入れ子(リスト項目の中のリスト項目・緩いリストの段落)で**内側を先に掴んで**いたら、
+	 * 外側のいまの中身は直した内側を含んでいる。そのまま控えると、閲覧へ戻すときに外側の
+	 * 書き戻しが内側の戻しを上書きする(追補d(1))。そこで複製の上で、既に掴んだ子孫の
+	 * 中身をその子孫の控え(= 掴む前の中身)へ差し替えてから控える。
+	 */
+	function rememberGrabbed(el: HTMLElement, meta: NodeMeta) {
+		if (grabbedBlocks.has(meta.id)) return;
+		let original = el.innerHTML;
+		const inner = [...grabbedBlocks].filter(([, b]) => b.el !== el && el.contains(b.el));
+		if (inner.length > 0) {
+			const clone = el.cloneNode(true) as HTMLElement;
+			for (const [id, b] of inner) {
+				const copy = [...clone.querySelectorAll('[data-vellis-node-id]')].find(
+					(node) => node.getAttribute('data-vellis-node-id') === id,
+				);
+				if (copy) copy.innerHTML = b.html;
+			}
+			original = clone.innerHTML;
+		}
+		grabbedBlocks.set(meta.id, { el, html: original });
+	}
+
+	/**
+	 * 掴んだブロックを最初の中身へ戻す(追補d(1)(2))。切り離された要素(再レンダーで
+	 * 作り直された旧ノード)は画面に無いので触らない。
+	 */
+	function restoreGrabbedBlocks() {
+		for (const { el, html: original } of grabbedBlocks.values()) {
+			if (el.isConnected && el.innerHTML !== original) el.innerHTML = original;
+		}
+		grabbedBlocks.clear();
+	}
 
 	/**
 	 * 追補a(5): 閲覧へ戻ったら位置の記録も捨てる。
@@ -284,6 +339,8 @@
 		blockEditMode = false;
 		blockEditFromView = false;
 		releaseBlockEdit();
+		// 追補d(1)(2): 掴みを捨てるのは画面も掴む前へ戻すことを含む。
+		restoreGrabbedBlocks();
 		// 要件#53: 編集面まわりも同じ区切りで畳む(次の ⌘E は素の編集面から始まる)。
 		htmlSourceRequested = false;
 		htmlStructureNotice = null;
@@ -383,6 +440,7 @@
 			}
 			blockEditFromView = true;
 		}
+		rememberGrabbed(el, meta);
 		blockEdit = { el, meta, html: el.innerHTML };
 		el.setAttribute('contenteditable', 'true');
 		el.focus();
@@ -422,6 +480,7 @@
 			blockEditFromView = true;
 		}
 
+		rememberGrabbed(el, meta);
 		blockEdit = {
 			el,
 			meta,
@@ -1499,10 +1558,20 @@
 			e.preventDefault();
 			if (/\.(md|markdown|mdx)$/i.test(href)) {
 				if (e.shiftKey) {
-					await invoke('new_window', { path: href, root: windowState.root });
+					try {
+						await invoke('new_window', { path: href, root: windowState.root });
+					} catch (err) {
+						// 要件#71 契約4
+						alert(openInNewWindowFailedMessage(err));
+					}
 				} else {
-					const doc = await invoke<DocumentPayload>('open_document', { uri: href });
-					windowState.setDocument(doc);
+					try {
+						const doc = await invoke<DocumentPayload>('open_document', { uri: href });
+						windowState.setDocument(doc);
+					} catch (err) {
+						// 要件#71 契約2: 知らせて、表示中の文書は前のまま。
+						alert(openFileFailedMessage(err));
+					}
 				}
 			}
 			// Non-md files (PDF, etc.) are noop in Phase 1.

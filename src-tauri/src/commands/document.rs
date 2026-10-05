@@ -59,7 +59,9 @@ pub async fn open_binary_document(
 ///    revert (契約⑤). A failure here aborts the save: the safety net is the
 ///    reason FR-02 (viewer-only) could be withdrawn at all, so a save without
 ///    one is not a save this command is willing to perform.
-/// 4. **Write** — `FileProvider::write_text`, tmp+rename, bytes verbatim.
+/// 4. **Write** — `FileProvider::write_text`, tmp+rename, bytes verbatim,
+///    to the path step 2 resolved — a symlink's target, never the link
+///    itself (追補d).
 ///
 /// The write makes the file watcher fire `file_changed` right back at the
 /// window that saved. The frontend recognises its own bytes by hash and drops
@@ -129,12 +131,17 @@ pub async fn save_document(
         .take_snapshot(&[relative], &[], chrono::Utc::now())
         .map_err(|e| format!("could not snapshot before saving: {}", e))?;
 
+    // Write to the path the root check resolved, not the one the window
+    // opened (追補d(3)): for a symlink that is its target, so the check and
+    // the write judge the same file and a link re-pointed in between cannot
+    // send the bytes outside the root.
+    let write_uri = parsed_uri.with_path(&resolved);
     let provider = state
         .fs_registry
-        .resolve(&parsed_uri)
+        .resolve(&write_uri)
         .map_err(|e| e.to_string())?;
     provider
-        .write_text(&parsed_uri.raw, &content)
+        .write_text(&write_uri.raw, &content)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -177,15 +184,10 @@ async fn open_in_window(
     let parsed_uri = Uri::parse(&uri).map_err(|e| e.to_string())?;
     let window_id = WindowId(label.clone());
 
-    // Drop existing session (RAII unsubscribe) before opening a new one.
-    {
-        let mut wm = state.window_manager.lock().await;
-        if let Some(win_state) = wm.get_mut(&label) {
-            // Take the old session — dropping it triggers unsubscribe.
-            let _ = win_state.session.take();
-        }
-    }
-
+    // 要件#71 契約1: 前の文書のセッションには先に触らない。新しい文書を開けたときだけ
+    // 下で差し替える — 開けなければ前のセッション(監視の購読)がそのまま残り、
+    // 表示中の文書の変更追従も続く。
+    //
     // Open new session: subscribe-first, then read (binary: no read at all).
     let app_handle = window.app_handle().clone();
     let opened = if binary {
@@ -236,13 +238,14 @@ async fn open_in_window(
         }
     };
 
-    // Store the new session in the window manager.
-    {
+    // Swap the new session in (要件#71 契約1). The session it replaces is dropped
+    // after the manager lock is released — dropping it unsubscribes (RAII), and a
+    // reopen of the same document settles back to a single subscription.
+    let previous = {
         let mut wm = state.window_manager.lock().await;
-        if let Some(win_state) = wm.get_mut(&label) {
-            win_state.session = Some(session);
-        }
-    }
+        wm.replace_session(&label, session)
+    };
+    drop(previous);
 
     // 要件#64 契約1・2: 開けたファイルを Recent Files に記録する。開く経路(ツリー・
     // Go to・検索結果・リンク・起動時引数・新しいタブ/窓)はすべてここに集まるので、

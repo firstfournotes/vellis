@@ -4,4 +4,6 @@ pub mod provider;
 pub mod registry;
 #[cfg(feature = "provider-ssh")]
 pub mod ssh;
+#[cfg(feature = "provider-ssh")]
+pub mod ssh_pool;
 pub mod uri;

@@ -33,7 +33,7 @@
 	import { invoke } from '$lib/ipc';
 	import { listen } from '$lib/events';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
-	import { openForDisplay } from '$lib/open-document';
+	import { openFileFailedMessage, openForDisplay } from '$lib/open-document';
 	import {
 		FIND_IN_FOLDER_PAGE_SIZE,
 		FIND_IN_FOLDER_SHOW_MORE,
@@ -395,8 +395,10 @@
 			// 要件#48 契約④: この窓で別のファイルを開くと編集は消える(Explorer と同じ)。
 			if (!(await confirmDiscardEdits())) return;
 			windowState.setDocument(await openForDisplay(uri));
-		} catch {
-			// 開けなかった(消えた・読めない)。パネルはそのまま残す。
+		} catch (err) {
+			// 開けなかった(消えた・読めない)。知らせて(要件#71 契約2)、パネルと
+			// 表示中の文書はそのまま残す。
+			alert(openFileFailedMessage(err));
 			return;
 		}
 		onOpen(uri, value, index);
