@@ -334,13 +334,14 @@ fn search_in_folder_reset_is_registered_in_both_handler_lists() {
     }
 }
 
-/// 11. e-3 不変: `search_in_folder` は従来どおり `begin` → `is_current` → `store` を通る。
+/// 11. e-3 不変: `search_in_folder` は従来どおり `begin` → `is_current_at` → `store_at` を通る。
+///     (要件#55 追補f の要件側更新で読み替え: `.is_current(` → `.is_current_at(`・`.store(` → `.store_at(`)
 #[test]
 fn search_in_folder_still_begins_checks_and_stores() {
     let code = search_command_code();
     let (_, body) = function_parts(&code, "search_in_folder");
     assert!(body.contains(".begin("), "search_in_folder records the generation at start (d-3)");
-    assert!(body.contains(".is_current("), "search_in_folder stops stale scans");
-    assert!(body.contains(".store("), "search_in_folder keeps the results for Show more");
+    assert!(body.contains(".is_current_at("), "search_in_folder stops stale scans");
+    assert!(body.contains(".store_at("), "search_in_folder keeps the results for Show more");
     assert!(!body.contains(".forget("), "search_in_folder itself must not forget (reset is its own command)");
 }

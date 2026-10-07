@@ -66,13 +66,15 @@ pub async fn search_in_folder(
         SearchFilter { include, exclude, use_exclude_settings },
     );
     let label = window.label().to_string();
-    results.0.lock().map_err(|e| e.to_string())?.begin(&label, generation);
+    // The epoch changes when the panel is reopened (search_in_folder_reset), so a scan from
+    // the previous panel stops at its next check and never overwrites the new panel's results.
+    let epoch = results.0.lock().map_err(|e| e.to_string())?.begin(&label, generation);
 
-    // All hits in scan order, kept for `ResultStore::store` (Show more pages from it).
+    // All hits in scan order, kept for `ResultStore::store_at` (Show more pages from it).
     let mut all: Vec<SearchHit> = Vec::new();
     let mut sink = |progress: SearchProgress| {
         // Short lock: only the generation check. The scan never calls the sink with a lock held.
-        let current = results.0.lock().map(|s| s.is_current(&label, generation)).unwrap_or(false);
+        let current = results.0.lock().map(|s| s.is_current_at(&label, epoch, generation)).unwrap_or(false);
         if !current {
             return SearchControl::Stop;
         }
@@ -88,7 +90,7 @@ pub async fn search_in_folder(
         SearchControl::Continue
     };
     // Polled between files and directories, so a stale scan with no hits to flush stops too.
-    let cancel = || !results.0.lock().map(|s| s.is_current(&label, generation)).unwrap_or(true);
+    let cancel = || !results.0.lock().map(|s| s.is_current_at(&label, epoch, generation)).unwrap_or(true);
     let summary = scope
         .search_in_folder_streaming(provider.as_ref(), &root_uri, &query, &mut sink, &cancel)
         .await
@@ -99,7 +101,7 @@ pub async fn search_in_folder(
     }
     let response = {
         let mut store = results.0.lock().map_err(|e| e.to_string())?;
-        store.store(&label, generation, all)
+        store.store_at(&label, epoch, generation, all)
     };
     let done = SearchDoneEvent { generation, total: summary.total, files: summary.files };
     if let Err(e) = window.emit_to(window.label(), SEARCH_DONE_EVENT, done) {

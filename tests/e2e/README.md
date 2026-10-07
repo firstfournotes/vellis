@@ -58,3 +58,7 @@ collisions, and removed in `after()`.
   args via cwd or an env var the binary already reads (the harness
   uses cwd; the spec's IPC second-invocation uses the binary's CLI
   arg directly because `child_process.spawn` does pass args).
+- A `webdriver` build never starts the SpaceMouse input source (requirement #25 addendum b /
+  backlog 190): it does not register with 3DxWare or read raw HID, so a
+  test app that is killed mid-run cannot leave a stale 3DxWare client
+  behind. No local patch is needed before driving a webdriver build.

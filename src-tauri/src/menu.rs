@@ -716,19 +716,57 @@ fn focused_or_first_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWind
 /// window ([`sync_print_item`]), so this is the second stop, for a click that
 /// races a report — a window on the history picker or the empty state would
 /// otherwise open the print dialog on a blank sheet.
+///
+/// Since 追補i (backlog 253) the target comes from [`print_click_target`]
+/// over every window, print windows included, rather than from
+/// [`focused_or_first_window`]. That helper skips print windows, so with a
+/// print window in front it fell back to a document window behind it and
+/// started printing there; now a click with a print window in front does
+/// nothing (the intended no-op of backlog #91).
 pub fn handle_print_click(app: &AppHandle<Wry>) {
-    let Some(window) = focused_or_first_window(app) else {
+    let windows: Vec<(String, bool)> = app
+        .webview_windows()
+        .values()
+        .map(|w| (w.label().to_string(), w.is_focused().unwrap_or(false)))
+        .collect();
+    let borrowed: Vec<(&str, bool)> = windows
+        .iter()
+        .map(|(label, focused)| (label.as_str(), *focused))
+        .collect();
+    let Some(label) = print_click_target(&borrowed) else {
         return;
     };
     let enabled = app
         .try_state::<PrintAvailability>()
-        .is_some_and(|state| state.print_item_state(window.label()) == PrintItemState::Enabled);
+        .is_some_and(|state| state.print_item_state(label) == PrintItemState::Enabled);
     if !enabled {
         return;
     }
-    if let Err(e) = app.emit_to(window.label(), MENU_PRINT_EVENT, ()) {
-        tracing::warn!("failed to emit {} to '{}': {}", MENU_PRINT_EVENT, window.label(), e);
+    if let Err(e) = app.emit_to(label, MENU_PRINT_EVENT, ()) {
+        tracing::warn!("failed to emit {} to '{}': {}", MENU_PRINT_EVENT, label, e);
     }
+}
+
+/// The window File > Print… applies to (requirements.md #38 追補i).
+///
+/// `windows` is `(label, focused)` for every webview window, print windows
+/// included, in `app.webview_windows()` order.
+/// - If any focused window is a print window, `None`: the click is a no-op
+///   rather than printing a document window behind it (backlog 253).
+/// - Otherwise the first focused document window.
+/// - Otherwise the first document window.
+/// - `None` when there are no document windows.
+pub fn print_click_target<'a>(windows: &[(&'a str, bool)]) -> Option<&'a str> {
+    let is_print = |label: &str| crate::print::is_print_window(label);
+    if windows.iter().any(|&(label, focused)| focused && is_print(label)) {
+        return None;
+    }
+    let mut documents = windows.iter().filter(|&&(label, _)| !is_print(label));
+    let first = documents.clone().next().map(|&(label, _)| label);
+    documents
+        .find(|&&(_, focused)| focused)
+        .map(|&(label, _)| label)
+        .or(first)
 }
 
 /// Enable or disable File > Print… for the window `label` that is now

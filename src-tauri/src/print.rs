@@ -36,6 +36,16 @@
 //! (`PRINT_CSP_META`, frontend side). That doubling is the printing half of
 //! 要件#8's "scripts do not run": the print window is outside the viewer's
 //! sandbox, so the CSP is what stands in its place.
+//!
+//! PDFs take a third route (要件#38 追補g・backlog 307). The PDF viewer shows
+//! the file inside an `<iframe>` that WebKit's own PDF plug-in draws, so the
+//! main-frame print only put on paper what the iframe had on screen — roughly
+//! the first fifth of the document. Printing the *file* instead is what
+//! Preview does, so that is what [`print_pdf_in_window`] does: the bytes go
+//! into PDFKit's `PDFDocument`, and the print operation PDFKit builds from it
+//! runs as a sheet of the window that asked. No crate is added for this —
+//! PDFKit is reached through the Objective-C runtime (`objc2`) and linked as a
+//! framework, the same way `window/tab.rs` talks to `NSWindow`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -361,4 +371,167 @@ pub async fn open_print_window(app: &AppHandle, document: String) -> Result<(), 
     window
         .print()
         .map_err(|e| format!("cannot open the print dialog: {e}"))
+}
+
+/// Page count of `bytes` as PDFKit reads them (要件#38 追補g).
+///
+/// The document is built exactly the way [`print_pdf_in_window`] builds the
+/// one it prints (`PDFDocument initWithData:`), so "this opens with N pages"
+/// here is the same judgement the print route makes before showing a sheet.
+/// Bytes PDFKit cannot open — empty, not a PDF, or a PDF with no pages — are an
+/// `Err` carrying a message the frontend can show as is (`printFailedMessage`).
+///
+/// Does not need the main thread: nothing here touches AppKit.
+#[cfg(target_os = "macos")]
+pub fn pdf_page_count(bytes: &[u8]) -> Result<usize, String> {
+    objc2::rc::autoreleasepool(|_| pdfkit::open(bytes).map(|(_, pages)| pages))
+}
+
+/// Print `bytes` — a whole PDF file — as a sheet of `window` (要件#38 追補g).
+///
+/// The `PDFDocument` is built and the print operation run on the main thread
+/// (`run_on_main_thread`): AppKit's print panel is main-thread only, and the
+/// document is built there too rather than handed across, because an
+/// Objective-C object is not `Send`. If the bytes do not open as a PDF with at
+/// least one page, no sheet is shown and the reason comes back as `Err`.
+///
+/// The sheet is modeless — `runOperationModalForWindow:…` returns as soon as it
+/// is attached — so this resolves once the sheet is up, not when the user is
+/// done with it, the same as `Webview::print()` on the other routes.
+#[cfg(target_os = "macos")]
+pub async fn print_pdf_in_window<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let target = window.clone();
+    window
+        .run_on_main_thread(move || {
+            // The closure runs inside the event loop's callback, where an
+            // unwinding panic would stop the app (`window/tab.rs` の run_on_main).
+            let result = catch_unwind(AssertUnwindSafe(|| pdfkit::print_as_sheet(&target, &bytes)))
+                .unwrap_or_else(|_| Err(String::from("printing the PDF failed unexpectedly")));
+            let _ = done_tx.send(result);
+        })
+        .map_err(|e| format!("cannot open the print dialog: {e}"))?;
+    done_rx
+        .await
+        .map_err(|_| String::from("cannot open the print dialog: the window went away"))?
+}
+
+/// Printing a PDF file goes through PDFKit, which only macOS has.
+#[cfg(not(target_os = "macos"))]
+pub async fn print_pdf_in_window<R: tauri::Runtime>(
+    _window: &tauri::Window<R>,
+    _bytes: Vec<u8>,
+) -> Result<(), String> {
+    Err(String::from("printing a PDF is only supported on macOS"))
+}
+
+/// PDFKit through the Objective-C runtime. Kept to the two calls the print
+/// route needs; nothing outside this module sees an Objective-C object.
+///
+/// The print classes (`NSData`, `NSPrintInfo`, `NSPrintOperation`) are reached
+/// the same untyped way rather than through new `objc2-app-kit` /
+/// `objc2-foundation` features: the AppKit feature set is pinned by 要件#62 追補a
+/// (`acceptance_req62a.rs`), and these are three messages.
+#[cfg(target_os = "macos")]
+mod pdfkit {
+    use std::ffi::c_void;
+
+    use objc2::rc::{Allocated, Retained};
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use objc2::{class, msg_send};
+    use objc2_app_kit::NSWindow;
+
+    // `PDFDocument` lives in PDFKit, which nothing else in the app links.
+    // Without this the class is simply not registered with the runtime and
+    // `AnyClass::get` finds nothing.
+    #[link(name = "PDFKit", kind = "framework")]
+    extern "C" {}
+
+    /// `kPDFPrintPageScaleDownToFit`: pages larger than the paper are shrunk,
+    /// smaller ones print at their own size — Preview's default, and what
+    /// 追補g 契約1 asks for. The viewer's zoom (要件#63) never reaches here.
+    const SCALE_DOWN_TO_FIT: isize = 2;
+
+    /// Build a `PDFDocument` from `bytes` and count its pages.
+    pub(super) fn open(bytes: &[u8]) -> Result<(Retained<AnyObject>, usize), String> {
+        let class = AnyClass::get(c"PDFDocument")
+            .ok_or_else(|| String::from("PDFKit is not available"))?;
+        // SAFETY: `dataWithBytes:length:` copies `bytes.len()` bytes from a
+        // valid slice (a zero length never dereferences the pointer). `alloc` /
+        // `initWithData:` / `pageCount` are PDFDocument's documented API with
+        // these argument and return types; `initWithData:` returns nil
+        // (→ `None`) for data it cannot read.
+        let document: Option<Retained<AnyObject>> = unsafe {
+            let data: Retained<AnyObject> = msg_send![
+                class!(NSData),
+                dataWithBytes: bytes.as_ptr().cast::<c_void>(),
+                length: bytes.len()
+            ];
+            let allocated: Allocated<AnyObject> = msg_send![class, alloc];
+            msg_send![allocated, initWithData: &*data]
+        };
+        let document =
+            document.ok_or_else(|| String::from("the file could not be opened as a PDF"))?;
+        let pages: usize = unsafe { msg_send![&*document, pageCount] };
+        if pages == 0 {
+            return Err(String::from("the PDF has no pages to print"));
+        }
+        Ok((document, pages))
+    }
+
+    /// Open `bytes` and run PDFKit's print operation as a sheet of `window`.
+    /// Main thread only.
+    pub(super) fn print_as_sheet<R: tauri::Runtime>(
+        window: &tauri::Window<R>,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let (document, _) = open(bytes)?;
+        let ptr = window
+            .ns_window()
+            .map_err(|e| format!("cannot open the print dialog: {e}"))?
+            .cast::<NSWindow>();
+        // SAFETY: `ns_window()` returns tao's own `NSWindow` for this window (or
+        // null, which `retain` turns into `None`). We are on the main thread,
+        // where the window is alive, and the handle keeps it so for the call.
+        let ns_window = unsafe { Retained::retain(ptr) }
+            .ok_or_else(|| String::from("cannot open the print dialog: the window is gone"))?;
+
+        // The shared print info, like the other routes (`Webview::print()`), so
+        // the printer and paper the user last chose carry over.
+        // SAFETY: `+[NSPrintInfo sharedPrintInfo]` never returns nil, and
+        // `printOperationForPrintInfo:scalingMode:autoRotate:` is PDFDocument's
+        // documented API (macOS 10.7+) taking an `NSPrintInfo`, an `NSInteger`
+        // and a `BOOL`; it returns nil when it cannot build an operation, which
+        // becomes `None`.
+        let operation: Option<Retained<AnyObject>> = unsafe {
+            let info: Retained<AnyObject> = msg_send![class!(NSPrintInfo), sharedPrintInfo];
+            msg_send![
+                &*document,
+                printOperationForPrintInfo: &*info,
+                scalingMode: SCALE_DOWN_TO_FIT,
+                autoRotate: true
+            ]
+        };
+        let operation = operation
+            .ok_or_else(|| String::from("cannot open the print dialog for this PDF"))?;
+        // SAFETY: `runOperationModalForWindow:delegate:didRunSelector:contextInfo:`
+        // with no delegate, no selector and a null context is documented as
+        // allowed (wry's `print()` makes the same call). The operation retains
+        // what it prints for as long as the sheet is up.
+        unsafe {
+            let _: () = msg_send![
+                &*operation,
+                runOperationModalForWindow: &*ns_window,
+                delegate: std::ptr::null_mut::<AnyObject>(),
+                didRunSelector: None::<Sel>,
+                contextInfo: std::ptr::null_mut::<c_void>()
+            ];
+        }
+        Ok(())
+    }
 }

@@ -1,6 +1,6 @@
 //! Print commands (requirements.md #38).
 //!
-//! Both routes ⌘P can take end up here. Which one is taken is decided in the
+//! Every route ⌘P can take ends up here. Which one is taken is decided in the
 //! frontend (`src/lib/print-html.ts` の `printRouteFor`), because only the
 //! window knows which viewer it is showing — the same split as the Open,
 //! Duplicate Window and zoom menu items.
@@ -10,8 +10,10 @@
 
 use tauri::{AppHandle, Manager, State, WebviewWindow, Window};
 
+use super::AppState;
+use crate::fs::uri::Uri;
 use crate::menu::sync_print_item;
-use crate::print::{open_print_window, PrintAvailability};
+use crate::print::{open_print_window, print_pdf_in_window, PrintAvailability};
 
 /// Print the calling window's main frame — the route Markdown, text and every
 /// other viewer have always taken.
@@ -58,4 +60,31 @@ pub fn set_print_available(
     if window.is_focused().unwrap_or(false) {
         sync_print_item(window.app_handle(), window.label());
     }
+}
+
+/// Print the PDF the calling window is showing — the file itself, every page
+/// (要件#38 追補g・backlog 307).
+///
+/// The PDF viewer draws the file in an `<iframe>`, and the main-frame print
+/// (`print_current_window`) only reaches what that iframe has on screen. So
+/// this route does not print the window at all: `uri` is the document the
+/// window is showing (`file://` or `ssh://`, as the frontend has it), its bytes
+/// are read in full through the same provider `open_document` uses, and
+/// [`print_pdf_in_window`] hands them to PDFKit and runs the print operation as
+/// a sheet of the calling window. A file that cannot be read, or does not open
+/// as a PDF with pages, comes back as `Err` before any sheet is shown; the
+/// frontend shows it with `printFailedMessage`.
+#[tauri::command]
+pub async fn print_pdf(
+    uri: String,
+    window: Window,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let parsed = Uri::parse(&uri).map_err(|e| e.to_string())?;
+    let provider = state.fs_registry.resolve(&parsed).map_err(|e| e.to_string())?;
+    let bytes = provider
+        .read_bytes(&parsed)
+        .await
+        .map_err(|e| format!("cannot read the PDF: {e}"))?;
+    print_pdf_in_window(&window, bytes).await
 }

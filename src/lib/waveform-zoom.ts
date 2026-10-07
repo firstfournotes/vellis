@@ -400,6 +400,34 @@ export function waveformWindowIndicator(
 }
 
 // ---------------------------------------------------------------------------
+// 等倍のレーンの描画幅(追補b・backlog 252)
+// ---------------------------------------------------------------------------
+
+/**
+ * 等倍の帯でレーンの山(`peakRects`)を割り付ける幅(追補b 契約1)。
+ *
+ * 等倍のレーンは解析したバッファ全体(末尾の詰め物込み)を割ったものなので、帯の幅
+ * いっぱいに描くと、解析尺が横軸の尺より長いぶん山が時間に比例して手前に寄る。
+ * 幅を `解析尺 / 横軸の尺` 倍すれば、時刻 t の山が `t / 横軸の尺 × 帯の幅` に乗る
+ * (長ければ末尾が右端の外へ出て描かれず・短ければ右端に空きが残る)。
+ * 拡大中は窓を sampleRate で時刻に直して切るのでずれない ―― 帯の幅のまま。
+ * 尺がどちらか不明・0・非有限、または `width` 自体が正の有限数でなければ `width` を
+ * そのまま返す(fail-open。0 に倒すと帯が消える)。
+ */
+export function waveformLaneDrawWidth(
+	zoom: number,
+	width: number,
+	analyzedSeconds: number | null | undefined,
+	axisSeconds: number,
+): number {
+	if (!(zoom <= 1)) return width;
+	if (!isPositiveFinite(width)) return width;
+	if (analyzedSeconds == null || !isPositiveFinite(analyzedSeconds)) return width;
+	if (!isPositiveFinite(axisSeconds)) return width;
+	return (width * analyzedSeconds) / axisSeconds;
+}
+
+// ---------------------------------------------------------------------------
 // 窓の再バケット化(契約⑦⑧)
 // ---------------------------------------------------------------------------
 

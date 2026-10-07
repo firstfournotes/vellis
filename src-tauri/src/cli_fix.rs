@@ -62,32 +62,44 @@ struct AgentTemplate {
     cwd: Option<String>,
 }
 
-/// Default config path, resolved per the XDG Base Directory Spec on
-/// every platform (matches `docs/ai-collab.md` §9.2).
+/// Config path, resolved per the XDG Base Directory Spec on every
+/// platform (matches `docs/ai-collab.md` §9.2).  Pure: the caller passes
+/// `$XDG_CONFIG_HOME` and the home directory in, so tests never have to
+/// mutate the process environment (same shape as
+/// `settings::settings_path`, but taking `OsStr` so a non-UTF-8 path is
+/// not dropped).
 ///
-/// 1. `$XDG_CONFIG_HOME/vellis/agents.toml` if set and non-empty.
-/// 2. `$HOME/.config/vellis/agents.toml` otherwise.
+/// 1. `<xdg_config_home>/vellis/agents.toml` if given and non-empty.
+/// 2. `<home>/.config/vellis/agents.toml` otherwise.
+/// 3. `None` when neither is available.
 ///
 /// `dirs::config_dir()` was tempting but returns
 /// `~/Library/Application Support/` on macOS, which is for app-managed
 /// state, not user-edited config.  Sticking with `~/.config/` keeps the
 /// path consistent across macOS / Linux / Windows-WSL and matches the
 /// spec example.
-pub fn default_config_path() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(
-                PathBuf::from(xdg)
-                    .join(AGENT_CONFIG_DIR)
-                    .join(AGENT_CONFIG_FILE),
-            );
-        }
+pub fn agent_config_path(
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(xdg) = xdg_config_home.filter(|x| !x.is_empty()) {
+        return Some(
+            PathBuf::from(xdg)
+                .join(AGENT_CONFIG_DIR)
+                .join(AGENT_CONFIG_FILE),
+        );
     }
-    dirs::home_dir().map(|h| {
+    home.map(|h| {
         h.join(".config")
             .join(AGENT_CONFIG_DIR)
             .join(AGENT_CONFIG_FILE)
     })
+}
+
+/// [`agent_config_path`] fed from `$XDG_CONFIG_HOME` and the home directory.
+pub fn default_config_path() -> Option<PathBuf> {
+    let xdg = std::env::var_os("XDG_CONFIG_HOME");
+    agent_config_path(xdg.as_deref(), dirs::home_dir().as_deref())
 }
 
 /// Resolve `{{inbox}}` / `{{root}}` placeholders in `template`.
@@ -170,6 +182,7 @@ pub fn run_fix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::fs;
     use std::path::PathBuf;
 
@@ -288,39 +301,47 @@ command = ["sh", "-c", "exit 42"]
         assert!(matches!(err, FixError::ConfigMissing(_)));
     }
 
+    // The placement tests feed `agent_config_path` directly instead of
+    // mutating `XDG_CONFIG_HOME` on the whole process: cargo runs tests in
+    // parallel threads, so touching the environment raced with the sibling
+    // test (backlog 192 / 要件#65 追補b 契約3).
     #[test]
-    fn default_config_path_uses_xdg_config_home_when_set() {
+    fn agent_config_path_uses_xdg_config_home_when_given() {
         let dir = tempfile::TempDir::new().unwrap();
-        // SAFETY: this test process owns its env; no parallel test
-        // mutates these vars (cargo nextest aside, which respects
-        // SAFETY-marked unsafe blocks).
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path());
-        }
-        let path = default_config_path().unwrap();
+        let path = agent_config_path(Some(dir.path().as_os_str()), Some(Path::new("/home/u")))
+            .unwrap();
         assert!(path.starts_with(dir.path()));
         assert!(path.ends_with(format!(
             "{}/{}",
             AGENT_CONFIG_DIR, AGENT_CONFIG_FILE
         )));
-        unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
     }
 
     #[test]
-    fn default_config_path_falls_back_to_home_dot_config() {
-        unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
+    fn agent_config_path_falls_back_to_home_dot_config() {
+        let home = Path::new("/home/u");
+        let expected = home
+            .join(".config")
+            .join(AGENT_CONFIG_DIR)
+            .join(AGENT_CONFIG_FILE);
+        for xdg in [None, Some(OsStr::new(""))] {
+            let path = agent_config_path(xdg, Some(home)).expect("home is given");
+            assert_eq!(path, expected, "xdg={xdg:?}");
         }
-        let path = default_config_path().expect("HOME should be set");
-        // Some path under .config/vellis/agents.toml
-        let s = path.to_string_lossy();
-        assert!(
-            s.contains("/.config/vellis/agents.toml"),
-            "unexpected default path: {}",
-            s
-        );
+        assert_eq!(agent_config_path(None, None), None);
+        assert_eq!(agent_config_path(Some(OsStr::new("")), None), None);
+    }
+
+    #[test]
+    fn default_config_path_ends_with_vellis_agents_toml_without_touching_env() {
+        // Reads whatever the process has; never writes it.  Either value of
+        // `XDG_CONFIG_HOME` ends in the same `vellis/agents.toml` tail.
+        if let Some(path) = default_config_path() {
+            assert!(path.ends_with(format!(
+                "{}/{}",
+                AGENT_CONFIG_DIR, AGENT_CONFIG_FILE
+            )));
+        }
     }
 
     #[test]

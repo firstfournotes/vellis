@@ -7,12 +7,27 @@ use vellis_lib::cli::Cli;
 use vellis_lib::cli_fix;
 use vellis_lib::cli_install;
 use vellis_lib::ipc::client::IpcClient;
+use vellis_lib::ipc::launch::{launch, Launch, LaunchError, STARTUP_RESPONSE_WAIT, STARTUP_WAIT};
 use vellis_lib::ipc::protocol::{Request, Response};
-use vellis_lib::ipc::server::default_socket_path;
+use vellis_lib::ipc::server::{default_lock_path, default_socket_path};
+use vellis_lib::self_check;
 use vellis_lib::window::manager::WindowArgs;
 
 fn main() {
     let cli = Cli::parse();
+
+    // `--self-check <file>` (requirements.md #72) never talks to a running
+    // instance: it branches off before the IPC probe / send and before any
+    // request is built, and runs its own Tauri app with no lock, no IPC
+    // server and no other side effects (契約2・8). It always exits from in
+    // there: 0 after printing the JSON report, 6 when it could not run.
+    if let Some(ref target) = cli.self_check {
+        let file = match self_check::resolve_target(target) {
+            Ok(file) => file,
+            Err(reason) => self_check::not_runnable(&reason),
+        };
+        self_check::run(file);
+    }
 
     // `--print-build-info` is short-circuited before any IPC / Tauri
     // work: pure stdout side-effect used by the CI release-channel smoke
@@ -89,8 +104,15 @@ fn main() {
     let instance_running = rt.block_on(IpcClient::probe(&socket_path));
 
     if instance_running {
+        // Wait up to STARTUP_RESPONSE_WAIT, not 500ms: a Main Process that has
+        // just bound its socket may take longer to answer while its window is
+        // being created (backlog 314・要件#3 追補d 契約1).
         if let Some(req) = request {
-            match rt.block_on(IpcClient::send(&socket_path, &req)) {
+            match rt.block_on(IpcClient::send_with_timeout(
+                &socket_path,
+                &req,
+                STARTUP_RESPONSE_WAIT,
+            )) {
                 Ok(Response::Ok) => std::process::exit(0),
                 Ok(Response::Error { code, message }) => {
                     eprintln!("vellis: server error [{}]: {}", code, message);
@@ -103,7 +125,11 @@ fn main() {
             }
         } else {
             // No specific request; just bring to front (Ping).
-            match rt.block_on(IpcClient::send(&socket_path, &Request::Ping)) {
+            match rt.block_on(IpcClient::send_with_timeout(
+                &socket_path,
+                &Request::Ping,
+                STARTUP_RESPONSE_WAIT,
+            )) {
                 Ok(_) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("vellis: IPC error: {}", e);
@@ -113,11 +139,57 @@ fn main() {
         }
     }
 
-    // No existing instance — become the Main Process.
-    // Drop the CLI runtime before starting Tauri (which has its own).
-    drop(rt);
-
-    vellis_lib::run_with_args(build_initial_args(&cli));
+    // No existing instance. Become the Main Process only by taking the
+    // single-instance lock before Tauri starts; when another `vellis` is
+    // starting (it holds the lock), wait for its socket and hand the request
+    // there instead (要件#3 追補b 契約1〜4).
+    let request = request.unwrap_or(Request::Ping);
+    let lock_path = default_lock_path();
+    match rt.block_on(launch(
+        &socket_path,
+        &lock_path,
+        &request,
+        STARTUP_WAIT,
+    )) {
+        Ok(Launch::Main(lock)) => {
+            // Drop the CLI runtime before starting Tauri (which has its own).
+            drop(rt);
+            vellis_lib::run_as_main(build_initial_args(&cli), lock);
+        }
+        // Same exit codes as when the instance was already running.
+        Ok(Launch::Delivered(Response::Ok)) => std::process::exit(0),
+        Ok(Launch::Delivered(Response::Error { code, message })) => {
+            if request == Request::Ping {
+                std::process::exit(0);
+            }
+            eprintln!("vellis: server error [{}]: {}", code, message);
+            std::process::exit(3);
+        }
+        // The lock file itself cannot be opened / locked (not a lost race):
+        // warn and start alone without the lock and without an IPC server,
+        // as before 追補b (要件#3 追補b 契約7・backlog 313).
+        Err(LaunchError::Lock(e)) => {
+            eprintln!(
+                "vellis: warning: cannot open the single-instance lock file {}: {}; \
+                 starting without the single-instance lock",
+                lock_path.display(),
+                e
+            );
+            drop(rt);
+            vellis_lib::run_with_args(build_initial_args(&cli));
+        }
+        Err(LaunchError::Timeout) => {
+            eprintln!(
+                "vellis: another Vellis is starting but did not answer within {}s",
+                STARTUP_WAIT.as_secs()
+            );
+            std::process::exit(3);
+        }
+        Err(e) => {
+            eprintln!("vellis: {}", e);
+            std::process::exit(3);
+        }
+    }
 }
 
 /// Convert CLI arguments into the initial `WindowArgs` for the first window.
@@ -292,6 +364,23 @@ mod tests {
         let args = build_initial_args(&cli);
         assert!(args.show_marks);
         assert!(args.show_changed);
+    }
+
+    /// 要件72 AC-72-2(契約2): `--self-check` は既存インスタンスへの要求を作らない。
+    /// `try_parse_from(...).expect(...)` なので、オプションが未実装のうちはここで赤になる
+    /// (`Cli` に `self_check` が無くてもこのモジュールはコンパイルできる)。
+    /// 分岐が `IpcClient::probe` より前にあることは
+    /// `tests/acceptance_req72.rs::ac72_2_main_branches_to_self_check_before_ipc_probe`
+    /// がソース走査で見る。
+    #[test]
+    fn build_request_self_check_makes_no_request() {
+        let cli = Cli::try_parse_from(["vellis", "--self-check", "/tmp/test.md"])
+            .expect("--self-check <file> は Cli のオプション(要件72 契約1)");
+        assert!(cli.path.is_none());
+        assert!(
+            build_request(&cli).is_none(),
+            "--self-check のとき OpenPath / SwitchRoot / ShowMarks などの要求を組み立てない"
+        );
     }
 
     #[test]

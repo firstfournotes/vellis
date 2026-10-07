@@ -66,7 +66,7 @@ use tracing::warn;
 
 use crate::errors::FsError;
 
-use super::entry::{Entry, FileKind};
+use super::entry::{Entry, FileKind, LinkInfo};
 use super::provider::{FileProvider, WatchEvent, WatchEventKind, WatchHandle};
 use super::ssh_pool::{ConnectionPool, OpError, PooledConnection};
 use super::uri::{Authority, Uri};
@@ -308,6 +308,7 @@ impl SshProvider {
             kind,
             size,
             modified,
+            link: None,
         }
     }
 }
@@ -381,12 +382,20 @@ impl FileProvider for SshProvider {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64);
             let size = if kind == FileKind::File { attrs.size } else { None };
+            // The listing's attributes are lstat-like, so a link shows up as
+            // Symlink whatever it points at. Mark it without extra round trips:
+            // target and reachability stay unknown over ssh (要件#70 判断 (f)).
+            let link = (kind == FileKind::Symlink).then_some(LinkInfo {
+                target: None,
+                broken: false,
+            });
             out.push(Entry {
                 uri: entry_uri.raw,
                 name,
                 kind,
                 size,
                 modified,
+                link,
             });
         }
         // Directories first, then alphabetical — matches LocalProvider order.

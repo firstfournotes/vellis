@@ -254,7 +254,7 @@ impl MockFs {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        Entry { uri: uri.raw, name, kind, size, modified: Some(1_700_000_000_000) }
+        Entry { uri: uri.raw, name, kind, size, modified: Some(1_700_000_000_000), link: None }
     }
 
     /// `abs` の親ディレクトリの一覧に `entry` を足す(同名は足さない)。親が無ければ作る。
@@ -620,6 +620,7 @@ fn entry(root: &Uri, rel: &str, kind: FileKind) -> Entry {
         kind,
         size: None,
         modified: None,
+        link: None,
     }
 }
 

@@ -58,17 +58,28 @@
 		}
 	}
 
+	// 要件#71 追補a(2): 失敗したら alert で知らせる。store は失敗時に一覧を変えないので
+	// (await の後で代入する)、ここで catch すれば一覧はそのまま・Unhandled Rejection も出ない。
+	// lastError には入れない(入れると一覧がエラー表示に置き換わる)。
 	async function resolve(mark: Mark) {
-		await marksStore.update({
-			rootUri,
-			id: mark.id,
-			patch: { status: 'resolved' },
-		});
+		try {
+			await marksStore.update({
+				rootUri,
+				id: mark.id,
+				patch: { status: 'resolved' },
+			});
+		} catch (err) {
+			alert(`Could not resolve the mark: ${err}`);
+		}
 	}
 
 	async function remove(mark: Mark) {
 		if (!confirm(`Delete this mark?\n\n${mark.instruction.slice(0, 80)}`)) return;
-		await marksStore.remove({ rootUri, id: mark.id });
+		try {
+			await marksStore.remove({ rootUri, id: mark.id });
+		} catch (err) {
+			alert(`Could not delete the mark: ${err}`);
+		}
 	}
 
 	function previewText(text: string): string {

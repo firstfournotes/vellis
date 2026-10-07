@@ -45,7 +45,8 @@ export type MenuOpenPlan = {
  *
  * `document` は文書コマンドの解決値。ラスタ画像もテキストとして読まないだけで
  * セッションは張られる(`open_binary_document`。要件#22)ので、file のときは
- * 常に非 null になる。
+ * 開けていれば非 null になる。root は切り替わったのに文書が開けなかったとき
+ * (`registerMenuOpenListeners` の `onOpened`・要件#71 追補b(2))は null。
  */
 export type MenuOpened<Root = unknown, Doc = unknown> = {
 	root: Root;
@@ -56,7 +57,10 @@ export type MenuOpened<Root = unknown, Doc = unknown> = {
 
 /** メニュー起点の結果を受け取る配線側のハンドラ。 */
 export type MenuOpenHandlers<Root = unknown, Doc = unknown> = {
-	/** 開けたときだけ呼ばれる。キャンセルでは呼ばない(=無変化)。 */
+	/**
+	 * root を切り替えられたときに呼ばれる(文書が開けなかったときも `document: null` で
+	 * 呼んでから `onError`=要件#71 追補b(2))。キャンセルでは呼ばない(=無変化)。
+	 */
 	onOpened: (opened: MenuOpened<Root, Doc>) => void;
 	/** 失敗の通知先。省略可 — 省略しても例外は外へ出さない。 */
 	onError?: (err: unknown) => void;
@@ -139,26 +143,57 @@ const DIALOG_OPTIONS: Record<MenuOpenKind, Record<string, unknown>> = {
 };
 
 /**
+ * メニュー起点の1回の試行。root は切り替わったのに文書だけが開けなかったとき
+ * (要件#71 追補b(2))は、切り替わった root を `opened`(`document: null`)に、
+ * 文書コマンドの失敗を `documentError` に入れて返す。
+ */
+type MenuOpenAttempt<Root, Doc> =
+	| { opened: MenuOpened<Root, Doc>; documentFailed: false }
+	| { opened: MenuOpened<Root, Doc>; documentFailed: true; documentError: unknown };
+
+/**
  * ダイアログ → `set_root` →(ファイルなら)文書コマンド。
  *
- * 失敗は握りつぶさず reject させる(root-picker の openHistoryEntry と同じ家風)。
- * `set_root` が失敗した時点で止め、文書コマンドは呼ばない — root を切り替え
- * られていないのに文書だけ開くと、backend と画面の root が食い違う。
+ * `set_root` の失敗は握りつぶさず reject させる(root-picker の openHistoryEntry と
+ * 同じ家風)。`set_root` が失敗した時点で止め、文書コマンドは呼ばない — root を
+ * 切り替えられていないのに文書だけ開くと、backend と画面の root が食い違う。
+ *
+ * 文書コマンドの失敗は reject させず `documentFailed` で返す — その時点で backend の
+ * root はもう切り替わっているので、呼び出し側が画面の root も合わせられるように
+ * (要件#71 追補b(2))。
  */
-async function openFromMenu<Root, Doc>(kind: MenuOpenKind): Promise<MenuOpened<Root, Doc> | null> {
+async function attemptMenuOpen<Root, Doc>(
+	kind: MenuOpenKind
+): Promise<MenuOpenAttempt<Root, Doc> | null> {
 	const selected = await openDialog(DIALOG_OPTIONS[kind]);
 	const plan = planMenuOpen(kind, selected);
 	if (plan === null) return null; // キャンセル=無変化
 
 	// 履歴記録(要件#3)は set_root の backend 側 record_root が担う。
 	const root = await invoke<Root>('set_root', { uri: plan.rootUri });
+	if (plan.docUri === null) {
+		return { opened: { root, document: null, docUri: null }, documentFailed: false };
+	}
 	// ラスタ画像(要件#16 ⑦)は open_document を呼ばない — 呼べば InvalidUtf8 で
 	// 失敗する。代わりに読まない監視を張る open_binary_document を通す(要件#22)。
-	const document =
-		plan.docUri === null
-			? null
-			: await invoke<Doc>(openCommandFor(plan.docUri), { uri: plan.docUri });
-	return { root, document, docUri: plan.docUri };
+	try {
+		const document = await invoke<Doc>(openCommandFor(plan.docUri), { uri: plan.docUri });
+		return { opened: { root, document, docUri: plan.docUri }, documentFailed: false };
+	} catch (documentError) {
+		return {
+			opened: { root, document: null, docUri: plan.docUri },
+			documentFailed: true,
+			documentError
+		};
+	}
+}
+
+/** 文書コマンドの失敗も reject にする形(`openFileFromMenu` / `openFolderFromMenu`)。 */
+async function openFromMenu<Root, Doc>(kind: MenuOpenKind): Promise<MenuOpened<Root, Doc> | null> {
+	const attempt = await attemptMenuOpen<Root, Doc>(kind);
+	if (attempt === null) return null;
+	if (attempt.documentFailed) throw attempt.documentError;
+	return attempt.opened;
 }
 
 /** Open…(CmdOrCtrl+O)。ファイルを選ぶと root は親フォルダへ切り替わる。 */
@@ -181,6 +216,9 @@ export function openFolderFromMenu<Root = unknown, Doc = unknown>(): Promise<Men
  * メニューイベントを購読し、ダイアログ〜コマンド列までを引き受ける。
  * 返り値は両購読をまとめて解除する関数。
  *
+ * `set_root` は成功して文書だけが開けなかったときは、`onOpened`(`document: null`)で
+ * 画面の root を切り替えてから `onError` を呼ぶ(要件#71 追補b(2))。
+ *
  * 失敗は `onError` に渡し、イベントハンドラの外へは投げない。メニュー起点の
  * 失敗が unhandled rejection になると、ユーザーには「押しても何も起きない」
  * としか見えないため。`onError` を省いても落ちない。
@@ -196,8 +234,13 @@ export async function registerMenuOpenListeners<Root = unknown, Doc = unknown>(
 			// 関門はダイアログの前(要件#48 契約④)。選ばせてから「やっぱり中止」に
 			// させない。
 			if (handlers.canProceed && !(await handlers.canProceed())) return;
-			const opened = await openFromMenu<Root, Doc>(kind);
-			if (opened !== null) handlers.onOpened(opened);
+			const attempt = await attemptMenuOpen<Root, Doc>(kind);
+			if (attempt === null) return; // キャンセル=無変化
+			// root は切り替わったのに文書だけ開けなかったときも、まず画面を新しい
+			// root にしてから(`document: null`)失敗を知らせる(要件#71 追補b(2))。
+			// 知らせる側の alert は閉じるまで JS を止めるので、この順序が効く。
+			handlers.onOpened(attempt.opened);
+			if (attempt.documentFailed) handlers.onError?.(attempt.documentError);
 		} catch (err) {
 			handlers.onError?.(err);
 		}

@@ -16,6 +16,7 @@
 		onGo,
 		onClose,
 		notFound = false,
+		brokenLink = false,
 		inputEl = $bindable(),
 		onComposingChange,
 	}: {
@@ -25,13 +26,18 @@
 		onClose: () => void;
 		/** 直前の Go が「無い」で終わったか(契約⑥)。立つと表示欄に文言が出る。 */
 		notFound?: boolean;
+		/**
+		 * 直前の Go がリンク切れに当たって止まったか(要件#70 追補b)。`notFound` より
+		 * 優先して文言を出す。消え方は「無い」と同じ。
+		 */
+		brokenLink?: boolean;
 		/** 入力欄の実体。⇧⌘G の再送でフォーカスと全選択を戻すために親が握る。 */
 		inputEl?: HTMLInputElement;
 		/** IME の変換中か(Esc の宛先を決める `+page.svelte` 側へ伝える=契約⑦)。 */
 		onComposingChange?: (composing: boolean) => void;
 	} = $props();
 
-	import { GO_TO_NOT_FOUND_MESSAGE } from '$lib/go-to-path';
+	import { GO_TO_BROKEN_LINK_MESSAGE, GO_TO_NOT_FOUND_MESSAGE } from '$lib/go-to-path';
 
 	/** 打たれている文字列。閉じれば消える(揮発=契約①)。 */
 	let value = $state('');
@@ -43,7 +49,10 @@
 	 */
 	let dismissed = $state(false);
 
-	let showNotFound = $derived(notFound && !dismissed);
+	/** 表示欄の文言。リンク切れを「無い」より優先する(追補b)。 */
+	let message = $derived(
+		dismissed ? '' : brokenLink ? GO_TO_BROKEN_LINK_MESSAGE : notFound ? GO_TO_NOT_FOUND_MESSAGE : ''
+	);
 
 	/** 変換中は Esc も ⏎ も IME に委ねる(要件#48/#49/#52/#53/#54 と同じ規約)。 */
 	let composing = $state(false);
@@ -100,7 +109,7 @@
 		打ち直している最中にボタンの位置が動く。
 	-->
 	<span class="go-to-message" data-testid="go-to-message" role="status"
-		>{showNotFound ? GO_TO_NOT_FOUND_MESSAGE : ''}</span
+		>{message}</span
 	>
 	<button
 		type="button"

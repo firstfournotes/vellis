@@ -52,10 +52,15 @@
  * //   - `pickFolderAndSetRoot` を `$lib/root-picker` から import して「Select Folder…」の受け口で呼び、
  * //     failed のときは `rootPicker.error` に message を入れる(選択画面は閉じない)。
  * //     `<RootPicker … error={rootPicker.error} … onPickFolder={…}>` は従来どおり
- * //   - 起動処理(onMount)は `await openInitialDocument(init.initial_path, { …, onOpenFailed: alert 相当 })`
- * //     を呼び、**そのあとに** `listen('root_changed' / 'file_changed' / 'directory_changed' …)` の購読と
- * //     `startupSettled = true` が来る(開けなくても最後まで進む)。従来の
- * //     `windowState.setDocument(await openForDisplay(init.initial_path))` は残さない
+ * //   - 起動処理(onMount)は `await openInitialDocument(init.initial_path, { …, onOpenFailed })` を呼び、
+ * //     開けなくても最後まで進む。従来の `windowState.setDocument(await openForDisplay(init.initial_path))`
+ * //     は残さない
+ * //   - **追補a(1)・AC-71-7(backlog 276)**: `onOpenFailed` は alert を呼ばず、文言を `let` の変数に
+ * //     **控える**だけ(`onOpenFailed: (message) => { <変数> = message; }` の形。変数名は自由)。
+ * //     alert(<変数>) は、`root_changed` / `file_changed` / `binary_file_changed` / `file_removed` /
+ * //     `directory_changed` の 5 つの購読の登録と `startupSettled = true` の **あと** に 1 か所だけ置く
+ * //     (alert は閉じるまで JS を止めるので、先に出すとその間に届いた変更を購読が無くて取りこぼす)。
+ * //     文言は契約5 のまま(`openInitialDocument` が `openFileFailedMessage` で整形して渡す)
  * ```
  *
  * ## 判定しないもの
@@ -295,28 +300,79 @@ describe('AC-71-3 / AC-71-5(ソース走査): +page.svelte が pickFolderAndSetR
 		expect(src).toMatch(/<RootPicker[\s\S]*?onPickFolder=/);
 	});
 
-	test('契約5: openInitialDocument を $lib/open-document から import し、起動処理で await して initial_path と alert を渡す', () => {
+	// -----------------------------------------------------------------------
+	// 追補a(1)・AC-71-7(backlog 276)による改訂(2026-10-05・由谷「書き換えてよい」)
+	//
+	// 旧・契約5 の走査は「`await openInitialDocument(` の引数に `alert` がある」「購読と
+	// `startupSettled = true` はその呼び出しより後」だった。alert は閉じるまで JS を止めるので、
+	// 購読の登録より先に出すと、その間に届いた `directory_changed` を取りこぼす(ツリーが古いまま)。
+	// 改訂後は **alert を呼ぶのは最後の購読の登録と `startupSettled = true` より後** を固定する。
+	// `openInitialDocument` を使うこと・文言が `Could not open the file:`(契約5)であることは残す
+	// (文言は上の AC-71-5 のケースで `openInitialDocument` → `onOpenFailed` に渡る値として判定済み)。
+	// -----------------------------------------------------------------------
+
+	/** 起動処理の購読 5 件(`await listen<…>('<event>', …)`)の位置。無ければ -1。 */
+	const STARTUP_EVENTS = ['root_changed', 'file_changed', 'binary_file_changed', 'file_removed', 'directory_changed'] as const;
+	function listenAt(src: string, event: string): number {
+		const m = new RegExp(`\\blisten(?:<[^(]*?>)?\\(\\s*'${event}'`).exec(src);
+		return m ? m.index : -1;
+	}
+
+	/**
+	 * `onOpenFailed` が文言を控える変数の名前(追補a(1) の契約)。
+	 * 受け付ける形: `onOpenFailed: (message) => { startupOpenFailure = message; }` /
+	 * `onOpenFailed: (message) => (startupOpenFailure = message)` / `onOpenFailed: (message) => { startupOpenFailure = message }`
+	 * (引数名・変数名は自由・型注釈は任意)。alert を直接呼ぶ旧形は null。
+	 */
+	function deferredMessageVar(call: string): string | null {
+		const m = /onOpenFailed:\s*\(\s*(\w+)(?:\s*:\s*string)?\s*\)\s*=>\s*(?:\{|\()?\s*(\w+)\s*=\s*\1\b/.exec(call);
+		return m ? m[2] : null;
+	}
+
+	test('契約5(追補a(1) で改訂): openInitialDocument を $lib/open-document から import し、起動処理で await して initial_path を渡す。onOpenFailed は alert を呼ばず文言を控える', () => {
 		const src = page();
 		expect(src).toMatch(/import\s*\{[^}]*\bopenInitialDocument\b[^}]*\}\s*from\s*'\$lib\/open-document'/);
 		const callAt = src.indexOf('await openInitialDocument(');
 		expect(callAt, 'the startup must await openInitialDocument(…)').toBeGreaterThan(-1);
 		const call = balancedCall(src, callAt);
 		expect(call).toContain('init.initial_path');
-		expect(call).toMatch(/\balert\b/);
+		expect(call).toMatch(/\bonOpenFailed\b/);
+		// 追補a(1): 呼び出しの中(onOpenFailed を含む)では alert を呼ばない=文言を控えるだけ。
+		expect(call, 'onOpenFailed must not alert inside openInitialDocument(…) (backlog 276)').not.toMatch(/\balert\s*\(/);
+		const varName = deferredMessageVar(call);
+		expect(varName, 'onOpenFailed must store the message into a variable: (message) => { <var> = message; }').not.toBeNull();
+		// 控える先はコンポーネントのローカル変数(let)。
+		expect(src).toMatch(new RegExp(`\\blet\\s+${varName}\\b`));
 		// 従来の「開けなければそこで止まる」形は残さない。
 		expect(src).not.toContain('setDocument(await openForDisplay(init.initial_path))');
 	});
 
-	test('契約5: 購読(root_changed / file_changed / directory_changed)と startupSettled = true は openInitialDocument の後に来る', () => {
+	test('AC-71-7(追補a(1)): 控えた文言の alert は、5 つの購読の登録と startupSettled = true の後に 1 か所だけ(購読は openInitialDocument の後に残る)', () => {
 		const src = page();
 		const callAt = src.indexOf('await openInitialDocument(');
 		expect(callAt).toBeGreaterThan(-1);
-		for (const event of ['root_changed', 'file_changed', 'binary_file_changed', 'file_removed', 'directory_changed']) {
-			const at = src.indexOf(`'${event}'`);
+		const varName = deferredMessageVar(balancedCall(src, callAt));
+		expect(varName, 'onOpenFailed must store the message into a variable (see the previous case)').not.toBeNull();
+
+		// 購読 5 件はどれも残り、openInitialDocument の後に登録される(旧・契約5 の順序は保つ)。
+		let lastListenAt = -1;
+		for (const event of STARTUP_EVENTS) {
+			const at = listenAt(src, event);
 			expect(at, `listen('${event}') must still be registered`).toBeGreaterThan(-1);
 			expect(at, `listen('${event}') must come after openInitialDocument`).toBeGreaterThan(callAt);
+			lastListenAt = Math.max(lastListenAt, at);
 		}
 		const settledAt = src.indexOf('startupSettled = true');
-		expect(settledAt).toBeGreaterThan(callAt);
+		expect(settledAt, 'startupSettled = true must remain').toBeGreaterThan(callAt);
+
+		// alert(<控えた変数>) は 1 か所だけで、最後の購読の登録と startupSettled = true の両方より後。
+		const alertRe = new RegExp(`\\balert\\(\\s*${varName}\\s*!?\\s*\\)`, 'g');
+		const alerts = [...src.matchAll(alertRe)].map((m) => m.index ?? -1);
+		expect(alerts, `exactly one alert(${varName}) is expected`).toHaveLength(1);
+		const alertAt = alerts[0];
+		expect(alertAt, 'the deferred alert must come after the last startup listen (directory_changed etc.)').toBeGreaterThan(lastListenAt);
+		expect(alertAt, 'the deferred alert must come after startupSettled = true').toBeGreaterThan(settledAt);
+		// 控えた文言以外の alert を起動処理の失敗で出さない(旧形 `onOpenFailed: (m) => alert(m)` の残留を禁じる)。
+		expect(src.slice(callAt, balancedCall(src, callAt).length + callAt)).not.toMatch(/\balert\s*\(/);
 	});
 });

@@ -281,7 +281,8 @@ describe('printRouteFor — html だけ印刷窓・他は従来のメインフ�
 			model3d: 'main-frame',
 			video: 'main-frame',
 			audio: 'main-frame',
-			pdf: 'main-frame',
+			// 要件#38 追補g(2026-10-06)で pdf を 'pdf' 経路へ
+			pdf: 'pdf',
 			binary: 'main-frame',
 		};
 		const actual = Object.fromEntries(
@@ -348,7 +349,8 @@ describe('registerPrintListener — 発火 → 経路判定 → invoke', () => {
 		let current: FileType = 'markdown';
 		await registerPrintListener({ getFileType: () => current, getHtmlSource: () => HTML_VIEW });
 
-		const nonHtml: FileType[] = ['markdown', 'text', 'image', 'model3d', 'video', 'pdf', 'binary'];
+		// 要件#38 追補g(2026-10-06)で pdf を 'pdf' 経路へ(並びから外した)
+		const nonHtml: FileType[] = ['markdown', 'text', 'image', 'model3d', 'video', 'binary'];
 		for (const type of nonHtml) {
 			current = type;
 			await handlerFor()?.({ payload: undefined });

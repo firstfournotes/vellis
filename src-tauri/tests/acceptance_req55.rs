@@ -197,6 +197,7 @@ impl MockFs {
             kind,
             size,
             modified: Some(1_700_000_000_000),
+            link: None,
         }
     }
 

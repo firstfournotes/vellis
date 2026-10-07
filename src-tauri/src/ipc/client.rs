@@ -29,10 +29,21 @@ impl IpcClient {
 
     /// Send a `Request` to the Main Process and wait for a `Response`.
     ///
-    /// Returns an error if the connection or the response times out (500ms).
+    /// Returns an error if the connection (100ms) or the response (500ms)
+    /// times out.
     pub async fn send(
         socket_path: &Path,
         request: &Request,
+    ) -> Result<Response, IpcClientError> {
+        Self::send_with_timeout(socket_path, request, SEND_TIMEOUT).await
+    }
+
+    /// Like [`IpcClient::send`], but waits up to `response_timeout` for the
+    /// response (the connection still times out after 100ms).
+    pub async fn send_with_timeout(
+        socket_path: &Path,
+        request: &Request,
+        response_timeout: Duration,
     ) -> Result<Response, IpcClientError> {
         let stream = timeout(PROBE_TIMEOUT, UnixStream::connect(socket_path))
             .await
@@ -53,7 +64,7 @@ impl IpcClient {
         // Read the response (single JSON line).
         let mut buf_reader = BufReader::new(reader);
         let mut line = String::new();
-        timeout(SEND_TIMEOUT, buf_reader.read_line(&mut line))
+        timeout(response_timeout, buf_reader.read_line(&mut line))
             .await
             .map_err(|_| IpcClientError::ResponseTimeout)?
             .map_err(IpcClientError::Io)?;

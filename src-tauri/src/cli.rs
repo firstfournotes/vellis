@@ -60,6 +60,27 @@ pub struct Cli {
     /// (feature-flags.md §3.6-A / R2-A).
     #[arg(long = "print-build-info")]
     pub print_build_info: bool,
+
+    /// Render `<FILE>` in a window nobody sees, print what went wrong while
+    /// it rendered (CSP violations, failed loads, console errors…) as one
+    /// JSON line and exit (requirements.md #72). Hidden from `--help`, but in
+    /// every build — release included — since it checks the shipped app.
+    #[arg(
+        long = "self-check",
+        value_name = "FILE",
+        hide = true,
+        conflicts_with_all = [
+            "path",
+            "root_switch",
+            "new_window",
+            "marks",
+            "changed",
+            "fix",
+            "install_cli",
+            "print_build_info",
+        ]
+    )]
+    pub self_check: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]

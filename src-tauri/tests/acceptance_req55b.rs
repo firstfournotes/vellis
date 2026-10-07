@@ -194,7 +194,7 @@ impl MockFs {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        Entry { uri: uri.raw, name, kind, size, modified: Some(1_700_000_000_000) }
+        Entry { uri: uri.raw, name, kind, size, modified: Some(1_700_000_000_000), link: None }
     }
 
     fn ensure_dir_abs(&mut self, abs: &str) {
@@ -981,16 +981,18 @@ fn command_begins_the_generation_then_streams() {
     );
 }
 
+/// 要件#55 追補f の要件側更新で読み替え: `.is_current(` → `.is_current_at(`(cancel の形も
+/// `|| !…is_current_at(`)。走査範囲とほかの断言は不変。
 #[test]
 fn command_stops_the_scan_when_the_generation_is_no_longer_current() {
     let body = search_in_folder_body(&search_command_code());
-    assert!(body.contains(".is_current("), "the sink must ask ResultStore::is_current");
+    assert!(body.contains(".is_current_at("), "the sink must ask ResultStore::is_current_at");
     assert!(body.contains("SearchControl::Stop"), "the sink must return SearchControl::Stop");
     assert!(body.contains("SearchControl::Continue"));
 
-    // d-3 supplement: the `cancel` argument is a closure that negates `is_current`
-    // (`!` and `.is_current(` inside the same closure).
-    let negated_in_closure = body.match_indices(".is_current(").any(|(i, _)| {
+    // d-3 supplement: the `cancel` argument is a closure that negates `is_current_at`
+    // (`!` and `.is_current_at(` inside the same closure).
+    let negated_in_closure = body.match_indices(".is_current_at(").any(|(i, _)| {
         let before = &body[..i];
         let closure_start = before.rfind("||").or_else(|| before.rfind("| |"));
         match closure_start {
@@ -1003,7 +1005,7 @@ fn command_stops_the_scan_when_the_generation_is_no_longer_current() {
     });
     assert!(
         negated_in_closure,
-        "search_in_folder must pass `cancel` as a closure of the form `|| !...is_current(label, generation)`"
+        "search_in_folder must pass `cancel` as a closure of the form `|| !...is_current_at(label, epoch, generation)`"
     );
 }
 

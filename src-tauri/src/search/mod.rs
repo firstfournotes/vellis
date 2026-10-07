@@ -637,6 +637,8 @@ pub struct ResultStore {
     by_label: HashMap<String, (u64, Vec<SearchHit>)>,
     /// 窓ごとの最新世代(走査の開始時に `begin` で記録=追補d d-3)。
     latest: HashMap<String, u64>,
+    /// 窓ごとのリセット回数(`forget` で +1・`forget` でも消さない=追補f f-1)。無ければ 0。
+    epoch: HashMap<String, u64>,
 }
 
 impl ResultStore {
@@ -648,9 +650,7 @@ impl ResultStore {
     /// 同じ窓により新しい世代が既に保持されていれば保持は変えない(遅れて返った古い世代が
     /// 新しい世代を捨てないため)。応答は受け取った全件から組む(フロントが世代で捨てる)。
     pub fn store(&mut self, label: &str, generation: u64, hits: Vec<SearchHit>) -> SearchResponse {
-        let total = hits.len();
-        let files = hits.iter().map(|h| h.path.as_str()).collect::<HashSet<_>>().len();
-        let head = hits[..total.min(PAGE_SIZE)].to_vec();
+        let (total, files, head) = response_parts(&hits);
         // Searches of one window run concurrently; an older generation that returns late
         // must not replace a newer one already kept (the front end drops its response anyway).
         let newer_kept = matches!(self.by_label.get(label), Some((kept, _)) if *kept > generation);
@@ -672,20 +672,49 @@ impl ResultStore {
         }
     }
 
-    /// 窓が閉じたら捨てる(結果も最新世代も)。無いラベルでも何もしない。
+    /// 窓が閉じたら・パネルを開き直したら捨てる(結果も最新世代も)。あわせてその窓の
+    /// epoch を 1 増やし、それより前に始まった走査を古くする(追補f f-1・epoch は消さない)。
     pub fn forget(&mut self, label: &str) {
         self.by_label.remove(label);
         self.latest.remove(label);
+        *self.epoch.entry(label.to_string()).or_insert(0) += 1;
     }
 
     /// その窓の最新世代を記録する(走査の開始時=追補d d-3)。小さい世代で呼んでも最新は下がらない。
-    pub fn begin(&mut self, label: &str, generation: u64) {
+    /// 戻りはその窓の今の epoch(走査はこれを持ち回る=追補f f-2)。
+    pub fn begin(&mut self, label: &str, generation: u64) -> u64 {
         let latest = self.latest.entry(label.to_string()).or_insert(generation);
         *latest = (*latest).max(generation);
+        self.current_epoch(label)
     }
 
     /// より新しい世代が `begin` 済みなら false。`begin` が無い・`forget` 済みの窓は true。
     pub fn is_current(&self, label: &str, generation: u64) -> bool {
         self.latest.get(label).is_none_or(|latest| generation >= *latest)
     }
+
+    /// `epoch` が今の値と同じ、かつ [`Self::is_current`] が真(追補f f-2)。
+    pub fn is_current_at(&self, label: &str, epoch: u64, generation: u64) -> bool {
+        epoch == self.current_epoch(label) && self.is_current(label, generation)
+    }
+
+    /// `epoch` が今の値と違えば保持を変えずに応答だけ組む。同じなら [`Self::store`] と同じ(追補f f-2)。
+    pub fn store_at(&mut self, label: &str, epoch: u64, generation: u64, hits: Vec<SearchHit>) -> SearchResponse {
+        if epoch == self.current_epoch(label) {
+            return self.store(label, generation, hits);
+        }
+        let (total, files, head) = response_parts(&hits);
+        SearchResponse { generation, total, files, hits: head }
+    }
+
+    fn current_epoch(&self, label: &str) -> u64 {
+        self.epoch.get(label).copied().unwrap_or(0)
+    }
+}
+
+/// 応答の `total` / `files` / 先頭 [`PAGE_SIZE`] 件を全件から組む。
+fn response_parts(hits: &[SearchHit]) -> (usize, usize, Vec<SearchHit>) {
+    let total = hits.len();
+    let files = hits.iter().map(|h| h.path.as_str()).collect::<HashSet<_>>().len();
+    (total, files, hits[..total.min(PAGE_SIZE)].to_vec())
 }

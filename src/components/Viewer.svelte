@@ -14,6 +14,7 @@
 	import { openFileFailedMessage } from '$lib/open-document';
 	import { openInNewWindowFailedMessage } from '$lib/open-in-new-window';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
+	import { holdScrollForPrint } from '$lib/print-scroll';
 	import {
 		applyHighlights,
 		clearHighlights,
@@ -1188,15 +1189,17 @@
 	/**
 	 * 複製面の中だけに効かせる見た目。文書の CSS は Shadow に閉じているので、
 	 * ハイライトの色はこちら側にも要る(`::highlight()` はツリースコープごと)。
+	 * 現在の一致の文字色は閲覧面と同じく #1f2328 に固定する(要件#54 追補d)。
 	 */
 	const FIND_SURFACE_CSS = [
 		':host{display:block}',
 		'[data-vellis-href],[data-vellis-xlink-href]{color:#0000ee;color:-webkit-link;',
 		'text-decoration:underline}',
 		'mark[data-vellis-find]{background-color:#fef08a;color:inherit}',
-		'mark[data-vellis-find-current]{background-color:#fb923c;color:inherit}',
+		'mark[data-vellis-find-current]{background-color:#fb923c;color:#1f2328}',
+		'mark[data-vellis-find-current] *{color:#1f2328 !important}',
 		'::highlight(vellis-find){background-color:#fef08a}',
-		'::highlight(vellis-find-current){background-color:#fb923c}',
+		'::highlight(vellis-find-current){background-color:#fb923c;color:#1f2328}',
 	].join('');
 
 	/**
@@ -1415,6 +1418,12 @@
 	});
 
 	/**
+	 * 要件#38 追補h(backlog 244): 印刷の間だけ本文の欄のスクロール位置を 0 にし、
+	 * 印刷の後に元へ戻す(WebKit が要素のスクロール位置を紙のレイアウトに持ち込むため)。
+	 */
+	onMount(() => holdScrollForPrint(window, () => [viewerEl]));
+
+	/**
 	 * html の閲覧中に +page.svelte が受け取った ⌘F(上のコメント参照)。
 	 *
 	 * 0 = 要求なし。**進んだ**ときだけが「今の ⌘F」で、閉じると +page が 0 へ戻す。
@@ -1536,6 +1545,45 @@
 		e.clipboardData?.setData('text/plain', text);
 	}
 
+	/**
+	 * 要件#73: 本文(`bodyEl`)の中で `id` がフラグメントと一致する要素。
+	 * 脚注の id は非 ASCII のラベルを百分率符号化したまま持つので、まず綴りの
+	 * まま、次に復号した形で探す。見出しへの id 付与はしない(要件#61 は先取りしない)。
+	 */
+	function inDocumentTarget(fragment: string): HTMLElement | null {
+		if (!bodyEl || fragment === '') return null;
+		let decoded = fragment;
+		try {
+			decoded = decodeURIComponent(fragment);
+		} catch {
+			// 不正な百分率符号化は綴りのままで探す。
+		}
+		const withId = [...bodyEl.querySelectorAll<HTMLElement>('[id]')];
+		return (
+			withId.find((el) => el.getAttribute('id') === fragment) ??
+			withId.find((el) => el.getAttribute('id') === decoded) ??
+			null
+		);
+	}
+
+	/**
+	 * 要件#73: 要素の上端をスクロール容器(`article.viewer`)の可視域の上側 ――
+	 * sticky で上に重なる帯(ツールバー・開いていれば検索バー)の直下 ―― へ運ぶ。
+	 * 検索の `scrollRangeIntoContainer` と同じく容器の `scrollTop` だけを動かし、
+	 * 祖先は巻き込まない。帯の高さはスクロールのたびに実寸を読む ―― `toolbarHeight`
+	 * は検索バーを開いたときにしか測られない(閉じた窓では 0 のまま)。
+	 */
+	function scrollElementIntoViewer(el: HTMLElement) {
+		const scroller = viewerEl;
+		if (!scroller) return;
+		const gap = 8;
+		const findBar = scroller.querySelector<HTMLElement>('.find-bar--sticky');
+		const covered = (toolbarEl?.offsetHeight ?? 0) + (findBar?.offsetHeight ?? 0);
+		const offset =
+			el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - covered - gap;
+		scroller.scrollTop = Math.max(0, scroller.scrollTop + offset);
+	}
+
 	async function handleClick(e: MouseEvent) {
 		// 編集中はリンク航行を止める(要件#48 契約②)。ソース編集の `<pre>` に
 		// リンクは無いが、preventDefault が残っているとキャレットの置き直しを
@@ -1550,6 +1598,19 @@
 		if (isExternal(href)) {
 			e.preventDefault();
 			openUrl(href);
+			return;
+		}
+
+		// 要件#73 契約 1・2・5: 同じ文書の中の `#…`(脚注参照・戻りリンク)は、
+		// 行き先の要素をスクロール容器の可視域へ運ぶ。`location.hash` を変えるだけの
+		// 既定の動作では `article.viewer` がスクロールしないため、ここで運んで既定の
+		// 動作は止める。行き先が本文に無いときは従来どおり何もしない。
+		if (href.startsWith('#')) {
+			const dest = inDocumentTarget(href.slice(1));
+			if (dest) {
+				e.preventDefault();
+				scrollElementIntoViewer(dest);
+			}
 			return;
 		}
 
@@ -1862,9 +1923,18 @@
 		color: inherit;
 	}
 
+	/*
+	 * 要件#54 追補d: 現在の一致は文字色を #1f2328 に固定する。橙の背景の上で
+	 * Shiki の橙のトークンが読めない(比 1.54)ため。mark の中の Shiki の span は
+	 * インラインの `style="color:…"` を持つので、子孫の規則は `!important` で勝たせる。
+	 */
 	.markdown-body :global(mark[data-vellis-find-current]) {
 		background-color: #fb923c;
-		color: inherit;
+		color: #1f2328;
+	}
+
+	.markdown-body :global(mark[data-vellis-find-current] *) {
+		color: #1f2328 !important;
 	}
 
 	:global(::highlight(vellis-find)) {
@@ -1873,6 +1943,7 @@
 
 	:global(::highlight(vellis-find-current)) {
 		background-color: #fb923c;
+		color: #1f2328;
 	}
 
 	/*

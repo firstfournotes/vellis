@@ -82,19 +82,25 @@ export function buildPrintDocument(content: string, docUri: string): string {
 
 /**
  * ⌘P の行き先。`print-window` = 印刷専用ウィンドウ(HTML 用の新経路)、
- * `main-frame` = 当該窓のメインフレーム印刷(従来の経路)。
+ * `main-frame` = 当該窓のメインフレーム印刷(従来の経路)、`pdf` = PDF ファイル
+ * そのものを PDFKit で印刷(要件#38 追補g)。
  */
-export type PrintRoute = 'print-window' | 'main-frame';
+export type PrintRoute = 'print-window' | 'main-frame' | 'pdf';
 
 /**
  * 表示中のビューア種別から印刷経路を選ぶ(純関数)。
  *
- * 印刷窓へ回すのは html だけで、他の型は1つ残らず従来のメインフレーム印刷に
- * 残る(契約④)。入力は `FileType` だけ — URI を取らないので、ssh リモートの
- * HTML もローカルの HTML と同じ経路になる(契約⑥)。
+ * 印刷窓へ回すのは html だけ。pdf は PDF ファイルそのものの印刷へ回す
+ * (追補g) — PDF は `PdfViewer` の iframe の中で WebKit が描いているので、
+ * メインフレーム印刷では iframe に見えている範囲(先頭の約 1/5)しか紙に出ない
+ * (backlog 307)。他の型は1つ残らず従来のメインフレーム印刷に残る(契約④)。
+ * 入力は `FileType` だけ — URI を取らないので、ssh リモートの HTML / PDF も
+ * ローカルと同じ経路になる(契約⑥・追補g 契約3)。
  */
 export function printRouteFor(type: FileType): PrintRoute {
-	return type === 'html' ? 'print-window' : 'main-frame';
+	if (type === 'html') return 'print-window';
+	if (type === 'pdf') return 'pdf';
+	return 'main-frame';
 }
 
 /**
@@ -136,6 +142,13 @@ export type PrintHandlers = {
 	 */
 	getHtmlSource: () => { content: string; docUri: string };
 	/**
+	 * 表示中の文書の URI(local の `file://` も `ssh://` もそのまま)。pdf 経路の
+	 * ときだけ、発火のたびに呼ばれる(要件#38 追補g)。省略されていて pdf 経路へ
+	 * 来たら印刷せず `onError` に渡す — 黙って何も起きないより、配線漏れを
+	 * 「印刷できなかった」として見せるほうが見つけやすい。
+	 */
+	getDocumentUri?: () => string;
+	/**
 	 * いま印刷できるか(要件#38 追補f の念のための止め)。発火のたびに呼ばれ、
 	 * false なら何もしない — 失敗ではなく「対象外」なので `onError` も呼ばない。
 	 * 本体側でも Print… を無効にしてイベントを止めているが、知らせと押下が
@@ -161,10 +174,18 @@ export async function registerPrintListener(handlers: PrintHandlers): Promise<()
 	const run = async (): Promise<void> => {
 		if (handlers.canPrint && !handlers.canPrint()) return;
 		try {
-			if (printRouteFor(handlers.getFileType()) === 'main-frame') {
+			const route = printRouteFor(handlers.getFileType());
+			if (route === 'main-frame') {
 				// 従来の終端。Rust 側は invoke 元=この窓の `Webview::print()` を
 				// 呼ぶだけで、紙の体裁は `print.css` が決める(契約④)。
 				await invoke('print_current_window');
+			} else if (route === 'pdf') {
+				// PDF ファイルそのもの。Rust 側がプロバイダで全バイトを読み、PDFKit の
+				// 印刷操作をこの窓のシートとして出す(追補g)。
+				if (!handlers.getDocumentUri) {
+					throw new Error('no document URI to print the PDF from');
+				}
+				await invoke('print_pdf', { uri: handlers.getDocumentUri() });
 			} else {
 				const { content, docUri } = handlers.getHtmlSource();
 				await invoke('print_html', { document: buildPrintDocument(content, docUri) });

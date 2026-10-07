@@ -15,6 +15,8 @@
  */
 import { render } from '../markdown/renderer';
 import type { SourceIndex } from '../markdown/types';
+import { highlightCode } from './code-highlight';
+import { languageForFile } from './code-language';
 import { buildSrcdoc } from './html-viewer';
 import { toAssetUri } from './uri';
 
@@ -254,8 +256,9 @@ export interface DisplayResult {
  * Produce the viewer body for a document, dispatching on its file type:
  * Markdown goes through the unified pipeline, HTML is handed to the sandboxed
  * iframe instead of the `{@html}` path, images are handed to `<img>` as an
- * asset URI, text is shown as-is, and binary content is withheld (never
- * thrown — the caller may still hold the payload).
+ * asset URI, text is shown as-is (code files syntax-highlighted — 要件#69),
+ * and binary content is withheld (never thrown — the caller may still hold
+ * the payload).
  *
  * `zoom` only reaches HTML (要件#36 ⑥): the sandboxed preview can only be
  * zoomed by rebuilding its `srcdoc`, while Markdown and plain text are zoomed
@@ -303,7 +306,11 @@ export async function renderForDisplay(
 			return { html: '', index: null, pdfSrc: toAssetUri(uri) };
 		case 'binary':
 			return { html: BINARY_PLACEHOLDER, index: null };
-		default:
-			return { html: renderPlainText(content), index: null };
+		default: {
+			// 言語の決まるコードのファイルは色付き(要件#69)。上限超え・失敗はプレーン。
+			const lang = languageForFile(uri);
+			const highlighted = lang ? await highlightCode(content, lang) : null;
+			return { html: highlighted ?? renderPlainText(content), index: null };
+		}
 	}
 }

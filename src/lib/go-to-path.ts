@@ -33,6 +33,12 @@
 export const GO_TO_NOT_FOUND_MESSAGE = 'File or folder not found';
 
 /**
+ * 「リンク切れ」の文言(値固定・英語=要件#51)。当たった行がリンク切れのとき、
+ * 入力バーの表示欄が「無い」の代わりに出す(要件#70 追補b)。
+ */
+export const GO_TO_BROKEN_LINK_MESSAGE = 'Broken symbolic link';
+
+/**
  * Go メニュー「Go to Path…」(⇧⌘G)のクリックで Rust から届くイベント名
  * (契約①・追補c で File メニューから移した)。`src-tauri/src/menu.rs` の
  * `MENU_GO_TO_EVENT` と同じリテラルで、両側のテストが同じ値を固定する
@@ -45,6 +51,8 @@ export type GoToEntry = {
 	uri: string;
 	name: string;
 	kind: 'dir' | 'file' | 'symlink';
+	/** シンボリックリンクの行だけに付く(Rust の `Entry` と同じ形=要件#70)。 */
+	link?: { target?: string; broken: boolean };
 };
 
 /**
@@ -88,6 +96,12 @@ export type GoToDeps = {
 	selectTreeItem(uri: string): void;
 	/** 「無い」(契約⑥)。バーの表示欄に `GO_TO_NOT_FOUND_MESSAGE` を出す。 */
 	notFound(): void;
+	/**
+	 * 当たった行がリンク切れ(要件#70 追補b)。バーの表示欄に
+	 * `GO_TO_BROKEN_LINK_MESSAGE` を出す。省略可 —— 無ければ `notFound` に落とす
+	 * (既存の deps で組んだ呼び出し元との互換)。
+	 */
+	brokenLink?(): void;
 	/** 編集の始末(既存の `confirmDiscardEdits`)。false なら跳ばない。 */
 	confirmDiscard(): Promise<boolean>;
 	/** 種別判定(既存の `detectFileType`)。`binary` は開けない種類。 */
@@ -248,6 +262,18 @@ function matchEntry(entries: GoToEntry[], name: string): GoToEntry | null {
 	return null;
 }
 
+/**
+ * 当たった行がリンク切れなら `brokenLink`(無ければ `notFound`)を1回呼んで true
+ * (要件#70 追補b)。辿れない先へ `open` / `listDir` / `newWindow` を投げると生の
+ * I/O エラーになるので、当たった時点で止める。何も動かさないのは「無い」と同じ。
+ */
+function stopIfBrokenLink(entry: GoToEntry, deps: GoToDeps): boolean {
+	if (entry.link?.broken !== true) return false;
+	if (deps.brokenLink) deps.brokenLink();
+	else deps.notFound();
+	return true;
+}
+
 /** 既存の展開集合に祖先を足す(重複は除き、既に開いている枝は閉じない=契約⑤)。 */
 function mergeExpanded(existing: string[], added: string[]): string[] {
 	const merged = [...existing];
@@ -300,6 +326,8 @@ async function revealInside(
 			deps.notFound();
 			return;
 		}
+		// 途中でも最後でも、リンク切れに当たればそこで止める(追補b)。
+		if (stopIfBrokenLink(found, deps)) return;
 		if (i === target.segments.length - 1) {
 			match = found;
 			break;
@@ -376,6 +404,7 @@ async function revealOutside(
 		deps.notFound();
 		return;
 	}
+	if (stopIfBrokenLink(found, deps)) return;
 
 	const args =
 		found.kind === 'dir'

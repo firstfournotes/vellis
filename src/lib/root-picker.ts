@@ -111,3 +111,49 @@ export async function pickFolderAndSetRoot<Root = unknown>(
 		return { kind: 'failed', message: openFolderFailedMessage(err) };
 	}
 }
+
+/** What the startup needs to initialise the window (`init_window`). */
+export type InitWindowDeps<Init = unknown> = {
+	/** The page passes `() => invoke<InitWindowResponse>('init_window')`. */
+	initWindow: () => Promise<Init>;
+};
+
+export type InitWindowOutcome<Init = unknown> =
+	| { kind: 'ready'; init: Init }
+	| { kind: 'failed'; message: string };
+
+/**
+ * The startup's window initialisation (requirements.md #71 追補b(1)).
+ *
+ * A root that cannot be opened (deleted folder, unreachable ssh host) never
+ * rejects here — not even on a synchronous throw. It comes back as `failed`
+ * with the picker's note, so the page shows the history picker with the
+ * reason and still finishes its startup instead of leaving a blank window.
+ */
+export async function initWindowOrPicker<Init = unknown>(
+	deps: InitWindowDeps<Init>
+): Promise<InitWindowOutcome<Init>> {
+	try {
+		return { kind: 'ready', init: await deps.initWindow() };
+	} catch (err) {
+		return { kind: 'failed', message: openFolderFailedMessage(err) };
+	}
+}
+
+/**
+ * The app version for the empty state when `init_window` failed
+ * (requirements.md #71 追補c(1), backlog 290).
+ *
+ * The failed startup has no `init.version`, so the page passes
+ * `getBuildInfo` (`$lib/buildInfo`) here. A failure never escapes — the
+ * version is just left blank (`''`), as before.
+ */
+export async function versionAfterFailedInit(
+	getInfo: () => Promise<{ version: string }>
+): Promise<string> {
+	try {
+		return (await getInfo()).version;
+	} catch {
+		return '';
+	}
+}

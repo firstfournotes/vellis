@@ -15,9 +15,12 @@
  * そうしないと差し替えで見出しが段落へ・リスト項目が別リストへ落ちる。
  */
 import { toMdast } from 'hast-util-to-mdast';
-import { toMarkdown, type Info, type State } from 'mdast-util-to-markdown';
+import { toMarkdown, type Info, type State, type Unsafe } from 'mdast-util-to-markdown';
 import type { Element as HastElement, ElementContent, Properties } from 'hast';
 import type { Delete, Parents, PhrasingContent, RootContent } from 'mdast';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
 import { isBlockType } from './source-index';
 import type { NodeMeta, SourceIndex, SourcePosition } from './types';
 
@@ -887,6 +890,92 @@ function handleDelete(node: Delete, _parent: Parents | undefined, state: State, 
 handleDelete.peek = (): string => '~';
 
 /**
+ * 本文の文字としての `~~` を `\~\~` と書く規則(追補h(1)(2) / AC-49-38)。
+ *
+ * core の `mdast-util-to-markdown` は `~` を行頭(code fence の始まり)でしか
+ * エスケープしないので、取り消し線の handler(`handleDelete`)だけだと、本文の文字の
+ * `~~` が書き戻しで取り消し線の印になり、取り消し線の境界が変わる(backlog 268)。
+ * **2つ以上続く `~` だけ**を、その並びの全部の `~` でエスケープする(由谷決定
+ * 2026-10-05「`~~` だけエスケープ」)。並びに入る `~` は「前が `~`(後読み)」か
+ * 「自分と次が `~~`(先読み)」で、幅0の見回しで書く ―― 前の `~` を消費する形だと
+ * `~~~` の3本目が拾えない。
+ *
+ * 同じ条件を `before` 側と `after` 側の2つの規則に書くのは、`safe` に「条件付きでない
+ * (確実にエスケープする)」位置として扱わせるため。片側だけの条件だと、隣の文字が
+ * 確実にエスケープされるときに `safe` がこちらのエスケープを省き、1本だけ裸の `~` が
+ * 残る(実測: `a~~*b~c` が `a\~~\*b~c` になり、残った `~` が後ろの `~` と対になって
+ * 取り消し線になる・行頭の `atBreak` と重なる表セルの先頭 `~~x` が `\~~x` になる)。
+ * `safe` は同じ位置に掛かった規則の条件を両方そろったときだけ残すので、2つ並べると
+ * 条件が消えて、並びの `~` は必ず全部エスケープされる。
+ *
+ * 前後の文脈(`handleDelete` の `~~`・`peek` の `~`)も見るので、取り消し線に接する
+ * 本文の `~` も文字のまま残る。
+ * 単独の `~`(`~5`・`a~b`)は対象外で、無変更の確定で byte 等価のまま(追補h(2))。
+ * 取り消し線そのものの印は `handleDelete` が直接書くので、この規則は掛からない。
+ * 行き先・タイトルなど本文でない構文の中は既定の規則と同じく除く。
+ */
+const TILDE_RUN_SPANS: Unsafe['notInConstruct'] = [
+	'autolink',
+	'destinationLiteral',
+	'destinationRaw',
+	'reference',
+	'titleQuote',
+	'titleApostrophe',
+];
+const TILDE_RUN_UNSAFE: Unsafe[] = [
+	{
+		character: '~',
+		before: '(?<=~)|(?=~~)',
+		inConstruct: 'phrasing',
+		notInConstruct: TILDE_RUN_SPANS,
+	},
+	{
+		character: '~',
+		after: '(?<=~~)|(?=~)',
+		inConstruct: 'phrasing',
+		notInConstruct: TILDE_RUN_SPANS,
+	},
+];
+
+/**
+ * 本文の文字としての `~` を**すべて** `\~` と書く規則(追補i(1) / AC-49-39)。
+ *
+ * GFM は1本の `~` の対(`~x~`・`a~b~c`)も取り消し線にする(remark-gfm の
+ * `singleTilde` の既定)ので、追補h の `TILDE_RUN_UNSAFE`(2つ以上続く `~` だけ)では
+ * 本文の `~x~` が書き戻しで取り消し線になる(backlog 298)。書き戻した結果を読み直して
+ * 取り消し線が増えるときだけ、この規則で書き直す(`serializeBlock`)。増えなければ
+ * 追補h のまま ―― 単独の `~` は `~` のままで byte 等価(追補h(2))。
+ * 条件の無い規則なので `safe` が省くことはない。取り消し線そのものの印は
+ * `handleDelete` が直接書くので掛からない。本文でない構文の中は追補h と同じく除く。
+ */
+const TILDE_ALL_UNSAFE: Unsafe[] = [
+	{ character: '~', inConstruct: 'phrasing', notInConstruct: TILDE_RUN_SPANS },
+];
+
+/**
+ * 書き戻しの結果を読み直す構文規則(追補i(1))= 本番(`renderer.ts`)と同じ
+ * remark-parse + remark-gfm の既定のオプション。`parse` だけを使う(変換は走らせない)。
+ */
+const PHRASE_PARSER = unified().use(remarkParse).use(remarkGfm);
+
+/** phrasing を段落として `toMarkdown` で書き、末尾の改行を落とす。 */
+function writePhrasing(children: PhrasingContent[], unsafe: Unsafe[]): string {
+	return toMarkdown(
+		{ type: 'paragraph', children },
+		{ handlers: { delete: handleDelete }, unsafe },
+	).replace(/\n+$/, '');
+}
+
+/** 木に含まれる `delete`(取り消し線)の数。 */
+function countDeletes(node: { type?: string; children?: unknown }): number {
+	let count = node.type === 'delete' ? 1 : 0;
+	if (Array.isArray(node.children)) {
+		for (const child of node.children) count += countDeletes(child as { type?: string });
+	}
+	return count;
+}
+
+/**
  * 編集後のブロック DOM を、`source.slice(startOffset, endOffset)` と差し替えられる
  * Markdown にする(契約②④)。
  *
@@ -931,10 +1020,13 @@ export function serializeBlock(
 
 	const mdast = toMdast({ type: 'root', children: [toHastElement(el, origin, tokens)] });
 	const children = phrasingOf(mdast.type === 'root' ? mdast.children : []);
-	let written = toMarkdown(
-		{ type: 'paragraph', children },
-		{ handlers: { delete: handleDelete } },
-	).replace(/\n+$/, '');
+	let written = writePhrasing(children, TILDE_RUN_UNSAFE);
+	// 書き戻した結果が新しい取り消し線を生むときだけ、単独の `~` も `\~` にして書き直す
+	// (追補i(1) / AC-49-39)。読み直すのは札を戻す前の綴り ―― 札は本文の文字で、
+	// 戻す綴り(行き先・脚注参照)は取り消し線の印を持ち込まない。
+	if (countDeletes(PHRASE_PARSER.parse(written)) > countDeletes({ children })) {
+		written = writePhrasing(children, TILDE_ALL_UNSAFE);
+	}
 	// 表セルの `|` は列の区切りになるので `\|` へ逃がす(追補d(3) / AC-49-28)。core の
 	// `mdast-util-to-markdown` は `|` をエスケープしない。札を戻す前に行う ―― 原文から
 	// 採った綴り(行き先・脚注参照)は原文の時点で表の中で正しく書かれている。

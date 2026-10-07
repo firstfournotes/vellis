@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "vellis",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "identifier": "com.tetsuo.vellis",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -31,6 +31,27 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      { "name": "Markdown", "ext": ["md", "markdown", "mdx"], "role": "Viewer", "rank": "Alternate" },
+      { "name": "HTML", "ext": ["html", "htm"], "role": "Viewer", "rank": "Alternate" },
+      {
+        "name": "Image",
+        "ext": ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      { "name": "3D Model", "ext": ["stl", "3mf", "obj", "ply"], "role": "Viewer", "rank": "Alternate" },
+      { "name": "Video", "ext": ["mp4", "mov", "webm"], "role": "Viewer", "rank": "Alternate" },
+      { "name": "Audio", "ext": ["wav", "mp3", "m4a"], "role": "Viewer", "rank": "Alternate" },
+      { "name": "PDF", "ext": ["pdf"], "role": "Viewer", "rank": "Alternate" },
+      {
+        "name": "Text",
+        "ext": ["txt"],
+        "contentTypes": ["public.text"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      }
     ],
     "macOS": {
       "entitlements": "Entitlements.plist"

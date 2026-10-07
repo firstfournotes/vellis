@@ -15,11 +15,20 @@
 //! atomic write (tmp → rename).  Reads never fail the caller — a missing
 //! file (first launch) or a corrupted one falls back to an empty list so a
 //! broken history can never block startup.
+//!
+//! Writes are serialized through a process-wide `std::sync::Mutex`, exactly
+//! as in `recent_files.rs` (requirements.md #3 追補a・backlog 303): several
+//! windows can confirm their roots at once (Open With on many files, a burst
+//! of CLI launches), and two read-modify-write cycles racing on the same
+//! `history.json.tmp` would fail the rename or drop a root.  The lock is
+//! global rather than per instance because [`record_root`] builds a fresh
+//! store per call, and the app has exactly one history file.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use thiserror::Error;
 
@@ -28,6 +37,9 @@ pub const MAX_HISTORY: usize = 20;
 
 /// Filename used inside the app config directory.
 pub const HISTORY_FILENAME: &str = "history.json";
+
+/// Serializes every read-modify-write of the history (see the module docs).
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Error)]
 pub enum HistoryError {
@@ -87,6 +99,7 @@ impl HistoryStore {
     /// next time a folder is opened.  Anything past [`MAX_HISTORY`] is
     /// dropped from the tail.
     pub fn add(&self, path: &str) -> Result<(), HistoryError> {
+        let _guard = lock_writes();
         let head = normalize_uri(path);
         let mut seen = HashSet::new();
         seen.insert(head.clone());
@@ -119,6 +132,12 @@ impl HistoryStore {
         fs::rename(&tmp_path, &self.file)?;
         Ok(())
     }
+}
+
+/// Take the process-wide write lock.  A poisoned lock only means another
+/// writer panicked; the file itself is still whole (atomic rename), so carry on.
+fn lock_writes() -> MutexGuard<'static, ()> {
+    WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Canonical spelling of a root URI for history purposes (requirements.md #6).
@@ -191,6 +210,10 @@ pub fn default_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<Path
 /// Best-effort by design: any failure is logged and swallowed so opening a
 /// folder never breaks because the history could not be written.
 pub fn record_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>, root_uri: &str) {
+    // `vellis --self-check` leaves the history alone (requirements.md #72 契約8).
+    if !crate::self_check::active_plan().root_history {
+        return;
+    }
     let Some(path) = default_path(app) else {
         return;
     };

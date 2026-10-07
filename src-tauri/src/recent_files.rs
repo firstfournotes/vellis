@@ -208,6 +208,10 @@ pub fn default_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<Path
 /// swallowed so opening a document never breaks because the list could not
 /// be written.
 pub fn record_file<R: tauri::Runtime>(app: &tauri::AppHandle<R>, uri: &str) {
+    // `vellis --self-check` leaves Recent Files alone (requirements.md #72 契約8).
+    if !crate::self_check::active_plan().recent_files {
+        return;
+    }
     let Some(path) = default_path(app) else {
         return;
     };
@@ -219,6 +223,9 @@ pub fn record_file<R: tauri::Runtime>(app: &tauri::AppHandle<R>, uri: &str) {
 /// Drop a file that turned out not to exist any more (契約8).  Best-effort in
 /// the same way as [`record_file`].
 pub fn forget_file<R: tauri::Runtime>(app: &tauri::AppHandle<R>, uri: &str) {
+    if !crate::self_check::active_plan().recent_files {
+        return;
+    }
     let Some(path) = default_path(app) else {
         return;
     };

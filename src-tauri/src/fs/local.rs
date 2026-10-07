@@ -8,7 +8,7 @@ use tracing;
 
 use crate::errors::FsError;
 
-use super::entry::{Entry, FileKind};
+use super::entry::{Entry, FileKind, LinkInfo};
 use super::provider::{FileProvider, WatchEvent, WatchEventKind, WatchHandle};
 use super::uri::Uri;
 
@@ -64,9 +64,19 @@ impl FileProvider for LocalProvider {
             // (要件#31 契約①, backlog #68). Re-stat links through `fs::metadata`
             // (which follows) so kind/size/modified describe the *target*.
             let mut metadata = de.metadata().await.map_err(io_to_fs)?;
+            let mut link = None;
             if metadata.is_symlink() {
-                match tokio::fs::metadata(&entry_path).await {
-                    Ok(target) => metadata = target,
+                // The raw link text for the tree's tooltip (要件#70 契約1). A failed
+                // readlink (e.g. the link vanished mid-listing) only drops `target`.
+                let target = tokio::fs::read_link(&entry_path)
+                    .await
+                    .ok()
+                    .map(|t| t.to_string_lossy().to_string());
+                let broken = match tokio::fs::metadata(&entry_path).await {
+                    Ok(followed) => {
+                        metadata = followed;
+                        false
+                    }
                     Err(e) => {
                         // Unreachable target — missing, a permission wall, or a loop
                         // (ELOOP on a self-referencing link). Keep the entry listed as
@@ -76,8 +86,10 @@ impl FileProvider for LocalProvider {
                             error = %e,
                             "symlink target is unreachable; listing it as Symlink"
                         );
+                        true
                     }
-                }
+                };
+                link = Some(LinkInfo { target, broken });
             }
 
             let kind = if metadata.is_dir() {
@@ -112,6 +124,7 @@ impl FileProvider for LocalProvider {
                 kind,
                 size,
                 modified,
+                link,
             });
         }
 
@@ -162,6 +175,7 @@ impl FileProvider for LocalProvider {
             kind,
             size,
             modified,
+            link: None,
         })
     }
 
@@ -279,6 +293,12 @@ impl FileProvider for LocalProvider {
     /// outright (追補d(2)): writing would either replace the link or create
     /// a file the user never opened.
     ///
+    /// The replaced file keeps its mode, ACL and extended attributes (Finder
+    /// tags included, 追補e): they are copied onto the temp file before the
+    /// rename, from the file actually being replaced — through a symlink,
+    /// the link's target. A hard link's other names still keep the old
+    /// contents, as before: the rename gives the document a new inode.
+    ///
     /// The only other refusal here is a path carrying `..`. Root containment
     /// is checked one layer up, by `save_document`, because a `LocalProvider`
     /// holds no root of its own (追補a).
@@ -324,10 +344,67 @@ impl FileProvider for LocalProvider {
         if let Err(e) = write_then_rename(&tmp_path, &target, content).await {
             // Best-effort cleanup: a failed write must not leave the temp file
             // behind next to the document.
-            let _ = tokio::fs::remove_file(&tmp_path).await;
+            discard_tmp(&tmp_path).await;
             return Err(e);
         }
         Ok(())
+    }
+}
+
+/// Remove a temp file left by a failed save, best effort.
+///
+/// The temp file may carry the original's file flags and ACL by now (追補e(1)):
+/// a document locked in Finder (`uchg`) or carrying `everyone deny delete`
+/// cannot be replaced, so its save fails at the rename, and the copied flag or
+/// ACL would then make the temp file itself undeletable. Clear the temp file's
+/// flags and ACL and try once more rather than leave it next to the document
+/// (追補f(1)). Only the temp file is touched, never the original.
+async fn discard_tmp(tmp_path: &std::path::Path) {
+    if tokio::fs::remove_file(tmp_path).await.is_ok() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if let Ok(c_path) = std::ffi::CString::new(tmp_path.as_os_str().as_bytes()) {
+            // Flags first: `uchg` refuses the ACL change as well. Each step is
+            // best effort; whichever of the two the temp file carries, the
+            // removal below gets its chance.
+            // SAFETY: `c_path` is a valid NUL-terminated path for the whole call.
+            unsafe { libc::chflags(c_path.as_ptr(), 0) };
+            clear_acl(&c_path);
+            let _ = tokio::fs::remove_file(tmp_path).await;
+        }
+    }
+}
+
+/// Replace the extended ACL of the file at `path` with an empty one — what
+/// `chmod -N` does. The `libc` crate has no `acl_*` bindings, so the three
+/// calls are declared here; they live in libSystem, which every macOS binary
+/// links already (no new dependency).
+#[cfg(target_os = "macos")]
+fn clear_acl(path: &std::ffi::CStr) {
+    type AclT = *mut std::ffi::c_void;
+    const ACL_TYPE_EXTENDED: std::ffi::c_uint = 0x0000_0100;
+    extern "C" {
+        fn acl_init(count: std::ffi::c_int) -> AclT;
+        fn acl_set_file(
+            path_p: *const std::ffi::c_char,
+            acl_type: std::ffi::c_uint,
+            acl: AclT,
+        ) -> std::ffi::c_int;
+        fn acl_free(obj_p: *mut std::ffi::c_void) -> std::ffi::c_int;
+    }
+    // SAFETY: `acl_init` returns an owned ACL or null; a non-null one is used
+    // for one `acl_set_file` with a valid NUL-terminated path and then freed
+    // exactly once.
+    unsafe {
+        let acl = acl_init(0);
+        if acl.is_null() {
+            return;
+        }
+        acl_set_file(path.as_ptr(), ACL_TYPE_EXTENDED, acl);
+        acl_free(acl);
     }
 }
 
@@ -354,7 +431,8 @@ async fn resolve_write_target(path: std::path::PathBuf) -> Result<std::path::Pat
     }
 }
 
-/// Write `content` to `tmp_path`, fsync it, then rename it onto `target`.
+/// Write `content` to `tmp_path`, give it `target`'s metadata, fsync it, then
+/// rename it onto `target`.
 async fn write_then_rename(
     tmp_path: &std::path::Path,
     target: &std::path::Path,
@@ -364,13 +442,130 @@ async fn write_then_rename(
 
     let mut file = tokio::fs::File::create(tmp_path).await.map_err(io_to_fs)?;
     file.write_all(content.as_bytes()).await.map_err(io_to_fs)?;
-    // fsync before the rename: without it the rename can land while the new
-    // contents are still only in the page cache, and a power loss leaves an
-    // empty file where the document was.
-    file.sync_all().await.map_err(io_to_fs)?;
-    drop(file);
+    // Surface the write's own error here: `into_std` waits for an in-flight
+    // write but would drop its error.
+    file.flush().await.map_err(io_to_fs)?;
+    let file = file.into_std().await;
+
+    let original = target.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // A fresh temp file has the umask's mode and no ACL or extended
+        // attributes, so the rename would strip the document of them on every
+        // save (追補e(1)). Copy them over first; `target` is the file being
+        // replaced — for a save through a symlink, the link's target (追補e(2)).
+        copy_metadata_from_original(&original, &file);
+        // fsync before the rename: without it the rename can land while the
+        // new contents are still only in the page cache, and a power loss
+        // leaves an empty file where the document was. Done after the
+        // metadata copy so the one flush covers that too.
+        file.sync_all()
+    })
+    .await
+    .map_err(|e| FsError::Io(std::io::Error::other(e.to_string())))?
+    .map_err(io_to_fs)?;
+
     tokio::fs::rename(tmp_path, target).await.map_err(io_to_fs)?;
     Ok(())
+}
+
+/// Give the temp file `tmp` the mode, ACL and extended attributes (Finder
+/// tags included) of `original`, the file it is about to replace (要件#48
+/// 追補e(1)).
+///
+/// macOS does it with `fcopyfile(3)` and `COPYFILE_METADATA` — mode, owner,
+/// file flags, ACL and extended attributes in one call. That flag also copies
+/// the original's access and modification times, which would make a saved
+/// document look untouched (Finder's date, `make`, a backup tool that compares
+/// size and mtime), so the temp file's own times — this save's — are put back
+/// afterwards. Other platforms copy the mode only.
+///
+/// Best effort (追補e(3)): no original (a first save) means nothing to copy,
+/// and a copy that fails — say an ACL the user may not set — is logged while
+/// the save goes on. Keeping the new contents matters more than the metadata.
+#[cfg(target_os = "macos")]
+fn copy_metadata_from_original(original: &std::path::Path, tmp: &std::fs::File) {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    // Opened only for its descriptor. `O_NONBLOCK` keeps a FIFO at this path
+    // from blocking the save until some writer shows up.
+    let source = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(original)
+    {
+        Ok(source) => source,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(
+                path = %original.display(),
+                error = %e,
+                "save: cannot open the original to copy its mode, ACL and extended attributes; saving without them"
+            );
+            return;
+        }
+    };
+
+    let own_times = tmp
+        .metadata()
+        .and_then(|m| Ok((m.accessed()?, m.modified()?)));
+
+    // SAFETY: both descriptors stay open for the whole call (`source` and
+    // `tmp` are borrowed for this scope) and a null state is allowed.
+    let rc = unsafe {
+        libc::fcopyfile(
+            source.as_raw_fd(),
+            tmp.as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_METADATA,
+        )
+    };
+    if rc != 0 {
+        tracing::warn!(
+            path = %original.display(),
+            error = %std::io::Error::last_os_error(),
+            "save: could not copy the original's mode, ACL and extended attributes; saving anyway"
+        );
+    }
+
+    let restored = own_times.and_then(|(accessed, modified)| {
+        tmp.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(accessed)
+                .set_modified(modified),
+        )
+    });
+    if let Err(e) = restored {
+        tracing::warn!(
+            path = %original.display(),
+            error = %e,
+            "save: could not set the saved file's modification time; it may show the previous one"
+        );
+    }
+}
+
+/// See the macOS version above. Here only the mode is copied.
+#[cfg(not(target_os = "macos"))]
+fn copy_metadata_from_original(original: &std::path::Path, tmp: &std::fs::File) {
+    let permissions = match std::fs::metadata(original) {
+        Ok(meta) => meta.permissions(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(
+                path = %original.display(),
+                error = %e,
+                "save: cannot read the original's permissions; saving without them"
+            );
+            return;
+        }
+    };
+    if let Err(e) = tmp.set_permissions(permissions) {
+        tracing::warn!(
+            path = %original.display(),
+            error = %e,
+            "save: could not copy the original's permissions; saving anyway"
+        );
+    }
 }
 
 /// Resolve `target` and refuse it unless it lives under `root` (要件#48 追補a).

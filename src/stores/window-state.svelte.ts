@@ -35,6 +35,12 @@ export type Entry = {
 	uri: string;
 	name: string;
 	kind: 'file' | 'dir' | 'symlink';
+	/**
+	 * 一覧の行がシンボリックリンクのときだけ付く(要件#70 契約1・3)。`kind` は
+	 * リンク先の種別のまま(要件#31)。`target` は readlink の文字列そのまま
+	 * (ssh では無い)、`broken` は辿れなかったリンク。
+	 */
+	link?: { target?: string; broken: boolean };
 };
 
 class WindowState {

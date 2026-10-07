@@ -15,6 +15,7 @@ pub mod menu;
 pub mod print;
 pub mod recent_files;
 pub mod search;
+pub mod self_check;
 pub mod session;
 pub mod settings;
 pub mod spacemouse;
@@ -45,7 +46,7 @@ use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
 use commands::document::{open_binary_document, open_document, save_document};
 use commands::history::list_history;
 use commands::list::list_dir;
-use commands::print::{print_current_window, print_html, set_print_available};
+use commands::print::{print_current_window, print_html, print_pdf, set_print_available};
 use commands::recent_files::{clear_recent_files, list_recent_files};
 use commands::root::set_root;
 use commands::search::{search_in_folder, search_in_folder_page, search_in_folder_reset, SearchResults};
@@ -59,8 +60,10 @@ use ipc::handler::spawn_command_handler;
 use ipc::lock::FileLock;
 use ipc::server::{default_lock_path, default_socket_path, IpcServer};
 use print::{handle_print_protocol, PrintAvailability, PrintDocumentStore, PRINT_SCHEME};
+use self_check::{SelfCheckSession, StartupPlan};
 use watch::hub::DocumentCoordinator;
 use window::manager::{WindowArgs, WindowManager};
+use window::open_with::PendingOpens;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -69,6 +72,37 @@ pub fn run() {
 
 /// Start the Tauri app with initial arguments for the first window.
 pub fn run_with_args(initial_args: WindowArgs) {
+    run_app(initial_args, StartupPlan::normal(), None, None)
+}
+
+/// Start the Tauri app as the Main Process, keeping `lock` — the
+/// single-instance lock the CLI took before starting Tauri
+/// ([`ipc::launch::launch`]) — for the app's whole life (要件#3 追補b 契約1).
+/// `setup` does not take the lock again.
+pub fn run_as_main(initial_args: WindowArgs, lock: FileLock) {
+    run_app(initial_args, StartupPlan::normal(), None, Some(lock))
+}
+
+/// Start the Tauri app following `plan` (requirements.md #72 契約8).
+///
+/// The ordinary launch passes [`StartupPlan::normal`] and no self-check
+/// session; `vellis --self-check` ([`self_check::run`]) passes
+/// [`StartupPlan::self_check`] and its session, and then the window the
+/// config would create is replaced by one nobody sees, carrying the
+/// recorder as its first initialization script.
+///
+/// `main_lock` is the single-instance lock already taken by the CLI
+/// ([`run_as_main`]); with `None`, `setup` tries to take it itself.
+pub(crate) fn run_app(
+    initial_args: WindowArgs,
+    plan: StartupPlan,
+    self_check_session: Option<SelfCheckSession>,
+    main_lock: Option<FileLock>,
+) {
+    // The writers deep inside the commands (root history, Recent Files,
+    // `.vellis/`) read the plan from here.
+    self_check::install_plan(plan);
+
     // Initialise the tracing subscriber so `tracing::warn!` / `info!` /
     // `error!` calls actually surface on stderr. Default filter level is
     // `warn` so users only see security-relevant events (known_hosts
@@ -120,20 +154,29 @@ pub fn run_with_args(initial_args: WindowArgs) {
         .manage(PrintDocumentStore::new())
         // 窓ごとの「印刷できる文書を開いているか」(要件#38 追補f)。
         // set_print_available が書き、窓の前面化と破棄が読む・捨てる。
-        .manage(PrintAvailability::new());
+        .manage(PrintAvailability::new())
+        // Finder の Open With で渡されたファイル(要件#68)。起動の途中では
+        // `setup` より前に届くので、Builder の段階で置き場を用意しておく。
+        .manage(PendingOpens::default());
 
     #[cfg(all(feature = "webdriver", debug_assertions))]
     let builder = builder.plugin(tauri_plugin_webdriver::init());
 
-    let builder = builder
-        // A tab is neither restored nor saved: restoring would move it — and
-        // its whole tab group — to where a window of the same label sat in an
-        // earlier launch (requirements.md #62 追補a).
-        .plugin(
+    // A tab is neither restored nor saved: restoring would move it — and
+    // its whole tab group — to where a window of the same label sat in an
+    // earlier launch (requirements.md #62 追補a). The self-check launch does
+    // without the plugin altogether: it neither restores nor saves (要件#72 契約8).
+    let builder = if plan.window_state {
+        builder.plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_filter(move |label| !tab_labels_for_filter.contains(label))
                 .build(),
         )
+    } else {
+        builder
+    };
+
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // --- SpaceMouse focus tracking (要件#25) ---
@@ -225,6 +268,7 @@ pub fn run_with_args(initial_args: WindowArgs) {
         print_current_window,
         print_html,
         set_print_available,
+        print_pdf,
         commands::test_helpers::__test_list_windows,
     ]);
     #[cfg(not(feature = "webdriver"))]
@@ -262,9 +306,26 @@ pub fn run_with_args(initial_args: WindowArgs) {
         print_current_window,
         print_html,
         set_print_available,
+        print_pdf,
     ]);
 
-    builder
+    // `vellis --self-check` builds its own window in `setup` (below), so the
+    // one the config describes is not created; its settings are the
+    // starting point of the self-check window.
+    let mut context = tauri::generate_context!();
+    let self_check_window = if self_check_session.is_some() {
+        let windows = &mut context.config_mut().app.windows;
+        let first = windows.first().cloned();
+        for window in windows.iter_mut() {
+            window.create = false;
+        }
+        first
+    } else {
+        None
+    };
+    let is_self_check = self_check_session.is_some();
+
+    let built = builder
         .setup(move |app| {
             // --- Native menu bar ---
             let menu = menu::build(app.handle())?;
@@ -393,8 +454,20 @@ pub fn run_with_args(initial_args: WindowArgs) {
             });
 
             // --- IPC Server: single-instance lock + socket server ---
+            // Not for `--self-check` (要件#72 契約2・8): it must leave a running
+            // Vellis — and the next one to start — exactly as they are.
             let lock_path = default_lock_path();
-            match FileLock::try_acquire(&lock_path) {
+            // The lock and the server go together: the lock is what makes this
+            // process the one that answers on the socket.
+            let single_instance = plan.single_instance_lock && plan.ipc_server;
+            // `vellis` from the CLI took the lock before starting Tauri
+            // (要件#3 追補b 契約1) and it is kept as is — never taken again.
+            let lock = match (single_instance, main_lock) {
+                (true, Some(lock)) => Ok(Some(lock)),
+                (true, None) => FileLock::try_acquire(&lock_path),
+                (false, _) => Ok(None),
+            };
+            match lock {
                 Ok(Some(lock)) => {
                     // We are the Main Process. Start the IPC server.
                     let socket_path = default_socket_path();
@@ -425,17 +498,28 @@ pub fn run_with_args(initial_args: WindowArgs) {
                         }
                     }
                 }
+                Ok(None) if !single_instance => {}
                 Ok(None) => {
-                    // Another instance holds the lock. In a full CLI flow we
-                    // would delegate to the other instance and exit, but for
-                    // now we just log and continue (the GUI was already shown).
+                    // Another instance holds the lock. Only reachable when the
+                    // app was started through `run` / `run_with_args` directly:
+                    // the `vellis` binary (main.rs) takes the lock before Tauri
+                    // starts (`ipc::launch`, 要件#3 追補b) and hands it in via
+                    // `run_as_main`. Here we just log and continue.
                     tracing::warn!(
                         "Another Vellis instance holds the lock at {}",
                         lock_path.display()
                     );
                 }
                 Err(e) => {
-                    tracing::error!("Failed to acquire lock: {}", e);
+                    // The lock file cannot be opened. The `vellis` binary has
+                    // already warned on stderr and started us alone through
+                    // `run_with_args` (要件#3 追補b 契約7): continue without the
+                    // lock and without the IPC server.
+                    tracing::warn!(
+                        "Cannot take the single-instance lock at {}: {}; running without it (no IPC server)",
+                        lock_path.display(),
+                        e
+                    );
                 }
             }
 
@@ -443,7 +527,9 @@ pub fn run_with_args(initial_args: WindowArgs) {
             // One task for the whole process (single instance = one Rust
             // process behind every window). It is a no-op on the dev
             // channel, and every failure inside it is a log line only.
-            update_check::spawn_poller(app.handle().clone());
+            if plan.update_check {
+                update_check::spawn_poller(app.handle().clone());
+            }
 
             // --- SpaceMouse (要件#24 / #25) ---
             // One input source for the process; it emits `spacemouse_input`
@@ -454,16 +540,61 @@ pub fn run_with_args(initial_args: WindowArgs) {
             // (the common case) is not an error. The handle is kept in
             // managed state so dropping it on shutdown stops the reader
             // thread / unregisters the SDK client.
-            app.manage(spacemouse::start(app.handle().clone()));
+            //
+            // A `webdriver` build never starts an input source (backlog 190 /
+            // 要件#25 追補b): the app under test would register with 3DxWare as
+            // "Vellis" in take-over mode (or read the raw HID device), and a
+            // force-quit leaves that registration behind, so the user's own
+            // Vellis stops receiving the device. The verification app must not
+            // seize the user's real hardware. It still manages the disabled
+            // handle, so the focus handler above finds the state and does
+            // nothing. Gated on the feature alone (no `debug_assertions`).
+            //
+            // `--self-check` never registers either (要件#72 契約8).
+            if plan.spacemouse {
+                #[cfg(not(feature = "webdriver"))]
+                app.manage(spacemouse::start(app.handle().clone()));
+                #[cfg(feature = "webdriver")]
+                app.manage(spacemouse::SpaceMouseHandle::Disabled);
+            } else {
+                app.manage(spacemouse::SpaceMouseHandle::Disabled);
+            }
 
-            // Register the default window created by tauri.conf.json with the
-            // CLI-derived initial arguments.
-            let wm_clone = window_manager.clone();
-            let initial_args_clone = initial_args.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut wm = wm_clone.lock().await;
-                wm.register_window("main".into(), initial_args_clone);
-            });
+            if let Some(session) = self_check_session.as_ref() {
+                // `--self-check` (要件#72): register the window first, then
+                // build it — hidden, with the recorder — and wire the report.
+                tauri::async_runtime::block_on(async {
+                    let mut wm = window_manager.lock().await;
+                    wm.register_window(
+                        self_check::SELF_CHECK_WINDOW_LABEL.into(),
+                        initial_args.clone(),
+                    );
+                });
+                let Some(config) = self_check_window.as_ref() else {
+                    self_check::not_runnable("tauri.conf.json describes no window");
+                };
+                if let Err(e) = self_check::build_window(app.handle(), config, &plan) {
+                    self_check::not_runnable(&format!(
+                        "cannot create the window for {}: {e}",
+                        session.file().display()
+                    ));
+                }
+                session.start(app.handle());
+            } else {
+                // Register the default window created by tauri.conf.json with the
+                // CLI-derived initial arguments. Files Finder's Open With handed
+                // over before this point (要件#68) go to it when it has nothing
+                // to show, and to new windows otherwise.
+                let opened = app.state::<PendingOpens>().take_at_setup();
+                let (initial_args_clone, to_new_windows) =
+                    window::open_with::plan_initial_open(initial_args.clone(), opened);
+                let wm_clone = window_manager.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut wm = wm_clone.lock().await;
+                    wm.register_window("main".into(), initial_args_clone);
+                });
+                open_in_new_windows(app.handle(), to_new_windows);
+            }
 
             // Hook into window creation events for tracking.
             let wm_for_events = app.state::<AppState>().window_manager.clone();
@@ -502,8 +633,59 @@ pub fn run_with_args(initial_args: WindowArgs) {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(context);
+
+    if is_self_check {
+        let mut app = match built {
+            Ok(app) => app,
+            Err(e) => self_check::not_runnable(&format!("cannot start the app: {e}")),
+        };
+        // No Dock icon and no focus taken (要件#72 契約3・(g)). The event loop
+        // activates the app as it finishes launching, which would pull the
+        // keyboard focus away from whatever the user is typing into — so the
+        // launch happens as Prohibited (cannot be activated, no Dock icon) and
+        // `setup` turns it into Accessory (no Dock icon) once that is past.
+        #[cfg(target_os = "macos")]
+        if !plan.dock_icon {
+            app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+        }
+        app.run(|_, _| {});
+    } else {
+        built
+            .expect("error while running tauri application")
+            .run(|app_handle, event| {
+                // Finder's Open With, a drop on the Dock icon, `open -a`
+                // (要件#68). Before `setup` the files are kept for the initial
+                // window; after it each one opens in a new window.
+                #[cfg(target_os = "macos")]
+                if let tauri::RunEvent::Opened { urls } = event {
+                    let uris = window::open_with::opened_file_uris(&urls);
+                    let to_open = app_handle.state::<PendingOpens>().receive(uris);
+                    open_in_new_windows(app_handle, to_open);
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = (app_handle, event);
+            });
+    }
+}
+
+/// Open each URI in a new window, in order, the way `vellis <path>` does
+/// against a running Vellis (要件#68 契約4・5): one task awaits the CLI's
+/// `OpenPath` for each, so the windows appear in the order the files came.
+fn open_in_new_windows(app: &tauri::AppHandle, uris: Vec<String>) {
+    if uris.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for uri in uris {
+            let request = ipc::protocol::Request::OpenPath {
+                uri,
+                new_window: true,
+            };
+            ipc::handler::dispatch_command(&app, request).await;
+        }
+    });
 }
 
 /// Resources kept alive for the lifetime of the application.

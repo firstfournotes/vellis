@@ -26,6 +26,7 @@
 		followWaveformWindow,
 		normalizeWheelDelta,
 		scrollWaveformWindow,
+		waveformLaneDrawWidth,
 		waveformMinWindowSeconds,
 		waveformWindowIndicator,
 		waveformWindowSeconds,
@@ -247,7 +248,8 @@
 	 *
 	 * 高さと倍率と窓は**この effect の本体で読んで引数で渡す**。`drawWaveform` の中で
 	 * モジュールスコープの値を読む形にすると Svelte の依存追跡から漏れ、変えても
-	 * canvas が古いまま残る。
+	 * canvas が古いまま残る。解析尺と横軸の尺(要件#47 追補b)も同じ理由でここで読む
+	 * ―― 等倍の山の割り付け幅がこの2つで決まる。
 	 */
 	$effect(() => {
 		const canvas = waveformCanvas;
@@ -257,11 +259,16 @@
 		const zoom = waveformZoom;
 		const start = waveformWindowStart;
 		const seconds = waveformSeconds;
+		const axisSeconds = barDuration;
 		if (!canvas || width <= 0) return;
 		// 解析中と縮退のときは消す ―― 前のファイルの波形が残ったまま「解析中」と
 		// 出ていたら、どちらの音を見ているのか判らない。
-		const lanes = result?.state === 'ready' ? windowLanes(result, zoom, start, seconds) : null;
-		drawWaveform(canvas, lanes, width, height);
+		const ready = result?.state === 'ready' ? result : null;
+		const lanes = ready ? windowLanes(ready, zoom, start, seconds) : null;
+		// 等倍のレーンは解析したバッファ全体(末尾の詰め物込み)を割ったものなので、
+		// 山だけを解析尺/横軸の尺で伸縮した幅に割り付けて時刻に合わせる(追補b)。
+		const laneWidth = waveformLaneDrawWidth(zoom, width, ready?.durationSeconds, axisSeconds);
+		drawWaveform(canvas, lanes, width, height, laneWidth);
 	});
 
 	// 保存値の復元と、ウインドウ高の変化への追従(契約⑪)。clamp をモジュールの
@@ -315,12 +322,16 @@
 	 *
 	 * 色はテーマ変数を CSS 側で canvas に載せ、その計算値を読む ―― canvas の中身は
 	 * テーマの切り替えに自動では追従しないので、描き直しのたびに現在の色を引き直す。
+	 *
+	 * `laneWidth` はレーンの山を割り付ける幅(要件#47 追補b)。canvas の実寸と境目の線は
+	 * 帯の幅 `width` のまま ―― はみ出した末尾は canvas の外で描かれない。
 	 */
 	function drawWaveform(
 		canvas: HTMLCanvasElement,
 		lanes: WaveformPeaks[] | null,
 		width: number,
 		height: number,
+		laneWidth: number,
 	): void {
 		const ratio = window.devicePixelRatio || 1;
 		canvas.width = Math.max(1, Math.round(width * ratio));
@@ -340,7 +351,7 @@
 		for (let i = 0; i < boxes.length; i++) {
 			const box = boxes[i];
 			ctx.fillStyle = waveColor;
-			for (const rect of peakRects(lanes[i], width, box.h)) {
+			for (const rect of peakRects(lanes[i], laneWidth, box.h)) {
 				// バケットが画素より細かいときでも隙間を作らない。無音(高さ0)も
 				// 中央線として 1px 残す ―― 「音が無い区間」も形の一部。
 				ctx.fillRect(rect.x, box.y + rect.y, Math.max(rect.w, 1), Math.max(rect.h, 1));

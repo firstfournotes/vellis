@@ -3,8 +3,14 @@
 //! Only the Main Process acquires the lock. CLI processes never touch it.
 
 use std::fs::{File, OpenOptions};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+
+/// How many times `try_acquire_opened` reopens the path when the locked file
+/// is no longer the one at the path (追補c 契約2). Past this, another holder
+/// is assumed.
+const MAX_REOPEN_ATTEMPTS: usize = 8;
 
 /// An exclusive file lock using `flock(2)`.
 ///
@@ -20,28 +26,72 @@ impl FileLock {
     /// Returns `Ok(Some(lock))` if the lock was acquired, `Ok(None)` if
     /// another process holds the lock, or `Err` on I/O failure.
     pub fn try_acquire(path: &Path) -> Result<Option<Self>, std::io::Error> {
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(path)?;
+        Self::try_acquire_opened(path, open_lock_file(path)?)
+    }
 
-        let fd = file.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-
-        if ret == -1 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                // Another process holds the lock.
+    /// Try to acquire the lock at `path` starting from an already opened
+    /// `file` (追補c 契約2).
+    ///
+    /// The lock counts only if the locked file is the one now at `path`
+    /// (same device and inode). A holder's `Drop` removes the file before
+    /// closing it, so `file` may refer to a removed file; then the lock on it
+    /// is released without touching `path` and `path` is reopened.
+    pub fn try_acquire_opened(path: &Path, file: File) -> Result<Option<Self>, std::io::Error> {
+        let mut file = file;
+        let mut reopened = 0;
+        loop {
+            if !flock_exclusive_nonblocking(&file)? {
+                // Another holder has the lock.
                 return Ok(None);
             }
-            return Err(err);
+            if is_file_at_path(&file, path)? {
+                return Ok(Some(FileLock {
+                    _file: file,
+                    path: path.to_path_buf(),
+                }));
+            }
+            // Locked a file that is no longer at the path. Close it (releasing
+            // the lock) without removing anything: the file at the path, if
+            // any, belongs to someone else.
+            drop(file);
+            if reopened == MAX_REOPEN_ATTEMPTS {
+                return Ok(None);
+            }
+            reopened += 1;
+            file = open_lock_file(path)?;
         }
+    }
+}
 
-        Ok(Some(FileLock {
-            _file: file,
-            path: path.to_path_buf(),
-        }))
+fn open_lock_file(path: &Path) -> Result<File, std::io::Error> {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+}
+
+/// `flock(LOCK_EX | LOCK_NB)`: `Ok(true)` if taken, `Ok(false)` if another
+/// holder has it.
+fn flock_exclusive_nonblocking(file: &File) -> Result<bool, std::io::Error> {
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == -1 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(true)
+}
+
+/// Whether `file` is the file now at `path` (same device and inode).
+fn is_file_at_path(file: &File, path: &Path) -> Result<bool, std::io::Error> {
+    let opened = file.metadata()?;
+    match std::fs::metadata(path) {
+        Ok(at_path) => Ok(opened.dev() == at_path.dev() && opened.ino() == at_path.ino()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 

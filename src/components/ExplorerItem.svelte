@@ -35,6 +35,17 @@
 	const active = $derived(entry.uri === selectedUri);
 	const caret = $derived(isDir ? (expanded ? '▾' : '▸') : '');
 	const icon = $derived(isDir ? '\u{1F4C1}' : '\u{1F4C4}');
+	/**
+	 * シンボリックリンクの行だけに付けるツールチップ(要件#70 契約5)。行の
+	 * `<button>` の `title` は URI のまま(Go to の行送りが URI で行を引く)なので、
+	 * アイコンと名前の span に付けて、その上ではこちらが勝つようにする。
+	 */
+	const linkTitle = $derived.by(() => {
+		const link = entry.link;
+		if (!link) return undefined;
+		const label = link.broken ? 'Broken symbolic link' : 'Symbolic link';
+		return `${entry.uri}\n${link.target === undefined ? label : `${label} \u2192 ${link.target}`}`;
+	});
 
 	/**
 	 * 子の読み込みと監視は「開いている」ことに紐付ける。クリックで開いたときも、
@@ -107,14 +118,16 @@
 	class="explorer-item"
 	class:active
 	class:is-dir={isDir}
+	class:is-link={entry.link !== undefined}
+	class:is-broken-link={entry.link?.broken === true}
 	style="padding-left: {8 + depth * 14}px"
 	onclick={handleClick}
 	oncontextmenu={handleContextMenu}
 	title={entry.uri}
 >
 	<span class="caret">{caret}</span>
-	<span class="icon">{icon}</span>
-	<span class="name">{entry.name}</span>
+	<span class="icon" title={linkTitle}>{icon}{#if entry.link}<svg class="link-badge" viewBox="0 0 10 10" aria-hidden="true"><rect class="link-badge-bg" x="0.5" y="0.5" width="9" height="9" rx="2" /><path d="M3 8V6a2.5 2.5 0 0 1 2.5-2.5H8M6 1.5l2 2-2 2" /></svg>{/if}</span>
+	<span class="name" title={linkTitle}>{entry.name}</span>
 </button>
 
 {#if isDir && expanded}
@@ -184,6 +197,42 @@
 
 	.is-dir .name {
 		font-weight: 500;
+	}
+
+	/* 要件#70: アイコンの左下に重ねる曲がった矢印(Finder のエイリアスと同じ置き方)。
+	   .icon の枠の中に置くので、行の overflow: hidden で切れない */
+	.is-link .icon {
+		position: relative;
+	}
+
+	.link-badge {
+		position: absolute;
+		left: 0;
+		bottom: 0;
+		width: 9px;
+		height: 9px;
+		color: var(--color-text-primary);
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.4;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.link-badge-bg {
+		fill: var(--color-bg-primary);
+		stroke-width: 0.8;
+	}
+
+	/* リンク切れは名前と矢印を薄くする(要件#70 契約6) */
+	.is-broken-link .name {
+		color: var(--color-text-muted);
+	}
+
+	/* 印は muted だと縁と行の背景の比が 3:1 を下回るので、一段濃い secondary で描く
+	   (要件#70 追補a。普通のリンクの印=primary よりは薄いまま) */
+	.is-broken-link .link-badge {
+		color: var(--color-text-secondary);
 	}
 
 	.tree-note {

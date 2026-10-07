@@ -94,6 +94,9 @@
 		// 要件#2: バイナリは表示対象外。エラーにはせず、開かないだけにする。
 		// 画像(要件#16)・動画(要件#28)はここを通る — どちらも binary ではない。
 		if (detectFileType(entry.uri) === 'binary') return;
+		// 要件#70 契約6: リンク切れは開けないので、修飾キーによらず何もしない
+		// (未保存確認も alert も出さず、表示中の文書と選択はそのまま)。
+		if (entry.link?.broken) return;
 		// 要件#62 契約3: Command + クリックは新しいタブ。Shift が一緒なら従来どおり
 		// 新しい窓(Shift の意味を変えない)。
 		if (e.metaKey && !e.shiftKey) {

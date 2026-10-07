@@ -38,13 +38,16 @@
 		savePaneWidth
 	} from '$lib/pane-resize';
 	import {
+		initWindowOrPicker,
 		loadHistory,
 		openFolderFailedMessage,
 		openHistoryEntry,
 		pickFolderAndSetRoot,
 		toPickerEntries,
+		versionAfterFailedInit,
 		type RootPickerEntry
 	} from '$lib/root-picker';
+	import { getBuildInfo } from '$lib/buildInfo';
 	import {
 		clearSnapshot,
 		loadSnapshot,
@@ -399,6 +402,9 @@
 	/** 直前の Go が「無い」で終わったか(契約⑥)。バーの表示欄がこれを映す。 */
 	let goToNotFound = $state(false);
 
+	/** 直前の Go がリンク切れに当たって止まったか(要件#70 追補b)。「無い」より優先して映す。 */
+	let goToBrokenLink = $state(false);
+
 	/** 入力欄の実体。⇧⌘G の再送でフォーカスを戻して全選択する(契約①)。 */
 	let goToInputEl = $state<HTMLInputElement | undefined>(undefined);
 
@@ -425,6 +431,7 @@
 			return;
 		}
 		goToNotFound = false;
+		goToBrokenLink = false;
 		goToOpen = true;
 		await tick();
 		focusGoToInput();
@@ -437,6 +444,7 @@
 		goToInputEl?.blur();
 		goToOpen = false;
 		goToNotFound = false;
+		goToBrokenLink = false;
 		goToComposing = false;
 	}
 
@@ -463,6 +471,7 @@
 	 */
 	async function runGoTo(raw: string) {
 		goToNotFound = false;
+		goToBrokenLink = false;
 		// 跳んだ先(ツリーの行へ運ぶ URI)と、新しい窓が開いたか。
 		let revealedUri: string | null = null;
 		let openedWindow = false;
@@ -492,6 +501,8 @@
 					revealedUri = uri;
 				},
 				notFound: () => (goToNotFound = true),
+				// リンク切れは open せずバーの表示欄で伝える(要件#70 追補b=生のエラー文の alert を出さない)。
+				brokenLink: () => (goToBrokenLink = true),
 				// 要件#48 契約④: この窓で別のファイルを開くと編集は消える(root 外の
 				// 新しい窓では聞かない=契約⑤'。判断は revealPath の側にある)。
 				confirmDiscard: confirmDiscardEdits,
@@ -600,13 +611,13 @@
 	});
 
 	// --- Print (要件#38) ----------------------------------------------------
-	// ⌘P の経路(HTML だけ印刷専用ウィンドウ・他は従来のメインフレーム印刷)と
-	// 印刷文書の組み立ては `$lib/print-html` の持ち場。ここは「いま何を表示して
-	// いるか」を答えるだけ(zoom・duplicate-window と同じ分担)。
+	// ⌘P の経路(HTML は印刷専用ウィンドウ・PDF はファイルそのもの=追補g・他は
+	// 従来のメインフレーム印刷)と印刷文書の組み立ては `$lib/print-html` の持ち場。
+	// ここは「いま何を表示しているか」を答えるだけ(zoom・duplicate-window と同じ分担)。
 	//
 	// 文書を開いていない(履歴選択画面・EmptyState)ときは `text` を返す —
-	// HTML 以外はどれも同じ従来経路なので、ここでの意味は「印刷窓には回さない」
-	// の一言に尽きる。`text` は file-type の未知拡張子のフォールバックでもある。
+	// ここでの意味は「印刷窓にも PDF の経路にも回さない」の一言に尽きる。
+	// `text` は file-type の未知拡張子のフォールバックでもある。
 	let printFileType: FileType = $derived(
 		windowState.currentDocument ? detectFileType(windowState.currentDocument.uri) : 'text'
 	);
@@ -638,6 +649,9 @@
 		void registerPrintListener({
 			getFileType: () => printFileType,
 			getHtmlSource: currentHtmlSource,
+			// PDF はファイルそのものを印刷する(要件#38 追補g)。canPrint が先に
+			// 「文書あり」を確かめるので、ここで空になるのは行き違いのときだけ。
+			getDocumentUri: () => windowState.currentDocument?.uri ?? '',
 			canPrint: () => isPrintAvailable(windowState.currentDocument, rootPicker.open),
 			onError: (err) => alert(printFailedMessage(err))
 		}).then((off) => {
@@ -927,8 +941,10 @@
 				// 後に入れる(applyRoot は切替時に現在の文書を落とすため)。
 				// スナップショット(要件#10)は windowState を見ている $effect が拾う。
 				applyRoot(opened.root);
-				// ラスタ画像も文書コマンドを通る(要件#22)ので、ファイルを選んだ
-				// ときは常に document が返る。
+				// ラスタ画像も文書コマンドを通る(要件#22)ので、ファイルを選んで
+				// 開けたときは document が返る。root は切り替わったのに文書が開け
+				// なかったときは null で届き、root だけを画面に移す(要件#71 追補b(2)。
+				// 続けて onError が呼ばれる)。
 				if (opened.document) windowState.setDocument(opened.document);
 			},
 			onError: (err) => {
@@ -1051,65 +1067,93 @@
 		void featureFlags.init();
 
 		// Single round-trip: get root_uri + entries + initial document URI.
-		// 起動時の初期値なので root 切替(windowState.applyRoot)ではない —
-		// 展開状態はまだ空で、捨てるものが無い。
-		const init = await invoke<InitWindowResponse>('init_window');
-		windowState.root = init.root_uri;
-		windowState.entries = init.entries;
-		windowState.version = init.version;
-		if (init.show_marks) showMarks = true;
-		if (init.show_changed) {
-			showMarks = true;
-			markFilter = 'drift';
-		}
+		// 要件#71 追補b(1)(backlog 278): root そのものを開けない(消えた・ssh に届かない)と
+		// init_window は失敗する。そのまま投げると onMount が止まって真っ白な窓になるので、
+		// 失敗は履歴選択画面の注記(`Could not open the folder: <理由>`)にして、下の購読の
+		// 登録と起動の完了まで進める。
+		const windowInit = await initWindowOrPicker({
+			initWindow: () => invoke<InitWindowResponse>('init_window')
+		});
+		// 要件#71 追補a(1): 最初の文書が開けなかったときの文言(alert は購読の登録のあとに出す)。
+		// コールバックの中で代入するので、型を null に絞らせない。
+		let startupOpenFailure = null as string | null;
 
-		// 要件#10: reload 前のスナップショットがあれば、起動時引数より優先して復元する
-		// (`$lib/reload-state`)。init_window は version などのために常に呼ぶので、
-		// 復元時は root の list が1回重複するだけ(docs/reload-state.md §4)。
-		const snapshot = loadSnapshot();
-		const restored = snapshot
-			? await restoreSnapshot<RootPayload, DocumentPayload>(snapshot)
-			: null;
-
-		if (snapshot && restored?.ok) {
-			// root と文書は restoreSnapshot が backend に反映済み。ここでは画面へ移すだけ。
-			windowState.applyRoot(restored.root.root_uri, restored.root.entries, false);
-			if (restored.document) windowState.setDocument(restored.document);
-			// 展開は applyRoot の後に渡す(applyRoot は root 切替として展開を捨てるため)。
-			// 各ディレクトリの子は ExplorerItem が list_dir で読み直す。
-			windowState.setExpandedDirs(snapshot.expandedDirs);
-		} else {
-			// スナップショットが無い・復元できなかった → 従来どおり起動時引数に従う。
-			// 復元に失敗したスナップショットは捨てる。復元先が消えている以上、
-			// 持ち回っても次の reload でまた同じ失敗をするだけ。
-			if (snapshot) clearSnapshot();
-
-			// If there is an initial document, open it (Main starts watch implicitly).
-			// ラスタ画像(要件#16 ⑦)だけは読まずに開く — CLI の `vellis photo.png` と
-			// ツリーの Shift+クリック(新しいウインドウ)もこの経路を通る。
-			// 要件#71 契約5: 開けなくても alert で知らせて先へ進む(下の購読の登録と
-			// 起動の完了まで行く=窓はツリーを見せたまま生きている)。
-			await openInitialDocument(init.initial_path, {
-				open: openForDisplay,
-				setDocument: (doc) => windowState.setDocument(doc),
-				onOpenFailed: (message) => alert(message)
-			});
-
-			// 要件#34: 複製で生まれた窓は、複製元の展開ディレクトリを引き継いで開く。
-			// root と初期文書の後に渡すのは reload の復元と同じ順序 — 各ディレクトリの
-			// 子は ExplorerItem が list_dir で読み直す。複製以外の経路では空。
-			if (init.expanded_dirs.length > 0) windowState.setExpandedDirs(init.expanded_dirs);
-		}
-
-		// No CLI path or root was provided — show the history picker (要件#4).
-		// Until something is chosen the cwd fallback root from init_window stays
-		// behind the screen. 復元できたときは出さない(要件#10)。
-		if (shouldShowRootPicker(init.needs_root_selection, snapshot, restored?.ok === true)) {
+		if (windowInit.kind === 'failed') {
+			// 履歴から開けなかったときと同じ注記で履歴選択画面を出す。選べば set_root で
+			// 本体へ移る(applyRoot が画面を閉じる)。
 			rootPicker = {
 				open: true,
 				entries: toPickerEntries(await loadHistory()),
-				error: null
+				error: windowInit.message
 			};
+			// 要件#71 追補c(1)(backlog 290): init_window の version が無いので、選び直したあとの
+			// 空の状態の画面の版番号は get_build_info から入れる(失敗しても '' =従来どおり)。
+			windowState.version = await versionAfterFailedInit(getBuildInfo);
+		} else {
+			// 起動時の初期値なので root 切替(windowState.applyRoot)ではない —
+			// 展開状態はまだ空で、捨てるものが無い。
+			const init = windowInit.init;
+			windowState.root = init.root_uri;
+			windowState.entries = init.entries;
+			windowState.version = init.version;
+			if (init.show_marks) showMarks = true;
+			if (init.show_changed) {
+				showMarks = true;
+				markFilter = 'drift';
+			}
+
+			// 要件#10: reload 前のスナップショットがあれば、起動時引数より優先して復元する
+			// (`$lib/reload-state`)。init_window は version などのために常に呼ぶので、
+			// 復元時は root の list が1回重複するだけ(docs/reload-state.md §4)。
+			const snapshot = loadSnapshot();
+			const restored = snapshot
+				? await restoreSnapshot<RootPayload, DocumentPayload>(snapshot)
+				: null;
+
+			if (snapshot && restored?.ok) {
+				// root と文書は restoreSnapshot が backend に反映済み。ここでは画面へ移すだけ。
+				windowState.applyRoot(restored.root.root_uri, restored.root.entries, false);
+				if (restored.document) windowState.setDocument(restored.document);
+				// 展開は applyRoot の後に渡す(applyRoot は root 切替として展開を捨てるため)。
+				// 各ディレクトリの子は ExplorerItem が list_dir で読み直す。
+				windowState.setExpandedDirs(snapshot.expandedDirs);
+			} else {
+				// スナップショットが無い・復元できなかった → 従来どおり起動時引数に従う。
+				// 復元に失敗したスナップショットは捨てる。復元先が消えている以上、
+				// 持ち回っても次の reload でまた同じ失敗をするだけ。
+				if (snapshot) clearSnapshot();
+
+				// If there is an initial document, open it (Main starts watch implicitly).
+				// ラスタ画像(要件#16 ⑦)だけは読まずに開く — CLI の `vellis photo.png` と
+				// ツリーの Shift+クリック(新しいウインドウ)もこの経路を通る。
+				// 要件#71 契約5: 開けなくても先へ進む(下の購読の登録と起動の完了まで行く=
+				// 窓はツリーを見せたまま生きている)。追補a(1): alert は閉じるまで JS を止めるので
+				// ここでは文言を控えるだけにし、購読をすべて登録したあと(onMount の末尾)で出す
+				// — 先に出すと、その間に届いたフォルダの変更を購読が無くて取りこぼす。
+				await openInitialDocument(init.initial_path, {
+					open: openForDisplay,
+					setDocument: (doc) => windowState.setDocument(doc),
+					onOpenFailed: (message) => {
+						startupOpenFailure = message;
+					}
+				});
+
+				// 要件#34: 複製で生まれた窓は、複製元の展開ディレクトリを引き継いで開く。
+				// root と初期文書の後に渡すのは reload の復元と同じ順序 — 各ディレクトリの
+				// 子は ExplorerItem が list_dir で読み直す。複製以外の経路では空。
+				if (init.expanded_dirs.length > 0) windowState.setExpandedDirs(init.expanded_dirs);
+			}
+
+			// No CLI path or root was provided — show the history picker (要件#4).
+			// Until something is chosen the cwd fallback root from init_window stays
+			// behind the screen. 復元できたときは出さない(要件#10)。
+			if (shouldShowRootPicker(init.needs_root_selection, snapshot, restored?.ok === true)) {
+				rootPicker = {
+					open: true,
+					entries: toPickerEntries(await loadHistory()),
+					error: null
+				};
+			}
 		}
 
 		// ここから先の状態変更をスナップショットに残す。
@@ -1177,6 +1221,10 @@
 		await listen<UpdateAvailablePayload>('update_available', (e) => {
 			updateBanner = e.payload;
 		});
+
+		// 要件#71 追補a(1)(backlog 276): 起動時に開けなかったことは、購読をすべて登録して
+		// 起動の完了を立てたあとに知らせる(文言は契約5 の `Could not open the file: …`)。
+		if (startupOpenFailure !== null) alert(startupOpenFailure);
 	});
 
 	// Build the viewer body whenever the active document changes.
@@ -1383,6 +1431,7 @@
 						onGo={(input) => void runGoTo(input)}
 						onClose={closeGoTo}
 						notFound={goToNotFound}
+						brokenLink={goToBrokenLink}
 						bind:inputEl={goToInputEl}
 						onComposingChange={(composing) => (goToComposing = composing)}
 					/>

@@ -11,7 +11,12 @@
  */
 
 /** `stores/window-state.svelte` の `Entry` と同形(モジュール単体で試せるよう再定義)。 */
-export type TreeEntry = { uri: string; name: string; kind: 'file' | 'dir' | 'symlink' };
+export type TreeEntry = {
+	uri: string;
+	name: string;
+	kind: 'file' | 'dir' | 'symlink';
+	link?: { target?: string; broken: boolean };
+};
 
 /**
  * 画面が映すツリーの正規化ビュー。`rootEntries` は root 直下
