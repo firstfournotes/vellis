@@ -18,25 +18,50 @@
 //! sample table are understood — `moov` → `trak` → `mdia` → (`mdhd`, `hdlr`,
 //! `minf` → `stbl` → …) — and everything else is stepped over by its declared
 //! size, so sibling order and QuickTime's dialects do not matter. Nothing here
-//! panics or fails loudly: a movie that cannot be read answers `None`, and the
-//! waveform band degrades to a sentence while playback continues
-//! (契約⑤ fail-open).
+//! panics or fails loudly: a movie that cannot be read answers with an
+//! `ExtractionRefusal` (or `None` from the `Option` entry), and the waveform
+//! band degrades to a sentence while playback continues (契約⑤ fail-open).
 //!
 //! No new crates (契約③): the parser, the re-wrapper and the WAV header are all
 //! a few hundred lines of byte pushing.
 
-/// Largest number of audio samples one plan may describe.
+/// Largest number of per-sample byte ranges one plan may describe.
 ///
 /// The sample count comes out of the file, so a corrupt `stsz` can claim four
 /// billion samples; one `SampleRange` per sample is materialised, so an absurd
 /// table has to be refused rather than allocated for. Compressed audio never
-/// comes close (AAC is ~47 frames a second, so an hour is under 200k), but
-/// uncompressed PCM has one sample *per frame* — 44.1 kHz runs through this cap
-/// in about six minutes, and a longer PCM movie degrades to "no audio" rather
-/// than eating a gigabyte of ranges. That trade is deliberate: PCM in a movie
-/// is rare, and the alternative is an unbounded allocation driven by file
-/// contents.
-const MAX_SAMPLES: usize = 16_000_000;
+/// comes close (AAC is ~47 frames a second, so an hour is under 200k).
+///
+/// 追補i: the cap only bites on tables that carry a size *per sample*. A uniform
+/// `stsz` (`sample_size != 0`) past it — uncompressed PCM has one sample *per
+/// frame*, so 44.1 kHz gets there in about six minutes — is planned one range
+/// per chunk instead, which the cap never sees. Past the cap a per-sample table
+/// is refused as too large, not as "no audio".
+pub const MAX_SAMPLES: usize = 16_000_000;
+
+/// Largest number of separate reads one extraction may issue — in practice, the
+/// number of chunks (`stco` / `co64` entries) of the track.
+///
+/// Samples are read per contiguous run, and the samples of one chunk are
+/// contiguous, so a real movie needs a few hundred to a few thousand reads. A
+/// file that puts every single sample in a chunk of its own would turn into one
+/// read per sample, and at that point the extraction is not worth the seeks
+/// (追補i: refused as too large; `commands::waveform` reads with this same
+/// bound).
+pub const MAX_READ_RUNS: usize = 200_000;
+
+/// Why no extraction plan could be made (追補i 契約2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractionRefusal {
+    /// No audio track, or a sample table that is missing, broken or does not
+    /// add up — nothing that can be pointed at.
+    NoAudio,
+    /// There is an audio track, but describing it would exceed a cap: a
+    /// per-sample `stsz` past `MAX_SAMPLES`, more chunks than `MAX_READ_RUNS`,
+    /// or an AAC / ALAC track whose uniform `stsz` is past `MAX_SAMPLES` (the
+    /// `m4a` re-wrap needs the sample table, so it cannot be folded per chunk).
+    TooLarge,
+}
 
 /// `formatSpecificFlags` bits of a QuickTime `lpcm` sound description
 /// (CoreAudio's `AudioStreamBasicDescription` flags).
@@ -45,7 +70,8 @@ const LPCM_FLAG_BIG_ENDIAN: u32 = 0x2;
 const LPCM_FLAG_NON_INTERLEAVED: u32 = 0x20;
 
 /// One sample of the audio track — a compressed frame (AAC/ALAC) or a block of
-/// PCM — as a byte range from the start of the file.
+/// PCM — as a byte range from the start of the file. (追補i: for a uniform PCM
+/// table past `MAX_SAMPLES`, one range covers a whole chunk instead.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampleRange {
     pub offset: u64,
@@ -188,34 +214,55 @@ fn read_u64(data: &[u8], at: usize) -> Option<u64> {
 /// `stco` / `co64` are written that way.
 ///
 /// `None` covers everything that makes the extraction impossible — no `moov`,
-/// no audio track, a missing or self-contradictory sample table. A track whose
-/// *codec* cannot be used is not one of those: it comes back with
-/// `codec: Unsupported`, because "there is audio here that I cannot read" and
-/// "there is no audio" are different sentences for the band to print (契約⑤).
+/// no audio track, a missing or self-contradictory sample table, a table past a
+/// cap. A track whose *codec* cannot be used is not one of those: it comes back
+/// with `codec: Unsupported`, because "there is audio here that I cannot read"
+/// and "there is no audio" are different sentences for the band to print
+/// (契約⑤).
+///
+/// This is `plan_audio_extraction` without the reason; the command uses that
+/// one, so that a table past a cap reads as too large rather than as no audio.
 pub fn parse_audio_extraction(bytes: &[u8]) -> Option<AudioExtractionPlan> {
+    plan_audio_extraction(bytes).ok()
+}
+
+/// Plan the extraction of the first audio track, or say why it cannot be done
+/// (追補i 契約2).
+///
+/// The plan is the one `parse_audio_extraction` returns. The refusal is
+/// `TooLarge` when an audio track was found but its tables are past a cap
+/// (`MAX_SAMPLES` for per-sample sizes, `MAX_READ_RUNS` for chunks), and
+/// `NoAudio` for everything else that leaves nothing to extract.
+pub fn plan_audio_extraction(bytes: &[u8]) -> Result<AudioExtractionPlan, ExtractionRefusal> {
     let mut pos = 0;
     while let Some(b) = next_box(bytes, &mut pos) {
         if b.kind == b"moov" {
             return parse_moov(b.payload);
         }
     }
-    None
+    Err(ExtractionRefusal::NoAudio)
 }
 
-fn parse_moov(moov: &[u8]) -> Option<AudioExtractionPlan> {
+fn parse_moov(moov: &[u8]) -> Result<AudioExtractionPlan, ExtractionRefusal> {
+    // A track that is refused does not end the search — a later one may still
+    // be usable — but a too-large audio track is remembered, so that a movie
+    // whose only audio is past a cap does not read as having none.
+    let mut refusal = ExtractionRefusal::NoAudio;
     let mut pos = 0;
     while let Some(b) = next_box(moov, &mut pos) {
         if b.kind == b"trak" {
-            if let Some(plan) = parse_trak(b.payload) {
-                return Some(plan);
+            match parse_trak(b.payload) {
+                Ok(plan) => return Ok(plan),
+                Err(ExtractionRefusal::TooLarge) => refusal = ExtractionRefusal::TooLarge,
+                Err(ExtractionRefusal::NoAudio) => {}
             }
         }
     }
-    None
+    Err(refusal)
 }
 
-fn parse_trak(trak: &[u8]) -> Option<AudioExtractionPlan> {
-    let mut plan = None;
+fn parse_trak(trak: &[u8]) -> Result<AudioExtractionPlan, ExtractionRefusal> {
+    let mut plan = Err(ExtractionRefusal::NoAudio);
     let mut edit_start = 0;
 
     let mut pos = 0;
@@ -230,7 +277,7 @@ fn parse_trak(trak: &[u8]) -> Option<AudioExtractionPlan> {
 
     let mut plan = plan?;
     plan.edit_start = edit_start;
-    Some(plan)
+    Ok(plan)
 }
 
 /// Where the first real edit starts in media time, from `edts` → `elst`.
@@ -267,29 +314,34 @@ fn edit_list_start(edts: &[u8]) -> Option<u64> {
 
 /// The facts a track has to supply, collected in one pass so that the order the
 /// writer chose for them does not matter.
-fn parse_mdia(mdia: &[u8]) -> Option<AudioExtractionPlan> {
+///
+/// The sample table is read only once the handler says the track is audio, so
+/// a video track's tables can neither cost a parse nor refuse the movie as too
+/// large.
+fn parse_mdia(mdia: &[u8]) -> Result<AudioExtractionPlan, ExtractionRefusal> {
     let mut timescale = None;
     let mut is_audio = false;
-    let mut tables = None;
+    let mut minf = None;
 
     let mut pos = 0;
     while let Some(b) = next_box(mdia, &mut pos) {
         match b.kind {
             b"mdhd" => timescale = mdhd_timescale(b.payload),
             b"hdlr" => is_audio = handler_type(b.payload) == Some(*b"soun"),
-            b"minf" => tables = sample_tables(b.payload),
+            b"minf" => minf = Some(b.payload),
             _ => {}
         }
     }
 
     if !is_audio {
-        return None;
+        return Err(ExtractionRefusal::NoAudio);
     }
-    let tables = tables?;
-    let ranges = build_ranges(&tables)?;
+    let tables = sample_tables(minf.ok_or(ExtractionRefusal::NoAudio)?)?;
+    let codec = classify_stsd(&tables.stsd);
+    let ranges = build_ranges(&tables, &codec)?;
 
-    Some(AudioExtractionPlan {
-        codec: classify_stsd(&tables.stsd),
+    Ok(AudioExtractionPlan {
+        codec,
         ranges,
         // A missing `mdhd` is not fatal on its own: WAV wrapping never needs the
         // timescale, and the `m4a` route refuses a zero one anyway.
@@ -323,33 +375,61 @@ struct SampleTables {
     stts: Vec<(u32, u32)>,
     /// `(first_chunk, samples_per_chunk)` runs.
     stsc: Vec<(u32, u32)>,
-    /// One entry per sample (the uniform form is expanded here).
-    sizes: Vec<u32>,
+    /// The `stsz` sizes, uniform or per sample.
+    sizes: SampleSizes,
     /// Chunk offsets from `stco` (32-bit) or `co64` (64-bit).
     offsets: Vec<u64>,
 }
 
+/// The two shapes of `stsz`. The uniform one is kept as it is written — a size
+/// and a count — rather than expanded, so a long PCM track costs nothing until
+/// the ranges are built (追補i).
+enum SampleSizes {
+    /// `sample_size != 0`: every one of `count` samples is `size` bytes.
+    Uniform { size: u32, count: usize },
+    /// `sample_size == 0`: one size per sample.
+    PerSample(Vec<u32>),
+}
+
+impl SampleSizes {
+    fn count(&self) -> usize {
+        match self {
+            SampleSizes::Uniform { count, .. } => *count,
+            SampleSizes::PerSample(sizes) => sizes.len(),
+        }
+    }
+
+    /// Size of sample `index` (`index < count()`).
+    fn size_of(&self, index: usize) -> u32 {
+        match self {
+            SampleSizes::Uniform { size, .. } => *size,
+            SampleSizes::PerSample(sizes) => sizes[index],
+        }
+    }
+}
+
 /// `minf` → `stbl` → the sample table.
 ///
-/// `None` when a box the extraction depends on is missing: without the sample
-/// sizes or the chunk offsets there is nothing to point at, and without the
-/// `stsd` the codec is unknown.
-fn sample_tables(minf: &[u8]) -> Option<SampleTables> {
+/// `NoAudio` when a box the extraction depends on is missing: without the
+/// sample sizes or the chunk offsets there is nothing to point at, and without
+/// the `stsd` the codec is unknown. `TooLarge` when the sizes or the chunks are
+/// past their cap (`parse_stsz`, `cap_chunks`).
+fn sample_tables(minf: &[u8]) -> Result<SampleTables, ExtractionRefusal> {
     let mut pos = 0;
     while let Some(b) = next_box(minf, &mut pos) {
         if b.kind == b"stbl" {
             return parse_stbl(b.payload);
         }
     }
-    None
+    Err(ExtractionRefusal::NoAudio)
 }
 
-fn parse_stbl(stbl: &[u8]) -> Option<SampleTables> {
+fn parse_stbl(stbl: &[u8]) -> Result<SampleTables, ExtractionRefusal> {
     let mut stsd = None;
     let mut stts = Vec::new();
     let mut stsc = None;
-    let mut sizes = None;
-    let mut offsets = None;
+    let mut sizes = Err(ExtractionRefusal::NoAudio);
+    let mut offsets = Err(ExtractionRefusal::NoAudio);
 
     let mut pos = 0;
     while let Some(b) = next_box(stbl, &mut pos) {
@@ -364,10 +444,10 @@ fn parse_stbl(stbl: &[u8]) -> Option<SampleTables> {
         }
     }
 
-    Some(SampleTables {
-        stsd: stsd?,
+    Ok(SampleTables {
+        stsd: stsd.ok_or(ExtractionRefusal::NoAudio)?,
         stts,
-        stsc: stsc?,
+        stsc: stsc.ok_or(ExtractionRefusal::NoAudio)?,
         sizes: sizes?,
         offsets: offsets?,
     })
@@ -403,53 +483,111 @@ fn parse_stsc(payload: &[u8]) -> Option<Vec<(u32, u32)>> {
 }
 
 /// `stsz` — either one size for every sample, or a size per sample.
-fn parse_stsz(payload: &[u8]) -> Option<Vec<u32>> {
-    let uniform = read_u32(payload, 4)?;
-    let count = read_u32(payload, 8)? as usize;
-    if count == 0 || count > MAX_SAMPLES {
-        return None;
+///
+/// The uniform form is kept unexpanded whatever its count (`build_ranges`
+/// decides what to do with a long one). A per-sample table past `MAX_SAMPLES`
+/// is refused as too large on its declared count, before a single entry is
+/// read — the declared count is file-controlled, and this is the allocation
+/// guard.
+fn parse_stsz(payload: &[u8]) -> Result<SampleSizes, ExtractionRefusal> {
+    let uniform = read_u32(payload, 4).ok_or(ExtractionRefusal::NoAudio)?;
+    let count = read_u32(payload, 8).ok_or(ExtractionRefusal::NoAudio)? as usize;
+    if count == 0 {
+        return Err(ExtractionRefusal::NoAudio);
     }
 
     if uniform != 0 {
-        return Some(vec![uniform; count]);
+        return Ok(SampleSizes::Uniform {
+            size: uniform,
+            count,
+        });
+    }
+    if count > MAX_SAMPLES {
+        return Err(ExtractionRefusal::TooLarge);
     }
     let mut sizes = Vec::new();
     for i in 0..count {
-        sizes.push(read_u32(payload, 12 + i * 4)?);
+        sizes.push(read_u32(payload, 12 + i * 4).ok_or(ExtractionRefusal::NoAudio)?);
     }
-    Some(sizes)
+    Ok(SampleSizes::PerSample(sizes))
 }
 
-fn parse_stco(payload: &[u8]) -> Option<Vec<u64>> {
-    let declared = read_u32(payload, 4)? as usize;
+fn parse_stco(payload: &[u8]) -> Result<Vec<u64>, ExtractionRefusal> {
+    let declared = read_u32(payload, 4).ok_or(ExtractionRefusal::NoAudio)? as usize;
     let mut offsets = Vec::new();
     for i in 0..declared {
-        offsets.push(u64::from(read_u32(payload, 8 + i * 4)?));
+        offsets.push(u64::from(
+            read_u32(payload, 8 + i * 4).ok_or(ExtractionRefusal::NoAudio)?,
+        ));
     }
-    Some(offsets)
+    cap_chunks(offsets)
 }
 
-fn parse_co64(payload: &[u8]) -> Option<Vec<u64>> {
-    let declared = read_u32(payload, 4)? as usize;
+fn parse_co64(payload: &[u8]) -> Result<Vec<u64>, ExtractionRefusal> {
+    let declared = read_u32(payload, 4).ok_or(ExtractionRefusal::NoAudio)? as usize;
     let mut offsets = Vec::new();
     for i in 0..declared {
-        offsets.push(read_u64(payload, 8 + i * 8)?);
+        offsets.push(read_u64(payload, 8 + i * 8).ok_or(ExtractionRefusal::NoAudio)?);
     }
-    Some(offsets)
+    cap_chunks(offsets)
 }
 
-/// Sample sizes × chunk layout → one byte range per sample.
+/// Refuse a chunk table with more entries than `MAX_READ_RUNS` as too large
+/// (追補i 契約2) — the reads split at chunk boundaries, so the chunk count is
+/// what the read bound is applied to.
+///
+/// The count is checked on the entries actually read, so a table that declares
+/// more than it carries is still a broken one (`NoAudio`, 契約3).
+fn cap_chunks(offsets: Vec<u64>) -> Result<Vec<u64>, ExtractionRefusal> {
+    if offsets.len() > MAX_READ_RUNS {
+        return Err(ExtractionRefusal::TooLarge);
+    }
+    Ok(offsets)
+}
+
+/// Sample sizes × chunk layout → byte ranges in file order.
+///
+/// Normally one range per sample. 追補i: a uniform `stsz` past `MAX_SAMPLES` is
+/// planned one range per chunk instead (`chunk_ranges`) — but only when the
+/// samples are going to be read as plain bytes. AAC and ALAC are re-wrapped
+/// into an `m4a` that carries the sample table, so for them a table that long
+/// is too large.
+fn build_ranges(
+    tables: &SampleTables,
+    codec: &AudioCodec,
+) -> Result<Vec<SampleRange>, ExtractionRefusal> {
+    match tables.sizes {
+        SampleSizes::Uniform { size, count } if count > MAX_SAMPLES => {
+            if matches!(codec, AudioCodec::Aac | AudioCodec::Alac) {
+                return Err(ExtractionRefusal::TooLarge);
+            }
+            chunk_ranges(tables, size, count)
+        }
+        _ => sample_ranges(tables),
+    }
+}
+
+/// How many samples chunk `index` (0-based) holds, from `stsc`.
 ///
 /// `stsc` is run-length over *chunks*: an entry applies from its `first_chunk`
 /// until the next entry starts, and the last entry applies to every remaining
-/// chunk. Within a chunk the samples are contiguous, so the offsets accumulate
-/// from the chunk offset.
+/// chunk. `None` for a chunk in front of the first entry.
+fn samples_in_chunk(stsc: &[(u32, u32)], index: usize) -> Option<u32> {
+    let chunk_no = u32::try_from(index).ok()?.checked_add(1)?;
+    stsc.iter()
+        .take_while(|(first, _)| *first <= chunk_no)
+        .last()
+        .map(|(_, per)| *per)
+}
+
+/// One byte range per sample. Within a chunk the samples are contiguous, so the
+/// offsets accumulate from the chunk offset.
 ///
-/// `None` when the tables contradict each other — most often too few chunks for
-/// the samples the `stsz` promises, which means the file is not laid out the way
-/// it says it is and no byte range can be trusted.
-fn build_ranges(tables: &SampleTables) -> Option<Vec<SampleRange>> {
-    let total = tables.sizes.len();
+/// `NoAudio` when the tables contradict each other — most often too few chunks
+/// for the samples the `stsz` promises, which means the file is not laid out
+/// the way it says it is and no byte range can be trusted.
+fn sample_ranges(tables: &SampleTables) -> Result<Vec<SampleRange>, ExtractionRefusal> {
+    let total = tables.sizes.count();
     let mut ranges = Vec::with_capacity(total);
     let mut sample = 0usize;
 
@@ -457,30 +595,71 @@ fn build_ranges(tables: &SampleTables) -> Option<Vec<SampleRange>> {
         if sample >= total {
             break;
         }
-        let chunk_no = u32::try_from(index).ok()?.checked_add(1)?;
-        let per_chunk = tables
-            .stsc
-            .iter()
-            .take_while(|(first, _)| *first <= chunk_no)
-            .last()
-            .map(|(_, per)| *per)?;
+        let per_chunk = samples_in_chunk(&tables.stsc, index).ok_or(ExtractionRefusal::NoAudio)?;
 
         let mut at = chunk_offset;
         for _ in 0..per_chunk {
             if sample >= total {
                 break;
             }
-            let size = tables.sizes[sample];
+            let size = tables.sizes.size_of(sample);
             ranges.push(SampleRange { offset: at, size });
-            at = at.checked_add(u64::from(size))?;
+            at = at
+                .checked_add(u64::from(size))
+                .ok_or(ExtractionRefusal::NoAudio)?;
             sample += 1;
         }
     }
 
     if sample != total {
-        return None;
+        return Err(ExtractionRefusal::NoAudio);
     }
-    Some(ranges)
+    Ok(ranges)
+}
+
+/// One byte range per chunk for a uniform table (追補i 契約1): the chunk's
+/// offset, and its sample count × the uniform size — the last chunk holding
+/// whatever samples remain. The bytes covered are exactly those of
+/// `sample_ranges`, merged; the number of ranges is bounded by the chunk cap
+/// rather than by the sample count.
+///
+/// `NoAudio` for the same contradictions as `sample_ranges`; `TooLarge` for a
+/// chunk whose bytes do not fit one range.
+fn chunk_ranges(
+    tables: &SampleTables,
+    size: u32,
+    total: usize,
+) -> Result<Vec<SampleRange>, ExtractionRefusal> {
+    let mut ranges = Vec::new();
+    let mut remaining = total;
+
+    for (index, &chunk_offset) in tables.offsets.iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        let per_chunk = samples_in_chunk(&tables.stsc, index).ok_or(ExtractionRefusal::NoAudio)?;
+        let samples = remaining.min(per_chunk as usize);
+        if samples == 0 {
+            continue;
+        }
+
+        // `samples` and `size` are both 32-bit, so the product fits in 64.
+        let bytes = u32::try_from(samples as u64 * u64::from(size))
+            .map_err(|_| ExtractionRefusal::TooLarge)?;
+        chunk_offset
+            .checked_add(u64::from(bytes))
+            .ok_or(ExtractionRefusal::NoAudio)?;
+        ranges.push(SampleRange {
+            offset: chunk_offset,
+            size: bytes,
+        });
+        remaining -= samples;
+    }
+
+    if remaining != 0 {
+        return Err(ExtractionRefusal::NoAudio);
+    }
+    Ok(ranges)
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@
 		uri,
 		src,
 		source = '',
+		onDisplayed,
 	}: {
 		/** 表示中のファイルの絶対 URI(file: / ssh:)。SVG 判定と表示名に使う。 */
 		uri: string;
@@ -20,6 +21,11 @@
 		src: string;
 		/** SVG のソース。ラスタ画像では空文字(読んでいないため)。 */
 		source?: string;
+		/**
+		 * 画像を表示できた(`<img>` の `load`)ときに呼ぶ(要件#64 追補f 契約3)。読み込みに
+		 * 失敗したプレースホルダでは呼ばない。1 回開くごとに 1 回へ絞るのはページの側。
+		 */
+		onDisplayed?: () => void;
 	} = $props();
 
 	let sizeMode = $state<ImageSizeMode>(DEFAULT_SIZE_MODE);
@@ -105,6 +111,7 @@
 					class:actual={sizeMode === 'actual'}
 					{src}
 					alt={fileName}
+					onload={() => onDisplayed?.()}
 					onerror={() => (loadFailed = true)}
 				/>
 			{/key}

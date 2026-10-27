@@ -154,6 +154,24 @@
 		color: inherit;
 		text-decoration: none;
 	}
+
+	/* Edit-mode marks stay off the paper (req #38 addendum l / Issue #617).
+	   The paper still carries what the screen shows while editing (the
+	   source while source-editing, the block's current content while
+	   block-editing = req #48 contract ②); only the marks go: the source
+	   editor's blue bar (box-shadow, req #48) and the edited block's frame
+	   (outline, req #49). The selectors match the ones Viewer.svelte marks;
+	   its rules are Svelte-scoped (specificity (0,3,0)), hence !important.
+	   Elements that are not being edited are left alone, so a document's
+	   own outline / box-shadow still prints. */
+	.vellis-plaintext[contenteditable='true'] {
+		box-shadow: none !important;
+		outline: none !important;
+	}
+
+	.markdown-body [contenteditable='true'] {
+		outline: none !important;
+	}
 }
 
 @page {

@@ -1207,7 +1207,7 @@ describe('analyzeWaveform — extract 経路(mov)の統合と縮退(要件#41 �
 // 「音声波形をファイルサイズに関わらず表示する」(2026-09-02 由谷指示・backlog #97
 // の昇格)。13分・高ビットレートの mp4 が too-large 縮退する現象の解消。
 //
-// ## 契約(requirements.md 49行目=#45 が正本)
+// ## 契約(requirements.md #45 が正本)
 // ① mp4 も Rust 抽出経路(extract_waveform_audio)へ寄せ、動画全量 fetch を廃止。
 //    WAVEFORM_MAX_SOURCE_BYTES=256MiB の判定は**抽出後の音声バイトのみ**に適用
 //    (要件#41 契約③(a) の fetch 経路と契約④の content-length 事前判定は
@@ -1571,7 +1571,7 @@ describe('waveformBandNote — 解析中状態の出し分け(要件#45 契約�
 //  表示する」のうち、本ファイルが受け持つのは**経路の3枝化(契約⑤)と fetch 上限の
 //  分離(契約⑬(b))**。
 //
-// ## 契約(requirements.md 54行目=#50 が正本)
+// ## 契約(requirements.md #50 が正本)
 // ⑤ `waveformPlan` の経路は3枝になる:
 //    (a) mov / mp4(ISO BMFF)→ 既存 `extract`(判定も定数も完全に不変)
 //    (b) **wav → 新設 `wav` 経路**(実体=契約⑯の Rust コマンド。**サイズ・尺に依らず

@@ -15,6 +15,11 @@
 //!
 //! A pattern that matches a folder covers everything below it
 //! ([`path_or_ancestor_matches`]).
+//!
+//! Trailing `/`s are dropped before matching (追補c): `docs/` is `docs`, and
+//! `**/build/` is `**/build`. Unlike `.gitignore`, the slash does not narrow the
+//! pattern to folders — matching looks at the path alone, never at the kind, so
+//! a file called `docs` is excluded too.
 
 use crate::fs::entry::Entry;
 use crate::fs::uri::Uri;
@@ -27,7 +32,10 @@ pub const BUILTIN_TMP_SUFFIX: &str = ".vellis-tmp";
 
 /// Whether `pattern` matches the whole of `rel_path` (see the module docs).
 pub fn glob_match(pattern: &str, rel_path: &str) -> bool {
-    let pattern: Vec<&str> = pattern.split('/').collect();
+    // A trailing `/` would split into an empty last segment that no name
+    // matches, so `docs/` matched nothing at all (Issue #585). A pattern of
+    // slashes only becomes the empty glob, which no entry's path matches.
+    let pattern: Vec<&str> = pattern.trim_end_matches('/').split('/').collect();
     let path: Vec<&str> = rel_path.split('/').collect();
     match_segments(&pattern, &path)
 }

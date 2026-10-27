@@ -19,6 +19,7 @@
 	let {
 		uri,
 		src,
+		onDisplayed,
 	}: {
 		/** 表示中のファイルの絶対 URI(file: / ssh:)。パースの形式判定と表示名に使う。 */
 		uri: string;
@@ -27,6 +28,12 @@
 		 * 変更のたび版数が付く)。この文字列が変わったら読み直す。
 		 */
 		src: string;
+		/**
+		 * モデルを表示できた(読み込みが `ready` になった)ときに呼ぶ(要件#64 追補f 契約3)。
+		 * 大きすぎの断り・解析の失敗・最新でない世代の結果では呼ばない。1 回開くごとに
+		 * 1 回へ絞るのはページの側。
+		 */
+		onDisplayed?: () => void;
 	} = $props();
 
 	/**
@@ -36,6 +43,52 @@
 	 * 数十秒無反応になるより良い(判断は実装側 = docs/3d-model-viewing.md §3 のリスク項)。
 	 */
 	const MAX_BYTES = 256 * 1024 * 1024;
+
+	/**
+	 * 上限超えのエラー(文言は総量の問い合わせ・`arrayBuffer()` の前の先読み・後の判定で共通)。
+	 * MB は切り上げる(追補e)— 四捨五入だと上限を少し超えただけのファイルが
+	 * 「256MB; limit 256MB」と出て、上限と同じなのに断られたように読めるため。
+	 */
+	function tooLargeError(bytes: number): Error {
+		const mb = Math.ceil(bytes / (1024 * 1024));
+		return new Error(`The file is too large (${mb}MB; limit 256MB)`);
+	}
+
+	/**
+	 * 応答の `Content-Length`(要件#23 追補c)。無い・数でないときは null
+	 * (`headers` 自体が無い応答も無いのと同じに扱う)。
+	 */
+	function declaredLength(response: Response): number | null {
+		const header = response.headers?.get('content-length');
+		if (header == null) return null;
+		const bytes = Number(header);
+		return Number.isFinite(bytes) ? bytes : null;
+	}
+
+	/**
+	 * 本文を取る前に総量を問い合わせる(要件#23 追補d)。`vellis-asset` は Range の無い要求だと
+	 * Rust 側がファイルを丸ごと読むので、`Content-Length` の先読み(追補c)では手遅れになる。
+	 * `Range: bytes=0-0` なら Rust 側は 1 バイトだけ読み、206 の `Content-Range`
+	 * (`bytes 0-0/<total>`)に総量を載せて返す。
+	 *
+	 * 総量が分からないとき(206 でない・`Content-Range` が無い・総量が `*`・問い合わせの失敗)は
+	 * null = 呼び出し側は今までどおり本文を取る。206 の `Content-Length` は 1 なので総量には使わない。
+	 * 応答の本文は読まずに捨てる(Range を無視した 200 なら全本文そのもの= 避けたかった複製)。
+	 */
+	async function probeTotalBytes(assetSrc: string): Promise<number | null> {
+		let response: Response;
+		try {
+			response = await fetch(assetSrc, { headers: { Range: 'bytes=0-0' } });
+		} catch {
+			return null;
+		}
+		response.body?.cancel().catch(() => undefined);
+		if (response.status !== 206) return null;
+		const match = /^bytes \d+-\d+\/(\d+)$/.exec(response.headers?.get('content-range')?.trim() ?? '');
+		if (!match) return null;
+		const total = Number(match[1]);
+		return Number.isFinite(total) ? total : null;
+	}
 
 	/** 視野角(deg)。初期カメラの距離もこの値から決まる。 */
 	const FOV = 45;
@@ -183,37 +236,66 @@
 		});
 	}
 
+	/** オブジェクト以下の形状・材質の GPU 資源を解放する。 */
+	function disposeObject(object: Object3D): void {
+		object.traverse((node: Object3D) => {
+			const mesh = node as { geometry?: { dispose(): void }; material?: unknown };
+			mesh.geometry?.dispose();
+			const material = mesh.material;
+			for (const m of Array.isArray(material) ? material : [material]) {
+				(m as { dispose?: () => void } | undefined)?.dispose?.();
+			}
+		});
+	}
+
 	/** 前のモデルを外して GPU 資源を解放する(ファイル切替・変更再読込のたび)。 */
 	function disposeModel(): void {
 		if (!modelRoot) return;
 		for (const child of [...modelRoot.children]) {
 			modelRoot.remove(child);
-			child.traverse((node: Object3D) => {
-				const mesh = node as { geometry?: { dispose(): void }; material?: unknown };
-				mesh.geometry?.dispose();
-				const material = mesh.material;
-				for (const m of Array.isArray(material) ? material : [material]) {
-					(m as { dispose?: () => void } | undefined)?.dispose?.();
-				}
-			});
+			disposeObject(child);
 		}
 	}
 
 	/**
+	 * 読み込みの世代(要件#23 追補a)。`loadModel` のたびに 1 つ進め、fetch・解析の
+	 * 完了時点で自分が最新かを確かめる。`src` が続けて変わったとき(監視中のファイルが
+	 * 続けて書き換わる)、遅れて届いた古い読み込みが新しい表示を上書きしないため。
+	 * コンポーネントが外れたときにも 1 つ進める(追補b)= 外れたあとに終わった読み込みは
+	 * どの世代にも当たらず、外れた host に renderer を作り直さない。
+	 */
+	let loadGeneration = 0;
+
+	/**
 	 * モデルを取りに行って描く。`src` が変わるたびに走る(初回表示・ファイル切替・
 	 * `binary_file_changed` による版数の更新 = 要件#22 の機構)。
+	 * 最新でない世代の結果は載せず(作った形状・材質は捨てる)、失敗も表示しない。
 	 */
 	async function loadModel(assetSrc: string, host: HTMLDivElement): Promise<void> {
+		const generation = ++loadGeneration;
+		const isCurrent = () => generation === loadGeneration;
 		load = { kind: 'loading' };
 		try {
+			// 総量の問い合わせの後にも世代を確かめる(追補d)= 古い読み込みは問い合わせの
+			// 結果(失敗も含む)で何もせず、本文も取りに行かない。
+			const total = await probeTotalBytes(assetSrc);
+			if (!isCurrent()) return;
+			if (total !== null && total > MAX_BYTES) throw tooLargeError(total);
 			const response = await fetch(assetSrc);
+			// 最新でなければ本文を読まずに抜ける(追補b)。
+			if (!isCurrent()) return;
 			if (!response.ok) throw new Error(`Could not load the model (HTTP ${response.status})`);
+			// 申告が上限を超えていれば本文をメモリに載せずに断る(追補c)。
+			const declared = declaredLength(response);
+			if (declared !== null && declared > MAX_BYTES) throw tooLargeError(declared);
 			const buffer = await response.arrayBuffer();
-			if (buffer.byteLength > MAX_BYTES) {
-				const mb = Math.round(buffer.byteLength / (1024 * 1024));
-				throw new Error(`The file is too large (${mb}MB; limit 256MB)`);
-			}
+			if (!isCurrent()) return;
+			if (buffer.byteLength > MAX_BYTES) throw tooLargeError(buffer.byteLength);
 			const model = await parseModel(uri, buffer);
+			if (!isCurrent()) {
+				disposeObject(model.object);
+				return;
+			}
 
 			ensureScene(host);
 			disposeModel();
@@ -225,12 +307,17 @@
 			syncCamera();
 			load = { kind: 'ready', stats: modelStatsLabel(model) };
 		} catch (error) {
+			if (!isCurrent()) return;
 			disposeModel();
 			load = {
 				kind: 'error',
 				message: error instanceof Error ? error.message : 'Could not display the model',
 			};
+			return;
 		}
+		// ここに来るのは最新の世代で形状をシーンに載せた後だけ(上の早期 return と catch を
+		// 抜けた)。表示の成功をページへ伝える(要件#64 追補f 契約3)。
+		onDisplayed?.();
 	}
 
 	// --- マウス操作(要件#23): イベント → デルタ → VM の一方向 --------------
@@ -348,8 +435,10 @@
 	});
 
 	// ウインドウを閉じる / 別のビューアへ切り替わるときに GPU 資源を返す。
+	// 世代も進めて、途中の読み込みを最新でなくする(追補b)。
 	$effect(() => {
 		return () => {
+			loadGeneration += 1;
 			disposeModel();
 			renderer?.dispose();
 			renderer?.domElement.remove();

@@ -3,6 +3,7 @@
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Window};
 
 use super::AppState;
+use crate::window::placement::{front_window_position, new_window_position, NewWindowPosition};
 use crate::window::tab::{
     add_tabbed_window, derive_tab_title, tab_group_key, window_placement, KeySource,
     TabWindowLabels, WindowKind,
@@ -45,9 +46,12 @@ pub async fn create_window(
     // handed to the manager below. When it is `None` the window opens on the
     // history picker, which keeps the app name.
     let root_for_title = root.clone();
-    let label = {
+    // The front window is read before the new one is registered, which makes
+    // the new one the active window (requirements.md #12 追補b 契約2).
+    let (label, front) = {
         let mut wm = state.window_manager.lock().await;
-        wm.register_new_window_with_dirs(path, root, expanded_dirs)
+        let front = front_window_position(app, &wm);
+        (wm.register_new_window_with_dirs(path, root, expanded_dirs), front)
     };
     // Every window carries a tab group key from birth (requirements.md #62
     // 契約2): a single window built without one makes tao switch automatic
@@ -72,34 +76,44 @@ pub async fn create_window(
     }
 
     // Build the new window — shown at once, or, for a tab, hidden until
-    // `add_tabbed_window` has put it in the tab bar (追補a). `inner_size` is
-    // the fallback used when the window-state plugin has no saved entry for
-    // this label.
+    // `add_tabbed_window` has put it in the tab bar (追補a) — at the default
+    // size (1280 × 800).
     //
-    // Size / position / maximized state are restored by the window-state
-    // plugin on its own: its `window_created` hook calls `restore_state` for
-    // every new window its filter lets through (every window but a tab —
-    // `lib.rs`), with the flags from `Builder::default()` —
-    // `StateFlags::all()` — and we register no denylist or
-    // `skip_initial_state`. Calling `restore_state` here too is
-    // not merely redundant, it deadlocks: the plugin's `restore_state` holds
-    // an internal `Mutex` while asking the event loop for
-    // `available_monitors()`, so this thread ends up waiting on the main
-    // thread while the main thread — inside `attach_window` →
-    // `PluginStore::window_created` → the plugin's own `restore_state` —
-    // waits for that same `Mutex`. The new window then never finishes
-    // initialising and just spins (requirements.md #12, 目視 NG 2026-08-10;
-    // confirmed by a `sample` of the hung process). Leave the restore to the
-    // plugin — that is also what the IPC-spawned window path does.
-    WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
+    // A standalone window opens 24px down and to the right of the front
+    // window, or centred when there is none (requirements.md #12 追補b 契約2);
+    // a tab is left to the tab bar. The window-state plugin no longer moves
+    // it: its filter lets through only the first window of the launch
+    // (`main`, `lib.rs`), because a label minted here says nothing about
+    // where a window with that label sat in an earlier launch (#569).
+    //
+    // Never call the plugin's `restore_state` here either: there is nothing
+    // these labels should be restored from, and the call is what once hung
+    // New Window — the plugin's `restore_state` holds an internal `Mutex`
+    // while asking the event loop for `available_monitors()`, so this thread
+    // ended up waiting on the main thread while the main thread — inside
+    // `attach_window` → `PluginStore::window_created` → the plugin's own
+    // `restore_state` — waited for that same `Mutex`. The new window then
+    // never finished initialising and just spun (requirements.md #12, 目視 NG
+    // 2026-08-10; confirmed by a `sample` of the hung process).
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
         .title(derive_window_title(root_for_title.as_deref()))
         .tabbing_identifier(&tab_key)
         .visible(placement.visible)
-        .inner_size(1280.0, 800.0)
-        .build()
-        .map_err(|e| format!("failed to create window: {}", e))?;
-
-    Ok(label)
+        .inner_size(1280.0, 800.0);
+    let builder = match new_window_position(kind, front) {
+        Some(NewWindowPosition::At { x, y }) => builder.position(x, y),
+        Some(NewWindowPosition::Center) => builder.center(),
+        None => builder,
+    };
+    match builder.build() {
+        Ok(_) => Ok(label),
+        Err(e) => {
+            // No window came of it, so the label registered above goes too —
+            // the same rollback as the IPC route (要件#12 追補a 契約3).
+            state.window_manager.lock().await.unregister_window(&label);
+            Err(format!("failed to create window: {}", e))
+        }
+    }
 }
 
 /// Create a new window with the given initial path and root.

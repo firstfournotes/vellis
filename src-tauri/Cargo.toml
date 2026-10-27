@@ -1,6 +1,6 @@
 [package]
 name = "vellis"
-version = "0.5.2"
+version = "0.5.3"
 description = "A desktop viewer and text editor for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"
@@ -56,6 +56,11 @@ similar = "3.1.0"
 # device is read here and pushed to the front end as events.
 hidapi = "2"
 toml = "1.1.2"
+# Folder search toggles (要件#66): Match Whole Word and Use Regular Expression are
+# matched with the regex crate, only inside `search/`. Already in the tree via
+# `tauri-utils` / `urlpattern` (1.12.3 in Cargo.lock); this only declares the
+# direct use, the same arrangement as `percent-encoding`.
+regex = "1"
 
 # E2E test harness — exposes a W3C WebDriver server inside the running app
 # so external clients (WebdriverIO / Selenium) can drive the Webview.

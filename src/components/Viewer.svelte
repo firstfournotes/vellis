@@ -226,7 +226,7 @@
 		 * 開始フェンスの**インデント幅**(追補a(6))。掴んだときの幅を持ち回るのは、
 		 * 素テキスト化で除いた分と確定で付け直す分を必ず一致させるため。
 		 */
-		fence?: { open: string; close: string; indent: number };
+		fence?: { open: string; close: string; indent: number; body: string };
 	} | null = $state(null);
 
 	/**
@@ -486,7 +486,9 @@
 			el,
 			meta,
 			html: el.innerHTML,
-			fence: { open: parts.open, close: parts.close, indent },
+			// 要件#49 追補j(1): 素テキスト化した直後の中身も控える。fence の `html` は Shiki の
+			// `<span>` 入りで、無変更でも `el.innerHTML` とは一致しないため、比較はこちらで行う。
+			fence: { open: parts.open, close: parts.close, indent, body: parts.body },
 		};
 		// Shiki の `<span>` 構造を捨てて素テキストに置き換える(契約①)。フェンス行は
 		// 編集不可なので中身だけ ―― 直したい場合はソース編集モードへ(契約③)。
@@ -538,6 +540,18 @@
 		if (!current) return;
 		// 要件#54 契約④⑦: 逆シリアライズより**前に**必ず外す(AC-54-13)。
 		dropFindHighlights();
+		// 要件#49 追補j(1)(2): 中身が掴んだときのままなら書き戻さない(逆シリアライズも
+		// `updateBuffer` も `recordEdit` もしない)。書き戻しは意味等価でも byte 等価とは
+		// 限らず、触っていない原文が変わる(`![~~x~~](i.png)` → `![x](i.png)`)。行き先は
+		// 破棄と同じ ―― 閲覧から入ってまだ何も確定していなければ閲覧へ戻り、確定済みの
+		// 編集があれば編集モードのまま。比較は強調を外した**あと**(要件#54 契約④)。
+		const unchanged = current.fence
+			? current.el.textContent === current.fence.body
+			: current.el.innerHTML === current.html;
+		if (unchanged) {
+			discardBlockEdit();
+			return;
+		}
 		blockEdit = null;
 		blockEditFromView = false;
 		current.el.removeAttribute('contenteditable');
@@ -771,6 +785,9 @@
 
 		const root = owner.createElement('div');
 		root.className = HTML_EDIT_ROOT_CLASS;
+		// 文書の `<html>` / `<body>` の class も足す(`html.dark body{…}` を畳んだ
+		// 規則が当たるように=要件#54 追補e)。ルートは保存される原文に入らない。
+		root.classList.add(...surface.rootClasses);
 		// sanitize 済みの HTML(script / on* / iframe は落ちている=契約②)。
 		root.innerHTML = surface.html;
 		shadow.append(root);
@@ -1077,6 +1094,18 @@
 		}
 	}
 
+	/**
+	 * 削除の帯の「保存」(要件#48 追補g)。編集中の内容を同じパスに書き直す。
+	 * 経路は Command + S と同じ `saveDocument`(成功すれば `markSaved` が印を消す)。
+	 */
+	async function saveRemovedFile() {
+		try {
+			await saveDocument(document.uri, windowState.editBuffer ?? document.content);
+		} catch (err) {
+			alert(`Could not save: ${err}`);
+		}
+	}
+
 	// --- 文書内検索(要件#54) ------------------------------------------
 	// 一致の計算・件数の文言・送りの循環・ハイライトの付け外しは
 	// `$lib/find-in-document` の純関数。ここが持つのは「どの DOM を探すか」と
@@ -1243,6 +1272,8 @@
 
 			const root = owner.createElement('div');
 			root.className = 'vellis-html-find-root';
+			// 文書の `<html>` / `<body>` の class も足す(追補e。編集面と同じ)。
+			root.classList.add(...surface.rootClasses);
 			root.innerHTML = surface.html;
 			shadow.append(root);
 			findSurfaceRoot = root;
@@ -1745,6 +1776,40 @@
 				onclick={() => windowState.acceptExternalChange()}
 			>
 				Reload
+			</button>
+		</div>
+	{/if}
+	{#if windowState.externalRemoved}
+		<!--
+			要件#48 追補g: 編集中(dirty)の文書のファイルが外部で削除された。文書と
+			編集は保ったまま、同じパスに書き直すか、編集を捨てて閉じるかを選ばせる。
+			見た目は外部変更の帯と同じ(同じ場所・同じ class)。
+			要件#48 追補h 契約2: 編集を原文に戻した(dirty が偽)あとも印は下ろさず、
+			文言と title を dirty に合わせる(守る編集が無いのに「未保存」と言わない)。
+		-->
+		<div class="external-change" data-testid="external-removed-banner" role="alert">
+			<span class="external-change-text">
+				{windowState.dirty
+					? 'This file was deleted outside the app. Your edits have not been saved.'
+					: 'This file was deleted outside the app.'}
+			</span>
+			<button
+				type="button"
+				class="toolbar-button"
+				data-testid="external-removed-save"
+				title={windowState.dirty ? 'Save your edits to the file again' : 'Save the file again'}
+				onclick={saveRemovedFile}
+			>
+				Save
+			</button>
+			<button
+				type="button"
+				class="toolbar-button"
+				data-testid="external-removed-close"
+				title={windowState.dirty ? 'Close the file (your edits are discarded)' : 'Close the file'}
+				onclick={() => windowState.clearDocument()}
+			>
+				Close
 			</button>
 		</div>
 	{/if}

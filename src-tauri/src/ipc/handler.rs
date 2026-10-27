@@ -16,6 +16,8 @@ use crate::ipc::protocol::{Request, Response};
 use crate::ipc::server::IpcCommand;
 use crate::watch::hub::WindowId;
 use crate::window::manager::WindowArgs;
+use crate::window::placement::{front_window_position, new_window_position, NewWindowPosition};
+use crate::window::tab::WindowKind;
 
 /// Spawn a tokio task that receives `IpcCommand` messages and dispatches them.
 ///
@@ -43,7 +45,7 @@ pub async fn dispatch_command(
 ) -> Response {
     match request {
         Request::OpenPath { uri, new_window } => handle_open_path(app, &uri, new_window).await,
-        Request::SwitchRoot { uri } => handle_switch_root(app, &uri).await,
+        Request::SwitchRoot { uri } => handle_switch_root_request(app, &uri).await,
         Request::ShowMarks => handle_show_marks(app, false).await,
         Request::ShowChanged => handle_show_marks(app, true).await,
         Request::Ping => {
@@ -125,11 +127,14 @@ async fn handle_open_path(
     // and retitles the window then (requirements.md #17).
     let title = crate::window::title::derive_window_title(args.root.as_deref());
 
-    let label = {
+    // The front window is read before the new one is registered, which makes
+    // the new one the active window (requirements.md #12 追補b 契約2).
+    let (label, front) = {
         let mut wm = state.window_manager.lock().await;
+        let front = front_window_position(app, &wm);
         let label = wm.next_label();
         wm.register_window(label.clone(), args);
-        label
+        (label, front)
     };
     // Every window carries a tab group key from birth (requirements.md #62
     // 契約2). Like `create_window`'s standalone windows it is the window's own
@@ -139,14 +144,21 @@ async fn handle_open_path(
     // hang the app.
     let tab_key = crate::window::tab::tab_group_key(None, &label);
 
-    match WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
         .title(title)
         .tabbing_identifier(&tab_key)
         // Match the default from `tauri.conf.json` (issue #16) so
         // IPC-spawned windows aren't smaller than first-launch ones.
-        .inner_size(1280.0, 800.0)
-        .build()
-    {
+        .inner_size(1280.0, 800.0);
+    // Placed like File ▸ New Window: 24px down and to the right of the front
+    // window, or centred when there is none (requirements.md #12 追補b 契約2).
+    // The window-state plugin leaves it alone — it restores only `main`.
+    let builder = match new_window_position(WindowKind::Standalone, front) {
+        Some(NewWindowPosition::At { x, y }) => builder.position(x, y),
+        Some(NewWindowPosition::Center) => builder.center(),
+        None => builder,
+    };
+    match builder.build() {
         Ok(_) => {
             tracing::info!("IPC: created window '{}' for '{}'", label, uri);
             Response::Ok
@@ -164,9 +176,108 @@ async fn handle_open_path(
     }
 }
 
-/// Handle `SwitchRoot` — change root on the active window and emit event.
-async fn handle_switch_root(
+/// The event `handle_switch_root_request` sends to the front window: "the CLI
+/// asked to switch the root to `root_uri`" (requirements.md #48 追補m). Same
+/// spelling as the front's `ROOT_SWITCH_REQUESTED_EVENT`.
+pub const ROOT_SWITCH_REQUESTED_EVENT: &str = "root_switch_requested";
+
+/// Payload of `ROOT_SWITCH_REQUESTED_EVENT` — `{"root_uri": "<new root URI>"}`.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RootSwitchRequestPayload {
+    pub root_uri: String,
+}
+
+/// Handle `SwitchRoot` (`vellis -r`) — check the new root, then ask the front
+/// window to switch to it (requirements.md #48 追補m).
+///
+/// A switch drops unsaved edits, so the window asks about them first, just
+/// like a switch from the window itself (契約④), and only then calls
+/// `switch_root_confirmed`, which performs the switch (`handle_switch_root`).
+/// Nothing is switched here — root, watches, session, title, tab group and
+/// `root_changed` stay untouched (契約3).
+///
+/// The URI and the listing are checked before the request is sent, so the CLI
+/// still gets those failures (契約3). The CLI is answered as soon as the
+/// request is sent; the window's answer is not awaited, and a Cancel never
+/// reaches the CLI (契約4).
+async fn handle_switch_root_request(
     app: &AppHandle,
+    uri: &str,
+) -> Response {
+    let state = app.state::<AppState>();
+
+    let new_root = match Uri::parse(uri) {
+        Ok(u) => u,
+        Err(e) => {
+            return Response::Error {
+                code: "INVALID_URI".into(),
+                message: e.to_string(),
+            }
+        }
+    };
+
+    let provider = match state.fs_registry.resolve(&new_root) {
+        Ok(p) => p,
+        Err(e) => {
+            return Response::Error {
+                code: "PROVIDER_ERROR".into(),
+                message: e.to_string(),
+            }
+        }
+    };
+
+    // Only a check: the switch lists the root again once the window confirmed.
+    if let Err(e) = provider.list(&new_root).await {
+        return Response::Error {
+            code: "LIST_ERROR".into(),
+            message: e.to_string(),
+        };
+    }
+
+    let label = {
+        let wm = state.window_manager.lock().await;
+        wm.active_label().map(|s| s.to_string())
+    };
+    let Some(label) = label else {
+        return Response::Error {
+            code: "NO_ACTIVE_WINDOW".into(),
+            message: "no active window to switch root on".into(),
+        };
+    };
+
+    let payload = RootSwitchRequestPayload {
+        root_uri: new_root.raw.clone(),
+    };
+    if let Err(e) = app.emit_to(&label, ROOT_SWITCH_REQUESTED_EVENT, &payload) {
+        tracing::warn!(
+            "Failed to emit {} to '{}': {}",
+            ROOT_SWITCH_REQUESTED_EVENT,
+            label,
+            e
+        );
+        return Response::Error {
+            code: "EMIT_FAILED".into(),
+            message: e.to_string(),
+        };
+    }
+
+    tracing::info!(
+        "IPC: asked window '{}' to switch root to '{}'",
+        label,
+        new_root.raw
+    );
+    Response::Ok
+}
+
+/// Switch the root of window `label` and emit `root_changed` to it.
+///
+/// Called by `switch_root_confirmed` once that window confirmed a `vellis -r`
+/// switch (requirements.md #48 追補m). The window is the one that confirmed,
+/// not the front one — another window may have come to the front while the
+/// dialog was open. Unlike `set_root`, nothing is recorded in the history.
+pub(crate) async fn handle_switch_root(
+    app: &AppHandle,
+    label: &str,
     uri: &str,
 ) -> Response {
     let state = app.state::<AppState>();
@@ -206,22 +317,12 @@ async fn handle_switch_root(
     let entries = filter_tree_entries(&new_root, &new_root, entries);
 
     let mut wm = state.window_manager.lock().await;
-    let active_label = match wm.active_label() {
-        Some(l) => l.to_string(),
-        None => {
-            return Response::Error {
-                code: "NO_ACTIVE_WINDOW".into(),
-                message: "no active window to switch root on".into(),
-            }
-        }
-    };
-
-    let win_state = match wm.get_mut(&active_label) {
+    let win_state = match wm.get_mut(label) {
         Some(s) => s,
         None => {
             return Response::Error {
                 code: "WINDOW_NOT_FOUND".into(),
-                message: format!("window '{}' not registered", active_label),
+                message: format!("window '{}' not registered", label),
             }
         }
     };
@@ -261,7 +362,7 @@ async fn handle_switch_root(
     let new_watch = match coordinator
         .subscribe_directory(
             new_root.clone(),
-            WindowId(active_label.clone()),
+            WindowId(label.to_string()),
             app.clone(),
         )
         .await
@@ -278,7 +379,7 @@ async fn handle_switch_root(
     };
 
     let mut wm = state.window_manager.lock().await;
-    if let Some(win_state) = wm.get_mut(&active_label) {
+    if let Some(win_state) = wm.get_mut(label) {
         win_state.root_watch = new_watch;
     }
     drop(wm);
@@ -287,11 +388,11 @@ async fn handle_switch_root(
     // retitles it just like the `set_root` command does (requirements.md #17).
     // Best-effort: the root switch itself has already succeeded.
     let title = crate::window::title::derive_window_title(Some(&new_root.raw));
-    if let Some(window) = app.get_webview_window(&active_label) {
+    if let Some(window) = app.get_webview_window(label) {
         if let Err(e) = window.set_title(&title) {
             tracing::warn!(
                 "SwitchRoot: failed to set the title of '{}' to '{}': {}",
-                active_label,
+                label,
                 title,
                 e
             );
@@ -301,20 +402,20 @@ async fn handle_switch_root(
     // tab whose root changed leaves a shared tab bar for a window of its own.
     crate::window::tab::set_tabbing_identifier(
         app,
-        &active_label,
-        &crate::window::tab::tab_group_key(Some(&new_root.raw), &active_label),
+        label,
+        &crate::window::tab::tab_group_key(Some(&new_root.raw), label),
     );
 
-    // Emit `root_changed` event to the active window.
+    // Emit `root_changed` event to the window that confirmed.
     // For IPC-originated root switches, we use events (not command return values).
-    if let Err(e) = app.emit_to(&active_label, "root_changed", &payload) {
-        tracing::warn!("Failed to emit root_changed to '{}': {}", active_label, e);
+    if let Err(e) = app.emit_to(label, "root_changed", &payload) {
+        tracing::warn!("Failed to emit root_changed to '{}': {}", label, e);
     }
 
     tracing::info!(
         "IPC: switched root to '{}' on window '{}'",
         new_root.raw,
-        active_label
+        label
     );
     Response::Ok
 }

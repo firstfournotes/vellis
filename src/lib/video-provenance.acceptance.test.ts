@@ -1124,7 +1124,8 @@ describe('sourceFrameAt — floor(素材時刻 × num/den)(要件#40 契約⑥=Q
 	it('整数 fps: floor(sec × fps)', () => {
 		expect(sourceFrameAt({ num: 30, den: 1 }, 3.5)).toBe(105);
 		expect(sourceFrameAt({ num: 30, den: 1 }, 0)).toBe(0);
-		expect(sourceFrameAt({ num: 25, den: 1 }, 0.199999)).toBe(4);
+		// 要件#40 追補10 で改訂(2026-10-20)=許容の外の2刻み手前へ(0.199999 → 0.199998。境目 0.2 の 1 刻み手前は 5 になる)
+		expect(sourceFrameAt({ num: 25, den: 1 }, 0.199998)).toBe(4);
 	});
 
 	it('NTSC の丸め落とし穴: 100.1 秒 × 30000/1001 は 3000(浮動小数の途中丸めで 2999 に落ちない)', () => {
@@ -1138,7 +1139,8 @@ describe('sourceFrameAt — floor(素材時刻 × num/den)(要件#40 契約⑥=Q
 	it('NTSC の境界対: フレーム境界の直後は次の番号・直前は前の番号(floor であって round でない)', () => {
 		// フレーム1の境界は 1001/30000 ≈ 0.0333667 秒。小数第6位の丸めで前後に振れる2値。
 		expect(sourceFrameAt({ num: 30000, den: 1001 }, 0.033367)).toBe(1);
-		expect(sourceFrameAt({ num: 30000, den: 1001 }, 0.033366)).toBe(0);
+		// 要件#40 追補10 で改訂(2026-10-20)=許容の外の2刻み手前へ(0.033366 → 0.033365。丸めた境目 33367 の 1 刻み手前は 1 になる)
+		expect(sourceFrameAt({ num: 30000, den: 1001 }, 0.033365)).toBe(0);
 	});
 
 	it('VFR(fps=null)は null(番号を出さない)', () => {

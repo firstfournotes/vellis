@@ -834,6 +834,8 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 				'toml',
 				'tauri-plugin-webdriver',
 				'tauri-plugin-window-state',
+				// 要件#66 で `regex` を直接宣言=2026-10-08 由谷承認(契約12)。
+				'regex',
 			].sort()
 		);
 	});
@@ -846,6 +848,8 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		// 要件#64(契約11・2026-09-28)で `list_recent_files` / `clear_recent_files` を追加(list_history の直後)。
 		// 要件#38 追補f(2026-10-02)で `set_print_available` を追加(print_html の直後)。
 		// 要件#38 追補g(2026-10-06)で `print_pdf` を追加(set_print_available の直後)。
+		// 要件#64 追補f(2026-10-25・Issue #717)で `record_displayed_file` を追加(list_recent_files と clear_recent_files のあいだ)。
+		// 要件#48 追補m(2026-10-26・Issue #750)で `switch_root_confirmed` を追加(set_root の直後)=由谷承認 2026-10-26。
 		const libRs = readFileSync(resolve(REPO_ROOT, 'src-tauri/src/lib.rs'), 'utf-8');
 		const blocks = [...libRs.matchAll(/generate_handler!\[([^\]]*)\]/g)].map((m) =>
 			(m[1] ?? '')
@@ -860,6 +864,7 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'open_binary_document',
 			'save_document',
 			'set_root',
+			'switch_root_confirmed',
 			'new_window',
 			'new_tab',
 			'set_tab_title',
@@ -881,6 +886,7 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'get_build_info',
 			'list_history',
 			'list_recent_files',
+			'record_displayed_file',
 			'clear_recent_files',
 			'get_video_frame_index',
 			'extract_waveform_audio',
@@ -958,8 +964,10 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		);
 		// 要件#49 追補h(3)(2026-10-05)で AC-54-14 の edit.ts 固定値を更新したため、このファイルの固定値も更新
 		// 要件#49 追補i(3)(2026-10-07)で AC-54-14 の edit.ts 固定値を再び更新したため、このファイルの固定値も更新
+		// 要件#8 追補a(4)(2026-10-19)で AC-54-14 の html-viewer.ts 固定値を更新したため、このファイルの固定値も更新
+		// 要件#8 追補d・要件#54 追補e(2026-10-26・由谷承認・Issue #550・#551・#380・#705)で AC-54-14 の html-viewer.ts と edit.ts の固定値を更新したため、このファイルの固定値も更新
 		expect(hash('src/lib/find-in-document.acceptance.test.ts')).toBe(
-			'9bf2b27f1163d7bcfca1cdc63ebe997565f3af0425f67b3fd12bb43c840a4104'
+			'4b3a7a4ea4e58563d7321e650b509517f808e2c5566c60fbbd79bd03b634bf06'
 		);
 	});
 });

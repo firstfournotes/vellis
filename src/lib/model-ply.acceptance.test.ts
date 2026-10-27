@@ -600,6 +600,8 @@ describe('AC-58-16 不変 — 依存追加ゼロ・PLYLoader は three 同梱(�
 				'toml',
 				'tauri-plugin-webdriver',
 				'tauri-plugin-window-state',
+				// 要件#66 で `regex` を直接宣言=2026-10-08 由谷承認(契約12)。
+				'regex',
 			].sort(),
 		);
 	});

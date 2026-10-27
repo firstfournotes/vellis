@@ -13,7 +13,9 @@ use tauri::{AppHandle, Manager, State, WebviewWindow, Window};
 use super::AppState;
 use crate::fs::uri::Uri;
 use crate::menu::sync_print_item;
-use crate::print::{open_print_window, print_pdf_in_window, PrintAvailability};
+use crate::print::{
+    open_print_window, print_pdf_in_window, print_pdf_path_in_window, PrintAvailability,
+};
 
 /// Print the calling window's main frame — the route Markdown, text and every
 /// other viewer have always taken.
@@ -36,9 +38,13 @@ pub fn print_current_window(window: WebviewWindow) -> Result<(), String> {
 /// `document` is the finished print document built by the frontend — the same
 /// preprocessed snapshot the HTML viewer is displaying, plus its CSP `<meta>`.
 /// Nothing is added to it here.
+///
+/// `window` is the caller's own handle (Tauri passes it; the frontend still
+/// sends only `document`). Its label becomes the print window's owner, whose
+/// open hosts the print window's ssh images are served from (要件#27 追補b).
 #[tauri::command]
-pub async fn print_html(document: String, app: AppHandle) -> Result<(), String> {
-    open_print_window(&app, document).await
+pub async fn print_html(document: String, window: Window, app: AppHandle) -> Result<(), String> {
+    open_print_window(&app, document, window.label()).await
 }
 
 /// Tell the app whether the calling window has a printable document open
@@ -68,12 +74,19 @@ pub fn set_print_available(
 /// The PDF viewer draws the file in an `<iframe>`, and the main-frame print
 /// (`print_current_window`) only reaches what that iframe has on screen. So
 /// this route does not print the window at all: `uri` is the document the
-/// window is showing (`file://` or `ssh://`, as the frontend has it), its bytes
-/// are read in full through the same provider `open_document` uses, and
-/// [`print_pdf_in_window`] hands them to PDFKit and runs the print operation as
-/// a sheet of the calling window. A file that cannot be read, or does not open
-/// as a PDF with pages, comes back as `Err` before any sheet is shown; the
-/// frontend shows it with `printFailedMessage`.
+/// window is showing (`file://` or `ssh://`, as the frontend has it), PDFKit
+/// opens it, and the print operation runs as a sheet of the calling window.
+///
+/// - `file://` — PDFKit is given the path and reads the file itself
+///   ([`print_pdf_path_in_window`]・追補k), so a local PDF over `read_bytes`'s
+///   50 MB cap prints like the viewer shows it
+/// - anything else (`ssh://`) — the bytes are read in full through the same
+///   provider `open_document` uses, cap included, and handed to
+///   [`print_pdf_in_window`]
+///
+/// A file that cannot be read, or does not open as a PDF with pages, comes
+/// back as `Err` before any sheet is shown; the frontend shows it with
+/// `printFailedMessage`.
 #[tauri::command]
 pub async fn print_pdf(
     uri: String,
@@ -81,6 +94,9 @@ pub async fn print_pdf(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let parsed = Uri::parse(&uri).map_err(|e| e.to_string())?;
+    if parsed.scheme == "file" {
+        return print_pdf_path_in_window(&window, parsed.path).await;
+    }
     let provider = state.fs_registry.resolve(&parsed).map_err(|e| e.to_string())?;
     let bytes = provider
         .read_bytes(&parsed)

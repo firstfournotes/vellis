@@ -384,9 +384,13 @@ describe('Viewer — 取り消し線を含む段落の確定(契約②⑥・追�
 		expect(windowState.dirty).toBe(false);
 	});
 
-	it('`Single ~del~ x`(1本)を何も変えずに確定 → editBuffer では `~~del~~` に揃い、他は byte 等価', async () => {
+	// 追補j(4) で改訂(2026-10-19): 無変更の確定は書き戻さない(byte 等価)ので、`~del~`(1本)が
+	// `~~del~~` に揃う振る舞いは「中身を変えて確定したとき」の形で固定する。
+	it('`Single ~del~ x`(1本)の末尾に 1 文字足して確定 → editBuffer では `~~del~~` に揃い、他は byte 等価', async () => {
 		const { container } = mountDoc(STRIKE_MD, renderedStrike);
-		await beginBlockEdit(strikeParagraph(container, 'Single'));
+		const p = strikeParagraph(container, 'Single');
+		await beginBlockEdit(p);
+		await appendText(p, 'y');
 		const watch = watchWindowErrors();
 
 		try {
@@ -397,7 +401,8 @@ describe('Viewer — 取り消し線を含む段落の確定(契約②⑥・追�
 
 		expect(watch.errors.map((e) => e.message)).toEqual([]);
 		expect(windowState.editBuffer).toBe(
-			replacedOnce(STRIKE_MD, 'Single ~del~ x', 'Single ~~del~~ x'),
+			replacedOnce(STRIKE_MD, 'Single ~del~ x', 'Single ~~del~~ xy'),
 		);
+		expect(windowState.dirty).toBe(true);
 	});
 });

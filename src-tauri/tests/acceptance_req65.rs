@@ -10,8 +10,8 @@
 //!
 //! 判定範囲(AC 番号は req-65.md の受け入れ基準):
 //! - AC-65-1  glob の照合 `glob_match`(`*`・`?`・`**`・大文字小文字・`{}` は文字のまま)
-//! - AC-65-2  既定値(`files.exclude` 3 つ・`search.exclude` = `EXCLUDED_DIR_NAMES` の 6 つ・
-//!   `default_settings_json()` の往復)
+//! - AC-65-2  既定値(`files.exclude` 4 つ=追補a で `**/.vellis` が入る・`search.exclude` =
+//!   `EXCLUDED_DIR_NAMES` の 6 つ・`default_settings_json()` の往復)
 //! - AC-65-3  読み込みの規則(キーがあればその辞書が全部・false は無効・空辞書・知らないキー)
 //! - AC-65-4  壊れた設定(既定値で動く・警告を返す・panic しない・ファイルが無ければ既定)
 //! - AC-65-5  置き場(`settings_path` の純関数・`settings.json`・`history.json` と違う)
@@ -24,6 +24,9 @@
 //! - AC-65-12 保存後の読み直し(Rust 側: `SETTINGS_CHANGED_EVENT` の値・`save_document` の見分けと送信)
 //! - AC-65-13 不変(`EXCLUDED_DIR_NAMES` の値は AC-55-2 のまま。それ以外は既存テストが無改変で緑=本ファイルの外)
 //! - AC-65-14 検索パネルの欄= Rust(`SearchFilter` の include / exclude / use_exclude_settings の判定順)
+//!
+//! 追補a(2026-09-27・backlog 212): 既定の `files.exclude` に `**/.vellis` を足す(契約5 の改訂)。
+//! AC-65-2 の既定値を 4 つに改め、AC-65-7 と AC-65-9 に「`**/.*` を外しても `.vellis/` は隠れる・走査されない」を足した。
 //!
 //! フロント側(AC-65-12 のイベント名と `+page.svelte` の配線・AC-65-15 の欄)は
 //! `src/lib/settings-changed.acceptance.test.ts` と `src/components/FindInFolder.wiring.test.ts`。
@@ -401,8 +404,20 @@ fn settings_from(json: &str) -> Settings {
     parse_settings(json).settings
 }
 
+/// 契約5(追補a で `**/.vellis` が入った 4 つ)。
 fn default_files_exclude() -> ExcludeMap {
-    map(&[("**/.*", true), ("**/.git", true), ("**/.DS_Store", true)])
+    map(&[("**/.*", true), ("**/.git", true), ("**/.DS_Store", true), ("**/.vellis", true)])
+}
+
+/// 既定値の JSON(`default_settings_json()`)の `files.exclude` で `**/.*` だけを `false` にしたもの
+/// (backlog 212 の状況=追補a)。他の行はそのまま。
+fn default_json_with_dot_star_off() -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&default_settings_json()).expect("default JSON must parse");
+    let files = value[FILES_EXCLUDE_KEY].as_object_mut().expect("files.exclude must be an object");
+    let previous = files.insert("**/.*".to_string(), serde_json::Value::Bool(false));
+    assert_eq!(previous, Some(serde_json::Value::Bool(true)), "the default JSON carries **/.* = true");
+    value.to_string()
 }
 
 fn default_search_exclude() -> ExcludeMap {
@@ -722,13 +737,15 @@ fn path_or_ancestor_matches_walks_up_the_directories() {
 // AC-65-2 — 既定値(契約5)・AC-65-13 の `EXCLUDED_DIR_NAMES` 不変
 // ---------------------------------------------------------------------------
 
-/// 9. 既定の files.exclude は `**/.*`・`**/.git`・`**/.DS_Store`(全部 true)と集合で一致。
+/// 9. 既定の files.exclude は `**/.*`・`**/.git`・`**/.DS_Store`・`**/.vellis`(全部 true)と集合で一致
+///    (追補a=契約5 の改訂。`**/.vellis` は要件#48 のスナップショット置き場)。
 #[test]
-fn default_files_exclude_is_the_three_dot_patterns() {
+fn default_files_exclude_is_the_four_dot_patterns_including_vellis() {
     let defaults = Settings::default();
     assert_eq!(defaults.files_exclude, default_files_exclude());
+    assert_eq!(defaults.files_exclude.len(), 4);
     let active: BTreeSet<&str> = defaults.active_files_exclude().into_iter().collect();
-    let expected: BTreeSet<&str> = ["**/.*", "**/.git", "**/.DS_Store"].into_iter().collect();
+    let expected: BTreeSet<&str> = ["**/.*", "**/.git", "**/.DS_Store", "**/.vellis"].into_iter().collect();
     assert_eq!(active, expected);
 }
 
@@ -1069,6 +1086,43 @@ fn filter_tree_entries_works_the_same_under_an_ssh_root() {
     assert_eq!(names(&kept), vec!["a.md"]);
 }
 
+/// 30a. (追補a)`**/.*` を `false` にしても `**/.vellis` が `.vellis`(と配下)を隠し、`.github` は出る。
+///      既定値でも `.vellis` は隠れる。既定値の `**/.*` だけを外した設定(backlog 212 の状況)でも
+///      `.vellis` は隠れたまま=既定に `**/.vellis` の行があるから。
+#[test]
+fn tree_hides_the_vellis_snapshot_folder_even_when_dot_star_is_off() {
+    let explicit = settings_from(
+        r#"{"files.exclude": {"**/.*": false, "**/.git": true, "**/.DS_Store": true, "**/.vellis": true}}"#,
+    );
+    for hidden in [".vellis", ".vellis/snapshots/x", ".vellis/snapshots/x/a.md", "docs/.vellis", "docs/.vellis/snapshots/x"] {
+        assert!(is_hidden_from_tree(hidden, &explicit), "{hidden} must be hidden by **/.vellis");
+    }
+    for shown in [".github", ".github/x.yml", ".env", "vellis", "vellis/a.md", "docs/a.md"] {
+        assert!(!is_hidden_from_tree(shown, &explicit), "{shown} must show once **/.* is off");
+    }
+
+    let defaults = Settings::default();
+    assert!(defaults.active_files_exclude().contains(&"**/.vellis"), "the defaults carry **/.vellis");
+    assert!(is_hidden_from_tree(".vellis", &defaults));
+    assert!(is_hidden_from_tree(".vellis/snapshots/x", &defaults));
+
+    let mut dot_star_off = Settings::default();
+    dot_star_off.files_exclude.insert("**/.*".to_string(), false);
+    assert!(is_hidden_from_tree(".vellis", &dot_star_off), ".vellis must stay hidden when only **/.* is off");
+    assert!(is_hidden_from_tree(".vellis/snapshots/x", &dot_star_off));
+    assert!(!is_hidden_from_tree(".github", &dot_star_off));
+
+    let root = Uri::parse(FILE_ROOT).unwrap();
+    let top = vec![
+        entry(&root, ".vellis", FileKind::Dir),
+        entry(&root, ".github", FileKind::Dir),
+        entry(&root, "docs", FileKind::Dir),
+        entry(&root, ".DS_Store", FileKind::File),
+    ];
+    let kept = filter_tree_entries_with(&root, &root, top, &dot_star_off);
+    assert_eq!(names(&kept), vec![".github", "docs"]);
+}
+
 // ---------------------------------------------------------------------------
 // AC-65-8 — `LocalProvider::list` は隠し名も返す(契約2・11=要件#31 AC-31-6 の置き換え)
 // ---------------------------------------------------------------------------
@@ -1268,6 +1322,46 @@ async fn three_argument_search_equals_the_default_scope() {
         assert_eq!(plain, scoped, "root {root}");
         assert_eq!(fs.list_calls(), fs2.list_calls(), "same directories listed under {root}");
         assert_eq!(fs.read_calls(), fs2.read_calls(), "same files read under {root}");
+    }
+}
+
+/// 38a. (追補a)既定値では `.vellis/` の中は `list` も読みもされない(`**/.*` と `**/.vellis` の両方が当たる)。
+///      `**/.*` だけ `false` にした既定値の JSON でも `.vellis/` は `list` も読みもされない
+///      (`.github/x.md` は検索に入る=隠すのは `**/.vellis` の行)。
+#[tokio::test]
+async fn vellis_snapshot_folder_is_never_scanned_by_the_defaults_even_with_dot_star_off() {
+    // 既定値では両方のパターンが当たる。
+    assert!(path_or_ancestor_matches(&["**/.*"], ".vellis/snapshots/x.md"));
+    assert!(path_or_ancestor_matches(&["**/.vellis"], ".vellis/snapshots/x.md"));
+    assert!(Settings::default().active_files_exclude().contains(&"**/.vellis"));
+
+    let loaded = parse_settings(&default_json_with_dot_star_off());
+    assert!(loaded.warnings.is_empty(), "the default JSON with **/.* = false loads cleanly: {:?}", loaded.warnings);
+    let dot_star_off = loaded.settings;
+    assert_eq!(dot_star_off.files_exclude.get("**/.*"), Some(&false));
+    assert_eq!(dot_star_off.files_exclude.get("**/.vellis"), Some(&true), "the default JSON carries **/.vellis");
+    assert_eq!(dot_star_off.search_exclude, default_search_exclude(), "search.exclude is unchanged");
+
+    for (label, settings, expected) in [
+        ("defaults", Settings::default(), vec!["x.md"]),
+        ("defaults with **/.* = false", dot_star_off, vec![".github/x.md", "x.md"]),
+    ] {
+        let mut fs = MockFs::new(FILE_ROOT);
+        fs.file(".vellis/snapshots/x.md", "alpha snapshot copy\n");
+        fs.file(".vellis/snapshots/deep/y.md", "alpha deeper snapshot copy\n");
+        fs.file("docs/.vellis/snapshots/z.md", "alpha nested snapshot copy\n");
+        fs.file(".github/x.md", "alpha in github\n");
+        fs.file("x.md", "alpha real\n");
+
+        let hits = run_scope(&fs, &scope_with(settings), "alpha").await;
+
+        assert_eq!(paths(&hits), expected, "{label}");
+        assert!(!fs.was_listed(".vellis"), "{label}: .vellis must not even be listed");
+        assert!(!fs.was_listed(".vellis/snapshots"), "{label}");
+        assert!(!fs.was_listed("docs/.vellis"), "{label}: **/.vellis matches at any depth");
+        assert!(!fs.was_read(".vellis/snapshots/x.md"), "{label}");
+        assert!(!fs.was_read(".vellis/snapshots/deep/y.md"), "{label}");
+        assert!(!fs.was_read("docs/.vellis/snapshots/z.md"), "{label}");
     }
 }
 

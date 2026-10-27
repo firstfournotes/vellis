@@ -80,14 +80,65 @@ const NAVIGATING_ATTRIBUTES = new Map<string, Map<string, string>>([
 /**
  * Elements whose content is raw text, mapped to the search for their end tag.
  * An `<a href=…>` written inside one of these is characters rather than a tag,
- * so it is left alone — `<textarea>` even puts it on screen as written.
+ * so it is left alone — `<textarea>` and `<xmp>` even put it on screen as
+ * written. The set follows the HTML parser (追補a 2026-10-19): `<noscript>` is
+ * absent because the sandbox runs no script, which makes its content markup.
+ * `<plaintext>` has no end tag at all (null) — everything after it, to the end
+ * of the document, is text.
  */
-const RAW_TEXT_END = new Map<string, RegExp>([
-	['script', /<\/script/gi],
-	['style', /<\/style/gi],
-	['textarea', /<\/textarea/gi],
-	['title', /<\/title/gi],
+const RAW_TEXT_END = new Map<string, RegExp | null>([
+	['script', endTagSearch('script')],
+	['style', endTagSearch('style')],
+	['textarea', endTagSearch('textarea')],
+	['title', endTagSearch('title')],
+	['xmp', endTagSearch('xmp')],
+	['iframe', endTagSearch('iframe')],
+	['noembed', endTagSearch('noembed')],
+	['noframes', endTagSearch('noframes')],
+	['plaintext', null],
 ]);
+
+/**
+ * The search for a raw text element's end tag. It closes only when the name is
+ * followed by a boundary — whitespace, `/`, `>` or the end of the document
+ * (追補d 2026-10-25) — so `</xmpx>` is still text inside an `<xmp>`, as it is
+ * to the HTML parser.
+ */
+function endTagSearch(name: string): RegExp {
+	return new RegExp(`</${name}(?=[\\t\\n\\f\\r />]|$)`, 'gi');
+}
+
+/**
+ * Elements inside which the raw text elements above are ordinary markup
+ * (追補d 2026-10-25): in SVG and MathML (foreign content) and in a `<select>`,
+ * `<xmp>` or `<style>` does not swallow what follows, so a real link after it
+ * still has to be retargeted. Only "inside or not" is tracked — the finer
+ * tree-building rules (an HTML `<p>` breaking out of foreign content, …) are
+ * not followed; a miss there still sits inside the sandbox.
+ */
+const FOREIGN_ROOTS = new Set(['svg', 'math']);
+
+/**
+ * Where the comment opened by the `<!--` just before `from` ends — the offset
+ * past its closer, or the end of the document when it is never closed. Read as
+ * the HTML parser does (追補a 2026-10-19): `<!-->` and `<!--->` close at once,
+ * anything else at the first `-->` or `--!>`. Looking for `-->` alone would
+ * swallow the real links that follow the other three forms.
+ */
+function commentEnd(html: string, from: number): number {
+	if (html.startsWith('>', from)) {
+		return from + 1;
+	}
+	if (html.startsWith('->', from)) {
+		return from + 2;
+	}
+	const close = html.indexOf('-->', from);
+	const bangClose = html.indexOf('--!>', from);
+	if (bangClose !== -1 && (close === -1 || bangClose < close)) {
+		return bangClose + 4;
+	}
+	return close === -1 ? html.length : close + 3;
+}
 
 /**
  * Keeps a retargeted link looking like a link: the UA stylesheet only paints
@@ -147,7 +198,9 @@ type Rename = { at: number; length: number; inert: string };
 /**
  * Walk one open tag's attributes, starting just past the element name. Returns
  * where the tag ends together with the rename for every attribute name found in
- * `navigating`, or null when the tag is never closed.
+ * `navigating`, or null when the tag is never closed. `selfClosing` is true for
+ * a tag that ends in `/>` — a `/` inside an unquoted value (`<svg a=b/>`) is
+ * part of the value and does not count.
  *
  * Attributes are walked one at a time rather than pattern-matched, because a
  * value may itself read like an attribute — `<a title="see href=docs" href="…">`
@@ -157,18 +210,21 @@ function scanTag(
 	html: string,
 	from: number,
 	navigating: Map<string, string> | undefined,
-): { end: number; renames: Rename[] } | null {
+): { end: number; renames: Rename[]; selfClosing: boolean } | null {
 	const renames: Rename[] = [];
+	let selfClosing = false;
 	let i = from;
 	while (i < html.length) {
 		const c = html[i];
 		if (c === '>') {
-			return { end: i + 1, renames };
+			return { end: i + 1, renames, selfClosing };
 		}
 		if (c === '/' || isSpace(c)) {
+			selfClosing = c === '/';
 			i += 1;
 			continue;
 		}
+		selfClosing = false;
 		const nameAt = i;
 		while (i < html.length && !isNameEnd(html[i])) {
 			i += 1;
@@ -196,12 +252,16 @@ function scanTag(
  * prose, an attribute's value, raw text inside `<script>` / `<textarea>`,
  * comments, and the `href` of `<base>` / `<link>`. A real `<a>` inside `<pre>`
  * *is* retargeted — it is a link, and the point is that links do not navigate.
+ * Inside `<svg>` / `<math>` / `<select>` the raw text elements are markup, so
+ * the walk goes on through them (追補d 2026-10-25).
  *
  * Returns the input itself when there was nothing to rename.
  */
 function retargetLinks(content: string): string {
 	let out = '';
 	let copied = 0;
+	let foreignDepth = 0; // open <svg> / <math>, nested ones counted
+	let inSelect = false;
 	let i = 0;
 	while (i < content.length) {
 		const lt = content.indexOf('<', i);
@@ -210,11 +270,22 @@ function retargetLinks(content: string): string {
 		}
 		i = lt + 1;
 		if (content.startsWith('!--', i)) {
-			const close = content.indexOf('-->', i + 3);
-			i = close === -1 ? content.length : close + 3;
+			i = commentEnd(content, i + 3);
 			continue;
 		}
 		const first = content[i];
+		if (first === '/') {
+			let closingEnd = i + 1;
+			while (closingEnd < content.length && !isNameEnd(content[closingEnd])) {
+				closingEnd += 1;
+			}
+			const closing = content.slice(i + 1, closingEnd).toLowerCase();
+			if (FOREIGN_ROOTS.has(closing)) {
+				foreignDepth = Math.max(0, foreignDepth - 1);
+			} else if (closing === 'select') {
+				inSelect = false;
+			}
+		}
 		if (first === '!' || first === '?' || first === '/') {
 			const close = content.indexOf('>', i);
 			i = close === -1 ? content.length : close + 1;
@@ -237,7 +308,23 @@ function retargetLinks(content: string): string {
 			copied = rename.at + rename.length;
 		}
 		i = tag.end;
+		if (FOREIGN_ROOTS.has(name)) {
+			if (!tag.selfClosing) {
+				foreignDepth += 1; // `<svg/>` opens nothing
+			}
+			continue;
+		}
+		if (name === 'select') {
+			inSelect = true;
+			continue;
+		}
+		if (foreignDepth > 0 || inSelect) {
+			continue; // raw text elements are markup here
+		}
 		const rawTextEnd = RAW_TEXT_END.get(name);
+		if (rawTextEnd === null) {
+			break; // <plaintext>: the rest of the document is text
+		}
 		if (rawTextEnd !== undefined) {
 			rawTextEnd.lastIndex = i;
 			const end = rawTextEnd.exec(content);
@@ -284,8 +371,11 @@ export function zoomStyleTag(zoom: number): string {
  */
 export function buildSrcdoc(content: string, docUri: string, zoom: number = DEFAULT_ZOOM): string {
 	const body = retargetLinks(content);
-	// `URL` percent-encodes `"` in the path, so the href needs no escaping.
-	const base = `<base href="${toAssetUri(docUri)}">`;
+	// The href is an attribute value, so `&` is escaped: a folder named `&copy`
+	// would otherwise decode to `©` and shift the base (追補d 2026-10-25). `URL`
+	// already percent-encodes `"` in the path; it is escaped all the same.
+	const href = toAssetUri(docUri).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+	const base = `<base href="${href}">`;
 	const injection = (body === content ? base : base + LINK_STYLE) + zoomStyleTag(zoom);
 	const at = injectionOffset(body);
 	return body.slice(0, at) + injection + body.slice(at);

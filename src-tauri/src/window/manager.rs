@@ -148,6 +148,11 @@ pub struct WindowManager<R: tauri::Runtime = tauri::Wry> {
     active_label: Option<String>,
     /// Monotonic counter for generating unique window labels.
     next_id: u64,
+    /// Print window label → the label of the window that asked for it
+    /// (要件#27 追補b 契約1・2). A print window is not a document window and
+    /// has no entry in `windows`; its `vellis-asset:` requests are judged by
+    /// what its owner has open.
+    print_owners: HashMap<String, String>,
 }
 
 impl<R: tauri::Runtime> WindowManager<R> {
@@ -156,6 +161,7 @@ impl<R: tauri::Runtime> WindowManager<R> {
             windows: HashMap::new(),
             active_label: None,
             next_id: 1,
+            print_owners: HashMap::new(),
         }
     }
 
@@ -201,9 +207,12 @@ impl<R: tauri::Runtime> WindowManager<R> {
     /// opened later.
     ///
     /// Creating the actual window (`WebviewWindowBuilder`) is the caller's
-    /// job — see `commands::window::create_window`. Restoring its geometry
-    /// is nobody's job here: the window-state plugin does it from its own
-    /// `window_created` hook.
+    /// job — see `commands::window::create_window`, which also places it:
+    /// 24px down and to the right of the front window, or centred when there
+    /// is none (requirements.md #12 追補b). Nothing restores its geometry from
+    /// an earlier launch: the window-state plugin restores only the first
+    /// window of a launch (`main`), since a label minted here says nothing
+    /// about where a window with that label sat last time.
     ///
     /// [`next_label`]: Self::next_label
     pub fn register_new_window(&mut self, path: Option<String>, root: Option<String>) -> String {
@@ -309,6 +318,30 @@ impl<R: tauri::Runtime> WindowManager<R> {
     /// Return the number of tracked windows.
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// Record `owner_label` as the window that asked for the print window
+    /// `print_label` (要件#27 追補b 契約2). `print::open_print_window` calls
+    /// this before the print window starts loading, so the images of the
+    /// document it prints are served from the hosts its owner has open.
+    ///
+    /// The print window is **not** registered as a window: `window_count`,
+    /// `get` and the active window are unchanged, so the exit decision after
+    /// a destroy (要件#12 追補a) still counts print windows on their own.
+    pub fn set_print_owner(&mut self, print_label: String, owner_label: String) {
+        self.print_owners.insert(print_label, owner_label);
+    }
+
+    /// Forget the owner of the print window `print_label` — it has closed
+    /// (`WindowEvent::Destroyed` in `lib.rs`, 要件#27 追補b 契約2).
+    pub fn remove_print_owner(&mut self, print_label: &str) {
+        self.print_owners.remove(print_label);
+    }
+
+    /// The label of the window that asked for the print window
+    /// `print_label`, or `None` when none is recorded (要件#27 追補b).
+    pub fn print_owner(&self, print_label: &str) -> Option<&str> {
+        self.print_owners.get(print_label).map(String::as_str)
     }
 
     /// Iterate over `(label, &WindowState)` pairs for all registered windows.

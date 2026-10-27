@@ -25,6 +25,10 @@
 //!   operation that fails with a disconnection error drops the connection it
 //!   used, opens a fresh one and runs once more — only once, so an
 //!   unreachable host fails fast (要件#5 追補a / backlog 261).
+//! - Give up opening a connection — TCP connect, key exchange,
+//!   authentication and the SFTP start, all together — once it takes longer
+//!   than `SSH_CONNECT_TIMEOUT` (要件#27 追補b 契約3). A host that accepts the
+//!   TCP connection and then says nothing used to hold the caller forever.
 //!
 //! Authentication tries every identity ssh-agent offers; if none of those
 //! succeeds, falls back to **unencrypted** `IdentityFile` keys read directly
@@ -78,8 +82,23 @@ static SSH_WATCH_ID: AtomicU64 = AtomicU64::new(1);
 /// inotify-equivalent; the trade-off is latency vs. server load. Two
 /// seconds matches the responsiveness expectation for a Markdown viewer
 /// while staying well under the per-second SFTP request rate of any
-/// reasonable server.
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// reasonable server. This is the wait while the host answers; a
+/// disconnection stretches it (see `next_poll_delay`).
+pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The longest the poll-based watcher waits between rounds while the host
+/// stays unreachable (要件#5 追補c 契約1).
+pub const POLL_INTERVAL_MAX: Duration = Duration::from_secs(60);
+
+/// The longest opening a connection may take — TCP connect, key exchange,
+/// authentication and the SFTP start, together (要件#27 追補b 契約3). Past
+/// this the open fails like any other failed open: the pool keeps nothing
+/// and the next request opens afresh.
+///
+/// OpenSSH's own `ConnectTimeout` has no default; 20 seconds is long enough
+/// for a slow link and short enough not to leave a root, a document or an
+/// image waiting on a host that will never answer.
+pub const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Server-key handler that consults `~/.ssh/known_hosts`.
 ///
@@ -191,23 +210,59 @@ pub struct SshProvider {
     /// Sessions keyed by `user@host:port`. One session per authority.
     /// Shared with the poll watchers, which take a session every round.
     pool: Arc<ConnectionPool<Session>>,
+    /// How long opening a connection may take before it is given up
+    /// (要件#27 追補b 契約3). Handed to the poll watchers too.
+    connect_timeout: Duration,
 }
 
 impl SshProvider {
+    /// A provider that gives up opening a connection after
+    /// `SSH_CONNECT_TIMEOUT`.
     pub fn new() -> Self {
+        Self::with_connect_timeout(SSH_CONNECT_TIMEOUT)
+    }
+
+    /// A provider that gives up opening a connection after `timeout`
+    /// instead of `SSH_CONNECT_TIMEOUT` (要件#27 追補b 契約3 — for tests).
+    pub fn with_connect_timeout(timeout: Duration) -> SshProvider {
         Self {
             pool: Arc::new(ConnectionPool::new()),
+            connect_timeout: timeout,
+        }
+    }
+
+    /// Open a new SSH + SFTP session to `authority` (see `connect`), giving
+    /// up once that takes longer than `connect_timeout` (要件#27 追補b
+    /// 契約3). Giving up is an open failure like any other: the pool keeps
+    /// nothing for the key, so the next request opens afresh.
+    async fn open(authority: &Authority, connect_timeout: Duration) -> Result<Session, FsError> {
+        match tokio::time::timeout(connect_timeout, Self::connect(authority)).await {
+            Ok(opened) => opened,
+            Err(_) => Err(FsError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("ssh: opening a connection to {authority} did not finish within {connect_timeout:?}"),
+            ))),
         }
     }
 
     /// Open a new SSH + SFTP session to `authority`, authenticating via
-    /// ssh-agent.
-    async fn open(authority: &Authority) -> Result<Session, FsError> {
+    /// ssh-agent. Unbounded on its own; `open` puts the time limit on it.
+    async fn connect(authority: &Authority) -> Result<Session, FsError> {
         // Defer ssh_config resolution to OpenSSH itself via `ssh -G`. URI
         // explicit fields (port / user) win unconditionally; the alias is
         // only used to look up the underlying hostname when the URI host
         // is not directly resolvable.
-        let resolved = ssh_g(&authority.host);
+        // `ssh -G` is a blocking child process, so it runs on the blocking
+        // pool rather than on an async worker (要件#5 追補c 契約3). A task
+        // that could not finish is treated like `ssh` failing: the URI host
+        // is used as a literal hostname.
+        let alias = authority.host.clone();
+        let resolved = tokio::task::spawn_blocking(move || ssh_g(&alias))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "ssh -G task did not finish; using the URI host as is");
+                None
+            });
 
         let host = resolved
             .as_ref()
@@ -355,7 +410,7 @@ impl FileProvider for SshProvider {
 
         let entries_iter = self
             .pool
-            .run(&key, || Self::open(authority), |session| async move {
+            .run(&key, || Self::open(authority, self.connect_timeout), |session| async move {
                 session.sftp.read_dir(dir).await.map_err(classify_sftp_error)
             })
             .await?;
@@ -419,7 +474,7 @@ impl FileProvider for SshProvider {
 
         let attrs = self
             .pool
-            .run(&key, || Self::open(authority), |session| async move {
+            .run(&key, || Self::open(authority, self.connect_timeout), |session| async move {
                 session.sftp.metadata(path).await.map_err(classify_sftp_error)
             })
             .await?;
@@ -445,7 +500,7 @@ impl FileProvider for SshProvider {
         // mid-read is retried from the open on a fresh connection.
         let buf = self
             .pool
-            .run(&key, || Self::open(authority), |session| async move {
+            .run(&key, || Self::open(authority, self.connect_timeout), |session| async move {
                 let mut file = session
                     .sftp
                     .open_with_flags(path, OpenFlags::READ)
@@ -459,9 +514,10 @@ impl FileProvider for SshProvider {
         Ok(buf)
     }
 
-    /// Poll the remote path every `POLL_INTERVAL` and emit `Modify` /
-    /// `Remove` events when the size or mtime changes. Dropping the
-    /// returned `WatchHandle` ends the polling task.
+    /// Poll the remote path at once and then every `POLL_INTERVAL` (longer
+    /// while the host is unreachable, see `next_poll_delay`), and
+    /// emit `Modify` / `Remove` events when the size or mtime changes.
+    /// Dropping the returned `WatchHandle` ends the polling task.
     ///
     /// No connection is taken here: the polling task takes one from the
     /// pool every round, so a host that is unreachable right now is picked
@@ -487,6 +543,7 @@ impl FileProvider for SshProvider {
         tokio::spawn(poll_loop(
             self.pool.clone(),
             authority.clone(),
+            self.connect_timeout,
             path,
             uri_raw,
             tx,
@@ -531,14 +588,33 @@ pub fn poll_step(
     }
 }
 
-/// Polling task body. Every `POLL_INTERVAL` takes the session for
-/// `authority` from `pool` (reopening a dropped one), re-stats `path` and
-/// forwards whatever `poll_step` decides to `tx`. Exits cleanly when
-/// `stop_rx` errors (paired Sender dropped) or when the event channel is
-/// closed.
+/// How long to wait before the next poll round (要件#5 追補c 契約1), given
+/// the wait before this round (`prev`; `POLL_INTERVAL` for the first round)
+/// and this round's outcome.
+///
+/// - A disconnection (including a connection that could not be reopened) →
+///   twice `prev`, capped at `POLL_INTERVAL_MAX` (2 → 4 → 8 → 16 → 32 → 60 s),
+///   so an unreachable host is not authenticated against every two seconds.
+/// - A stat, or an error the server answered → back to `POLL_INTERVAL`.
+pub fn next_poll_delay(prev: Duration, outcome: &Result<PollSnapshot, OpError>) -> Duration {
+    match outcome {
+        Err(e) if e.is_disconnected() => prev.saturating_mul(2).min(POLL_INTERVAL_MAX),
+        _ => POLL_INTERVAL,
+    }
+}
+
+/// Polling task body. Each round takes the session for `authority` from
+/// `pool` (reopening a dropped one), re-stats `path`, forwards whatever
+/// `poll_step` decides to `tx`, and then waits the delay `next_poll_delay`
+/// decides before the next round (`POLL_INTERVAL` while the host answers,
+/// stretched while it is unreachable — 要件#5 追補c). The first round runs at once, without waiting, so its stat
+/// becomes the baseline as soon as the watch starts (要件#5 追補b). Exits
+/// cleanly when `stop_rx` errors (paired Sender dropped) during the wait or
+/// when the event channel is closed.
 async fn poll_loop(
     pool: Arc<ConnectionPool<Session>>,
     authority: Authority,
+    connect_timeout: Duration,
     path: String,
     uri_raw: String,
     tx: mpsc::Sender<WatchEvent>,
@@ -547,21 +623,15 @@ async fn poll_loop(
     let key = authority.to_string();
     let path = path.as_str();
     let mut last: Option<PollSnapshot> = None;
+    let mut delay = POLL_INTERVAL;
     loop {
-        tokio::select! {
-            _ = &mut stop_rx => {
-                tracing::debug!("ssh poll watch stopped");
-                return;
-            }
-            _ = tokio::time::sleep(POLL_INTERVAL) => {}
-        }
-
         let outcome = pool
-            .run(&key, || SshProvider::open(&authority), |session| async move {
+            .run(&key, || SshProvider::open(&authority, connect_timeout), |session| async move {
                 let attrs = session.sftp.metadata(path).await.map_err(classify_sftp_error)?;
                 Ok((attrs.size, attrs.modified().ok()))
             })
             .await;
+        delay = next_poll_delay(delay, &outcome);
         let (event, next) = poll_step(last, outcome);
         last = next;
         if let Some(kind) = event {
@@ -575,6 +645,14 @@ async fn poll_loop(
             {
                 return;
             }
+        }
+
+        tokio::select! {
+            _ = &mut stop_rx => {
+                tracing::debug!("ssh poll watch stopped");
+                return;
+            }
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
@@ -597,7 +675,18 @@ struct SshConfigResolution {
     identity_files: Vec<PathBuf>,
 }
 
-/// Invoke `ssh -G <alias>` and parse the keys we care about. Returns
+/// The arguments `ssh_g` runs `ssh` with: `-G`, then `--`, then `alias`
+/// (要件#27 追補b 契約4).
+///
+/// `alias` is the host of an `ssh://` URI, and that URI can come from a
+/// document. The `--` ends the options, so a host that looks like one
+/// (`-oProxyCommand=…`) reaches `ssh` as the host name it claims to be, never
+/// as an option.
+pub fn ssh_g_args(alias: &str) -> Vec<String> {
+    vec![String::from("-G"), String::from("--"), alias.to_string()]
+}
+
+/// Invoke `ssh -G -- <alias>` and parse the keys we care about. Returns
 /// `None` when `ssh` is not on PATH or the command fails — the caller
 /// will then treat the URI host as a literal hostname.
 ///
@@ -609,8 +698,7 @@ struct SshConfigResolution {
 /// fallback path in a separate milestone.
 fn ssh_g(alias: &str) -> Option<SshConfigResolution> {
     let output = std::process::Command::new("ssh")
-        .arg("-G")
-        .arg(alias)
+        .args(ssh_g_args(alias))
         .output()
         .ok()?;
     if !output.status.success() {

@@ -20,10 +20,11 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Listener, Manager};
 use thiserror::Error;
 
 use crate::channel::Channel;
@@ -36,6 +37,11 @@ pub const LAST_CHECK_FILENAME: &str = "update-check.json";
 
 /// Event delivered to every window when a newer release exists.
 pub const UPDATE_AVAILABLE_EVENT: &str = "update_available";
+
+/// Event a window emits once its [`UPDATE_AVAILABLE_EVENT`] listener is in
+/// place (requirements.md #14 追補b).  The payload is the window's label;
+/// the front end spells the name the same way (`src/routes/+page.svelte`).
+pub const UPDATE_BANNER_READY_EVENT: &str = "update_banner_ready";
 
 /// The single endpoint this module talks to.  `releases/latest` already
 /// excludes drafts and pre-releases on the GitHub side.
@@ -401,10 +407,64 @@ pub fn default_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<Path
 /// What a window receives with [`UPDATE_AVAILABLE_EVENT`].  `version` is the
 /// bare `x.y.z` so the banner can spell it the way the status bar does
 /// (`v{version}`); `url` is the release page.
-#[derive(Clone, Debug, Serialize)]
-struct UpdateAvailablePayload {
-    version: String,
-    url: String,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UpdateAvailablePayload {
+    pub version: String,
+    pub url: String,
+}
+
+/// The newer release the last automatic check found, kept in process memory
+/// (requirements.md #14 追補b).  Tauri events are not buffered, so a window
+/// opened after the broadcast never sees it; [`listen_banner_ready`] hands
+/// this copy to such a window when it asks.
+static REMEMBERED_UPDATE: Mutex<Option<UpdateAvailablePayload>> = Mutex::new(None);
+
+/// Remember `payload` as the newer release, or forget it with `None`.
+pub fn remember_update(payload: Option<UpdateAvailablePayload>) {
+    *REMEMBERED_UPDATE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = payload;
+}
+
+/// A copy of the remembered newer release, if any.  Reading does not forget
+/// it, so every window that asks gets the same answer.
+pub fn remembered_update() -> Option<UpdateAvailablePayload> {
+    REMEMBERED_UPDATE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Answer each window that reports, with [`UPDATE_BANNER_READY_EVENT`], that
+/// its banner listener is in place: when a newer release is remembered, send
+/// it to that window alone (requirements.md #14 追補b).  With nothing
+/// remembered there is nothing to say.  Registered once from `setup`.
+pub fn listen_banner_ready<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let handle = app.clone();
+    app.listen(UPDATE_BANNER_READY_EVENT, move |event| {
+        // The front end emits the label as a JSON string, quotes included.
+        let label: String = match serde_json::from_str(event.payload()) {
+            Ok(label) => label,
+            Err(e) => {
+                tracing::warn!(
+                    "update check: ignoring {} without a window label: {}",
+                    UPDATE_BANNER_READY_EVENT,
+                    e
+                );
+                return;
+            }
+        };
+        if let Some(payload) = remembered_update() {
+            if let Err(e) = handle.emit_to(label.as_str(), UPDATE_AVAILABLE_EVENT, payload) {
+                tracing::warn!(
+                    "update check: cannot emit {} to {}: {}",
+                    UPDATE_AVAILABLE_EVENT,
+                    label,
+                    e
+                );
+            }
+        }
+    });
 }
 
 /// Start the update-check poller: one check shortly after launch — always,
@@ -466,6 +526,8 @@ async fn check_once<R: tauri::Runtime>(app: &tauri::AppHandle<R>, trigger: Check
             info.tag_name,
             current
         );
+        // A release that was withdrawn must not reach windows opened later.
+        remember_update(None);
         return;
     }
 
@@ -478,6 +540,9 @@ async fn check_once<R: tauri::Runtime>(app: &tauri::AppHandle<R>, trigger: Check
         url: info.html_url,
     };
     tracing::info!("update check: {} available", payload.version);
+    // Remembered before the broadcast, so a window that asks in between
+    // still gets the answer (requirements.md #14 追補b).
+    remember_update(Some(payload.clone()));
     // `emit` (not `emit_to`) reaches every window, as `watch/hub.rs` does —
     // each one shows and dismisses its own banner.
     if let Err(e) = app.emit(UPDATE_AVAILABLE_EVENT, payload) {

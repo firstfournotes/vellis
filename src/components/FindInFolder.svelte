@@ -1,3 +1,14 @@
+<script module lang="ts">
+	/**
+	 * 前のパネルが外れたとき(`onDestroy`)に投げた `search_in_folder_reset` の完了(要件#55 追補g の
+	 * g-2 の補足)。失敗も resolve に畳む。閉じてすぐ開き直すと、閉じたときのリセットが開き直した
+	 * パネルの最初の検索より後に Rust で処理され、その検索の `epoch` を進めて止めてしまう。そこで
+	 * 次にマウントしたパネルは、これの完了を待ってから自分のリセットを投げる(閉じた reset →
+	 * 開いた reset → 検索の順)。JS の文脈は窓ごとなので窓に 1 つ。最初のパネルは待つものが無い。
+	 */
+	let closingReset: Promise<void> = Promise.resolve();
+</script>
+
 <script lang="ts">
 	/**
 	 * フォルダ横断検索のパネル(要件#55 契約①⑥⑦⑧)。左ペインで Explorer と入れ替わる。
@@ -26,8 +37,17 @@
 	 *   して `search_in_folder` へ渡す(照合は Rust)。欄・歯車を変えたら、語が入っていれば
 	 *   検索欄の入力と同じ経路(世代を進めて debounce)で探し直す。値は `$lib/find-in-folder`
 	 *   のモジュールの変数に覚える(窓の生存中だけ=パネルを閉じて開き直しても残る)
+	 * - 要件#66: 検索欄の内側の右端に Aa / ab / .*(Match Case / Match Whole Word / Use Regular
+	 *   Expression)の 3 トグル。bool を `search_in_folder` へ渡すだけで照合は Rust。押したら欄と
+	 *   同じ経路(`rescope`)で探し直し、値は欄と同じ変数に覚える。reject の値が
+	 *   `FIND_IN_FOLDER_INVALID_REGEX` なら状態表示をその文言にして検索欄に `aria-invalid`。
+	 *   .* ON の結果のクリックは、その行で当たった文字列(`hit.matched`)を要件#54 へ渡す
+	 * - 追補e / 追補g: 開いたとき・語を空にしたとき・閉じたときに `search_in_folder_reset` を
+	 *   投げる(Rust の窓の状態を捨て `epoch` を進める=走っている走査は次の区切りで止まる)。
+	 *   検索はそれまでに投げたリセットの完了を待ってから投げる
 	 * - ウインドウ単位・揮発(ストレージに書かない)。文言は英語(要件#51)
-	 * - 要件#63 の領域の目印は付けない(ポインタがパネル上なら直前の領域を保つ=契約⑨)
+	 * - 要件#63 の領域の目印はここには付けない(器 `.find-in-folder-pane` が持つ=要件#63 追補a)。
+	 *   結果の一覧にだけ、ツリーと同じ倍率(`resultsZoom`)を CSS `zoom` で当てる
 	 */
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import { invoke } from '$lib/ipc';
@@ -35,6 +55,7 @@
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { openFileFailedMessage, openForDisplay } from '$lib/open-document';
 	import {
+		FIND_IN_FOLDER_INVALID_REGEX,
 		FIND_IN_FOLDER_PAGE_SIZE,
 		FIND_IN_FOLDER_SHOW_MORE,
 		SEARCH_IN_FOLDER_COMMAND,
@@ -55,14 +76,22 @@
 		type SearchResponse,
 	} from '$lib/find-in-folder';
 	import { windowState } from '../stores/window-state.svelte';
+	import { DEFAULT_ZOOM } from '$lib/zoom';
 
 	let {
 		rootUri,
+		resultsZoom = DEFAULT_ZOOM,
 		onOpen,
 		onClose,
 	}: {
 		/** 探す root の URI(末尾 `/` 無し)。 */
 		rootUri: string;
+		/**
+		 * 結果の一覧の倍率(%・要件#63 追補a)。+page がツリーと同じ倍率を渡す。
+		 * `.find-in-folder-results` にだけ CSS `zoom` で当てる(見出し行・入力の行・トグルは
+		 * 動かさない)。判別と保存は `$lib/zoom-target` の持ち場。
+		 */
+		resultsZoom?: number;
 		/**
 		 * 結果の文書を開いた**後**に呼ぶ。+page が同じ語で要件#54 の検索を起動し、
 		 * `index` 番目(0 始まり・そのファイル内の一致の通し番号=追補b)を現在にする。
@@ -87,8 +116,18 @@
 	 * マウント時に投げる `search_in_folder_reset` の完了(追補e)。世代は 1 から振り直すので、
 	 * Rust 側に残る前回の最新世代を捨て終わるまで検索を投げない。失敗しても resolve する
 	 * (黙って続行)。マウント前は待つものが無いので解決済み。
+	 * 追補g: マウント時のリセットは前のパネルが閉じたときのリセット(`closingReset`)の後に投げ、
+	 * 語を空にしたときのリセット(g-1)もここに合わせる(検索はどちらの完了も待つ)。
 	 */
 	let resetDone: Promise<void> = Promise.resolve();
+
+	/** `search_in_folder_reset` を投げ、その完了を返す(失敗も resolve に畳む=黙って続行)。 */
+	function requestReset(): Promise<void> {
+		return invoke(SEARCH_IN_FOLDER_RESET_COMMAND).then(
+			() => undefined,
+			() => undefined,
+		);
+	}
 
 	/**
 	 * 表示用のファイルごとのまとまり。`groupHits` と同じ規則(path の初出順・入力順)だが、
@@ -134,9 +173,20 @@
 	let exclude = $state(savedScope.exclude);
 	let useExcludeSettings = $state(savedScope.useExcludeSettings);
 	let detailsOpen = $state(savedScope.detailsOpen);
+	/** 検索欄の右端の 3 トグル(要件#66 契約1・8)。 */
+	let matchCase = $state(savedScope.matchCase);
+	let wholeWord = $state(savedScope.wholeWord);
+	let useRegex = $state(savedScope.useRegex);
 
-	/** `search_in_folder` へ渡す欄の値(投げる時点の写し)。 */
-	type SearchScopeArgs = { include: string[]; exclude: string[]; useExcludeSettings: boolean };
+	/** `search_in_folder` へ渡す欄とトグルの値(投げる時点の写し)。 */
+	type SearchScopeArgs = {
+		include: string[];
+		exclude: string[];
+		useExcludeSettings: boolean;
+		matchCase: boolean;
+		wholeWord: boolean;
+		useRegex: boolean;
+	};
 
 	/** いま表示している結果を出した語(クリックで #54 へ渡すのはこちら)。 */
 	let resultsQuery = $state('');
@@ -165,11 +215,15 @@
 	let loadingMore = false;
 	let searching = $state(false);
 	let failed = $state(false);
+	/** 現在世代の式が組めなかった(要件#66 契約5)。 */
+	let invalidPattern = $state(false);
 
 	let status = $derived(
-		failed && query !== ''
-			? SEARCH_FAILED
-			: formatFolderStatus({ query, searching, total, files })
+		invalidPattern && query !== ''
+			? FIND_IN_FOLDER_INVALID_REGEX
+			: failed && query !== ''
+				? SEARCH_FAILED
+				: formatFolderStatus({ query, searching, total, files })
 	);
 	/** まだ取り込んでいない件数。探し直している間は古い結果の続きを出さない。 */
 	let remaining = $derived(
@@ -260,6 +314,9 @@
 				include: scope.include,
 				exclude: scope.exclude,
 				useExcludeSettings: scope.useExcludeSettings,
+				matchCase: scope.matchCase,
+				wholeWord: scope.wholeWord,
+				useRegex: scope.useRegex,
 			});
 			if (session.accept(response.generation, response) === null) return;
 			if (shownGeneration !== response.generation) resetRows(response.generation);
@@ -270,12 +327,14 @@
 			resultsGeneration = response.generation;
 			resultsQuery = value;
 			searching = false;
-		} catch {
+		} catch (err) {
 			// 失敗は状態表示に留める(例外を外へ出さない)。古い世代の失敗は黙って捨てる。
 			if (!session.isCurrent(generation)) return;
 			clearResults();
 			searching = false;
-			failed = true;
+			// 壊れた式は Rust が決まった文字列で reject する(要件#66 契約5)。それ以外は Search failed。
+			if (err === FIND_IN_FOLDER_INVALID_REGEX) invalidPattern = true;
+			else failed = true;
 		}
 	}
 
@@ -310,10 +369,14 @@
 		pageToken += 1;
 		loadingMore = false;
 		failed = false;
+		invalidPattern = false;
 		pendingQuery = value;
 		if (value === '') {
 			searching = false;
 			clearResults();
+			// 追補g g-1: 走っている走査を止める(待ち時間を置かずに投げる)。次の検索はこの完了を
+			// 待つ。まだ済んでいないマウント時のリセット(追補e e-2)も合わせて待つ。
+			resetDone = Promise.all([resetDone, requestReset()]).then(() => undefined);
 			return;
 		}
 		searching = true;
@@ -326,6 +389,9 @@
 			include: splitPatterns(include),
 			exclude: splitPatterns(exclude),
 			useExcludeSettings,
+			matchCase,
+			wholeWord,
+			useRegex,
 		};
 		timer = setTimeout(() => {
 			timer = undefined;
@@ -361,6 +427,25 @@
 		rescope();
 	}
 
+	/** Aa / ab / .* を切り替えた(要件#66 契約9)。欄と同じく、語が入っていれば探し直す。 */
+	function toggleMatchCase() {
+		matchCase = !matchCase;
+		setSearchScope({ matchCase });
+		rescope();
+	}
+
+	function toggleWholeWord() {
+		wholeWord = !wholeWord;
+		setSearchScope({ wholeWord });
+		rescope();
+	}
+
+	function toggleUseRegex() {
+		useRegex = !useRegex;
+		setSearchScope({ useRegex });
+		rescope();
+	}
+
 	/** 2 欄を隠す/出す。隠しても値は効き続けるので探し直さない。 */
 	function toggleDetails() {
 		detailsOpen = !detailsOpen;
@@ -383,7 +468,8 @@
 
 	async function openHit(hit: SearchHit) {
 		const uri = uriOf(hit.path);
-		const value = resultsQuery;
+		// .* ON は式ではなくその行で当たった文字列を渡す(要件#66 契約10)。トグルは渡さない。
+		const value = hit.matched ?? resultsQuery;
 		// 番目は ordinal から(無ければ表示中の結果と、それを出した語で数える=追補a/b)。
 		const index = matchIndex(shownHits, hit, value);
 		// 追補b-2: いま開いている文書なら開き直さない(再描画で番目が先頭に戻るのを避ける)。
@@ -420,10 +506,9 @@
 	}
 
 	onMount(() => {
-		resetDone = invoke(SEARCH_IN_FOLDER_RESET_COMMAND).then(
-			() => undefined,
-			() => undefined,
-		);
+		// 追補g g-2 の補足: 前のパネルが閉じたときのリセットが済んでから自分のリセットを投げる
+		// (待つ間に閉じたなら投げない=閉じたときのリセットが代わる)。
+		resetDone = closingReset.then(() => (destroyed ? undefined : requestReset()));
 		inputEl?.focus();
 		subscribe<SearchProgressPayload>(SEARCH_PROGRESS_EVENT, handleProgress);
 		subscribe<SearchDonePayload>(SEARCH_DONE_EVENT, handleDone);
@@ -436,6 +521,9 @@
 		if (timer !== undefined) clearTimeout(timer);
 		// 閉じた後に届いた応答を採らない。
 		session.next();
+		// 追補g g-2: 走っている走査を止める(応答は待たない・失敗は黙って続行)。次に開くパネルは、
+		// これと、このパネルのまだ済んでいないリセットの完了を待ってから自分のリセットを投げる。
+		closingReset = Promise.all([resetDone, requestReset()]).then(() => undefined);
 	});
 </script>
 
@@ -454,18 +542,57 @@
 	</div>
 	<div class="find-in-folder-query">
 		<div class="find-in-folder-query-row">
-			<input
-				type="text"
-				class="find-in-folder-input"
-				data-testid="find-in-folder-input"
-				aria-label="Find in folder"
-				placeholder="Find in folder"
-				spellcheck="false"
-				autocomplete="off"
-				value={query}
-				bind:this={inputEl}
-				oninput={handleInput}
-			/>
+			<!-- 要件#66 契約1: 3 トグルは検索欄の内側の右端に重ねる(歯車と同じ置き方)。 -->
+			<div class="find-in-folder-field-box find-in-folder-query-box">
+				<input
+					type="text"
+					class="find-in-folder-input find-in-folder-input--with-match-toggles"
+					data-testid="find-in-folder-input"
+					aria-label="Find in folder"
+					aria-invalid={invalidPattern && query !== '' ? 'true' : undefined}
+					placeholder="Find in folder"
+					spellcheck="false"
+					autocomplete="off"
+					value={query}
+					bind:this={inputEl}
+					oninput={handleInput}
+				/>
+				<div class="find-in-folder-match-toggles">
+					<button
+						type="button"
+						class="find-in-folder-icon-button find-in-folder-match-toggle"
+						data-testid="find-in-folder-match-case"
+						aria-pressed={matchCase}
+						aria-label="Match Case"
+						title="Match Case"
+						onclick={toggleMatchCase}
+					>
+						Aa
+					</button>
+					<button
+						type="button"
+						class="find-in-folder-icon-button find-in-folder-match-toggle"
+						data-testid="find-in-folder-whole-word"
+						aria-pressed={wholeWord}
+						aria-label="Match Whole Word"
+						title="Match Whole Word"
+						onclick={toggleWholeWord}
+					>
+						ab
+					</button>
+					<button
+						type="button"
+						class="find-in-folder-icon-button find-in-folder-match-toggle"
+						data-testid="find-in-folder-use-regex"
+						aria-pressed={useRegex}
+						aria-label="Use Regular Expression"
+						title="Use Regular Expression"
+						onclick={toggleUseRegex}
+					>
+						.*
+					</button>
+				</div>
+			</div>
 			<button
 				type="button"
 				class="find-in-folder-icon-button find-in-folder-toggle-details"
@@ -540,7 +667,11 @@
 			{status}
 		</div>
 	</div>
-	<div class="find-in-folder-results" data-testid="find-in-folder-results">
+	<div
+		class="find-in-folder-results"
+		data-testid="find-in-folder-results"
+		style:zoom={resultsZoom === DEFAULT_ZOOM ? null : `${resultsZoom}%`}
+	>
 		{#each groups as group (group.path)}
 			<div class="find-in-folder-group" data-testid="find-in-folder-group" data-path={group.path}>
 				<div class="find-in-folder-group-header" title={group.path}>
@@ -658,9 +789,27 @@
 		gap: 4px;
 	}
 
-	.find-in-folder-query-row .find-in-folder-input {
+	.find-in-folder-query-row .find-in-folder-query-box {
 		flex: 1;
 		min-width: 0;
+	}
+
+	/* 要件#66 契約1: 検索欄の右端の内側に Aa / ab / .* を重ねる。文字がボタンの下に潜らないよう右を空ける。 */
+	.find-in-folder-input--with-match-toggles {
+		padding-right: 70px;
+	}
+
+	.find-in-folder-input[aria-invalid='true'] {
+		border-color: #ef4444;
+	}
+
+	.find-in-folder-match-toggles {
+		position: absolute;
+		top: 50%;
+		right: 3px;
+		display: flex;
+		gap: 1px;
+		transform: translateY(-50%);
 	}
 
 	/* 要件#65 契約13: files to include / files to exclude。ラベルは小さく、欄は検索欄と同じ。 */
@@ -727,8 +876,16 @@
 		transform: translateY(-50%);
 	}
 
-	/* ON(既定)は押し込んだ見た目。OFF は素の歯車に戻る(Cursor のトグルと同じ)。 */
-	.find-in-folder-use-exclude-settings[aria-pressed='true'] {
+	/* 要件#66 追補a 契約4: Aa / ab / .* は歯車と同じ 20px 角・文字 11px。.find-in-folder-icon-button(22px・12px)より後ろに置いて効かせる。 */
+	.find-in-folder-match-toggle {
+		width: 20px;
+		height: 20px;
+		font-size: 11px;
+	}
+
+	/* ON(既定)は押し込んだ見た目。OFF は素の歯車に戻る(Cursor のトグルと同じ)。Aa / ab / .* も同じ(要件#66)。 */
+	.find-in-folder-use-exclude-settings[aria-pressed='true'],
+	.find-in-folder-match-toggle[aria-pressed='true'] {
 		background-color: var(--color-bg-tree-active);
 		border-color: var(--color-border);
 		color: var(--color-text-primary);

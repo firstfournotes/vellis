@@ -9,7 +9,7 @@ use clap::Parser;
     about = "A viewer and text editor for Markdown, HTML, images, 3D models, video, audio and PDF"
 )]
 pub struct Cli {
-    /// Target path or URI (file, directory, ssh://..., et://...)
+    /// Target path or URI (file, directory, ssh://...)
     pub path: Option<String>,
 
     /// Switch the root of the running instance instead of opening a new file
@@ -81,6 +81,38 @@ pub struct Cli {
         ]
     )]
     pub self_check: Option<std::path::PathBuf>,
+}
+
+/// The absolute path of a local `vellis <path>` argument that is not there,
+/// or `None` (要件#5 追補d 契約1〜4).
+///
+/// `main` calls this before the IPC probe and before starting the app, and
+/// exits with `no such file or directory` when it returns `Some`, instead of
+/// opening the parent folder as if the file were there.
+///
+/// - An argument with `://` (`file://`, `ssh://` …) is not checked (契約3).
+/// - An absolute path is taken as given; a relative one is joined to `cwd`.
+///   No canonicalize: a missing path cannot be canonicalized, and the path
+///   returned is the one checked.
+/// - Only `try_exists() == Ok(false)` counts as missing — a dangling symlink
+///   included, since `try_exists` follows links. `Err` (permissions and the
+///   like) means "cannot tell", and the launch goes on as before so the
+///   opening side reports it (契約2). `Path::exists()` would fold that `Err`
+///   into "missing", so it is not used.
+pub fn missing_local_path(path: &str, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    if path.contains("://") {
+        return None;
+    }
+    let path = std::path::Path::new(path);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    match abs.try_exists() {
+        Ok(false) => Some(abs),
+        Ok(true) | Err(_) => None,
+    }
 }
 
 #[cfg(test)]

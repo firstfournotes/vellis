@@ -135,9 +135,25 @@
 	function handleWindowKeyDown(e: KeyboardEvent) {
 		if (contextMenu.open && e.key === 'Escape') contextMenu.close();
 	}
+
+	/**
+	 * 追補b: 開いている間にページのどこかがスクロールしたら閉じる(メニューは `position: fixed`
+	 * なので、残すと項目の行から離れて浮いて見える)。要素の `scroll` はバブルしないので、
+	 * `window` の capture 段で受けて中の要素のスクロールも拾う。メニュー自身の中の
+	 * スクロールでは閉じない。閉じるだけで項目は実行しない。
+	 */
+	function handleWindowScroll(e: Event) {
+		if (!contextMenu.open) return;
+		if (el && e.target instanceof Node && el.contains(e.target)) return;
+		contextMenu.close();
+	}
 </script>
 
-<svelte:window onpointerdown={handleWindowPointerDown} onkeydown={handleWindowKeyDown} />
+<svelte:window
+	onpointerdown={handleWindowPointerDown}
+	onkeydown={handleWindowKeyDown}
+	onscrollcapture={handleWindowScroll}
+/>
 
 {#if contextMenu.open}
 	<!-- 自前メニューの上では webview 既定のメニューを出さない(ツリー上と同じ扱い)。 -->

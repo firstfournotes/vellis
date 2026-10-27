@@ -12,13 +12,16 @@
  *   (`- name:` に `self-check` を含める。例: `Self-check smoke (fixtures/sample.md)`)
  * - そのステップは `if: github.ref_type == 'tag'`(タグのときだけ)
  * - run の中で、生成した DMG(`src-tauri/target/release/bundle/dmg/` の `.dmg`)を
- *   `hdiutil attach -nobrowse -readonly -mountpoint <RUNNER_TEMP の下>` で読み取り専用にマウントし、
+ *   `diskutil image attach --readOnly --nobrowse --mountPoint <RUNNER_TEMP の下>` で読み取り専用にマウントし、
  *   その中の `vellis.app/Contents/MacOS/vellis` に `--self-check fixtures/sample.md` を実行し、
  *   JSON をログに出し(`tee` / `cat` / `echo`)、
  *   `node scripts/self-check-judge.mjs <report> --allow fixtures/self-check-allow.json` で判定する。
- *   マウントは成否にかかわらず外す(`trap` で `hdiutil detach`)(追補a・2026-10-07。
+ *   マウントは成否にかかわらず外す(`trap` で `diskutil eject`)(追補a・2026-10-07。
  *   `pnpm tauri build --bundles dmg` は DMG を作ったあと `bundle/macos/vellis.app` を消すので、
  *   `bundle/macos/` の .app を直接たたくと v0.5.2 のように No such file で落ちる)
+ *   (追補c・2026-10-26・Issue #673: マウントと取り外しの命令を `hdiutil attach -nobrowse -readonly -mountpoint` /
+ *   `hdiutil detach` から `diskutil image attach` / `diskutil eject` に改訂。hdiutil は macOS が deprecated と
+ *   警告する。ステップの run に `hdiutil` は出てこない。本テストの該当の確かめ 3 つを書き換え、hdiutil が出てこない確かめを 1 つ足した=由谷の承認)
  * - 逃がさない: そのステップに `continue-on-error` を書かない・run に `|| true` を書かない
  *
  * release-gate-dmg.sh:
@@ -89,17 +92,20 @@ describe('AC-72-7 (契約10): release.yml のタグ時の自己点検', () => {
 	it('mounts the generated DMG read-only, checks fixtures/sample.md with the app inside it, and judges it with the allowlist (追補a)', () => {
 		const step = selfCheckStep();
 		// 追補a: 生成した DMG(bundle/dmg/ の .dmg)を読み取り専用でマウントする
-		expect(step.body, 'DMG を hdiutil attach でマウントする').toMatch(/\bhdiutil\s+attach\b/);
-		expect(step.body, '読み取り専用(-readonly)でマウントする').toContain('-readonly');
+		// (追補c: 命令は hdiutil attach -readonly から diskutil image attach --readOnly に改訂)
+		expect(step.body, 'DMG を diskutil image attach でマウントする').toMatch(/\bdiskutil\s+image\s+attach\b/);
+		expect(step.body, '読み取り専用(--readOnly)でマウントする').toContain('--readOnly');
 		expect(step.body, '点検の対象は bundle/dmg/ の DMG').toContain(DMG_DIR);
 		// マウント先の vellis.app/Contents/MacOS/vellis に --self-check fixtures/sample.md を実行する
 		expect(step.body, 'DMG の中の vellis.app/Contents/MacOS/vellis をたたく').toContain(APP_BIN_IN_DMG);
 		expect(step.body).toMatch(/--self-check\s+"?(\S*\/)?fixtures\/sample\.md"?/);
 		// bundle/macos/ の .app を直接たたかない(DMG 生成後に消される=v0.5.2 の失敗)
 		expect(step.body).not.toContain('bundle/macos/vellis.app');
-		// マウントは外す(成否にかかわらず=trap)
-		expect(step.body, 'hdiutil detach で外す').toMatch(/\bhdiutil\s+detach\b/);
+		// マウントは外す(成否にかかわらず=trap)(追補c: hdiutil detach から diskutil eject に改訂)
+		expect(step.body, 'diskutil eject で外す').toMatch(/\bdiskutil\s+eject\b/);
 		expect(step.body, '成否にかかわらず外す(trap)').toMatch(/\btrap\b/);
+		// 追補c: hdiutil(macOS が deprecated と警告)はステップの run に出てこない
+		expect(step.body, 'hdiutil を使わない(追補c・Issue #673)').not.toMatch(/\bhdiutil\b/);
 		expect(step.body).toContain(JUDGE);
 		expect(step.body).toContain(ALLOW);
 		// 判定は node で動かす(Node 標準のみ)

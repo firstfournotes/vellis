@@ -358,6 +358,7 @@ interface Timing {
 	lines: number;
 	domMs?: number;
 	paintMs?: number;
+	frameStalled?: boolean;
 	maxTimerGapMs?: number;
 	lang?: string | null;
 	colouredSpans?: number;
@@ -368,7 +369,8 @@ interface Timing {
 /**
  * Click the row and time it, inside the page: t0 = just before the click;
  * DOM = the MutationObserver callback that first sees the new `<pre>` with the
- * full text; paint = the next animation frame after that. A 10 ms interval
+ * full text; paint = the next animation frame after that (if none comes within
+ * 2 s, paintMs is left out and frameStalled is recorded). A 10 ms interval
  * records the longest gap between its ticks — how long the page could not run
  * anything (≈ the freeze a user would feel).
  */
@@ -405,16 +407,20 @@ async function timeOpen(p: string, text: string): Promise<Timing> {
 				const pre = host.querySelector<HTMLElement>('pre.vellis-plaintext:not([data-gate-old])');
 				if (!pre || (pre.textContent ?? '').length !== len) return;
 				const dom = performance.now() - t0;
+				const record = (paint: { paintMs: number } | { frameStalled: true }) => ({
+					domMs: Math.round(dom),
+					...paint,
+					maxTimerGapMs: Math.round(Math.max(maxGap, performance.now() - last)),
+					lang: pre.getAttribute('data-vellis-lang'),
+					colouredSpans: pre.querySelectorAll('span[style*="color"]').length,
+					visibility: document.visibilityState,
+				});
+				// WKWebView runs no animation frames while the display is asleep, so
+				// give up on paint after 2 s and record that instead (req 69 追補a, #745).
+				const stall = setTimeout(() => finish(record({ frameStalled: true })), 2_000);
 				requestAnimationFrame(() => {
-					const paint = performance.now() - t0;
-					finish({
-						domMs: Math.round(dom),
-						paintMs: Math.round(paint),
-						maxTimerGapMs: Math.round(Math.max(maxGap, performance.now() - last)),
-						lang: pre.getAttribute('data-vellis-lang'),
-						colouredSpans: pre.querySelectorAll('span[style*="color"]').length,
-						visibility: document.visibilityState,
-					});
+					clearTimeout(stall);
+					finish(record({ paintMs: Math.round(performance.now() - t0) }));
 				});
 			};
 			const obs = new MutationObserver(check);
@@ -620,7 +626,9 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		expect((await readGateRecord()).dialogs).toEqual([]);
 	});
 
-	it('gate 3: boundary files — time to display in WKWebView and whether the view fell back to plain', async () => {
+	it('gate 3: boundary files — time to display in WKWebView and whether the view fell back to plain', async function () {
+		// Up to 2 s more per open when no frame comes (20 opens = 40 s), and the inner 90 s timeout should win over mocha's.
+		this.timeout(150_000);
 		await clickExplorerRow(uri(heavyDir));
 		await waitForExplorerRow(uri(path.join(heavyDir, 'ts-10000-lines.ts')), { timeout: 15_000 });
 		const order = [

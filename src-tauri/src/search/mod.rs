@@ -21,13 +21,17 @@
 //!   の補集合)。NUL を含むもの・UTF-8 でないものは静かに飛ばす
 //! - サイズ・件数の上限は設けない(2026-09-16 由谷決定)
 //! - 書き込み系(`write_text`)は一切呼ばない
+//! - 照合は [`QueryMatcher`](要件#66 の Aa / ab / .* の3トグル=[`MatchOptions`])。全部 OFF は
+//!   要件#55 の `to_lowercase` の部分一致のまま。`regex` クレートを使うのはこのモジュールだけ
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::ops::Range;
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
 use crate::errors::FsError;
@@ -87,12 +91,17 @@ pub fn is_text_file_name(name: &str) -> bool {
 /// `text` は当該行の原文(行末の `\n` / `\r\n` を除く)。打ち切りフラグは存在しない(契約④)。
 /// `ordinal` はそのファイルの先頭からの語の出現の通し番号(1 始まり・大小無視・重ならない出現・
 /// 1 行に複数あれば最初の出現の番号=追補a)。フロントは `ordinal - 1` を要件#54 の番目に使う。
+/// トグルが ON でも `ordinal` は要件#54 の数え方(跳ぶときに渡す語の大小無視の出現)で数える
+/// (要件#66 契約6)。`matched` は .* ON のときだけ、その行で最初に当たった部分の文字列
+/// (フロントはこれを要件#54 へ渡す=契約10)。.* OFF では None で、JSON にキーが出ない。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SearchHit {
     pub path: String,
     pub line: u32,
     pub text: String,
     pub ordinal: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched: Option<String>,
 }
 
 /// local の実体がシンボリックリンクか。`LocalProvider::list` はリンク先の種別を返すので
@@ -118,29 +127,244 @@ async fn read_whole(provider: &dyn FileProvider, uri: &Uri) -> Result<Vec<u8>, F
 }
 
 /// 1 ファイル分の一致を `hits` に足す(契約③④⑥)。NUL を含む・UTF-8 でないものは飛ばす。
-fn collect_hits(rel: &str, bytes: &[u8], query_lower: &str, hits: &mut Vec<SearchHit>) {
+///
+/// regex を通る経路(どれかのトグルが ON)では、行の処理と [`JumpCounts::before_line`] の
+/// 数え直しで見た行を合わせて [`CANCEL_CHECK_LINES`] 行ごとに `cancel` を確かめ、真なら
+/// 残りの行を見ずに false を返す(要件#66 追補a 契約1)。全部 OFF の経路は確かめない(契約2)。
+/// 最後まで見たら true。
+fn collect_hits(
+    rel: &str,
+    bytes: &[u8],
+    matcher: &QueryMatcher,
+    hits: &mut Vec<SearchHit>,
+    cancel: &(dyn Fn() -> bool + Send + Sync),
+) -> bool {
     if bytes.contains(&0) {
-        return;
+        return true;
     }
     let Ok(content) = std::str::from_utf8(bytes) else {
-        return;
+        return true;
     };
-    // Occurrences seen so far in this file (non-overlapping, case-insensitive,
-    // the same rule as `findMatches` on the front end).
-    let mut seen: u32 = 0;
-    for (i, raw) in content.split('\n').enumerate() {
-        let line = raw.strip_suffix('\r').unwrap_or(raw);
-        let count = line.to_lowercase().matches(query_lower).count() as u32;
-        if count > 0 {
-            hits.push(SearchHit {
-                path: rel.to_string(),
-                line: (i + 1) as u32,
-                text: line.to_string(),
-                ordinal: seen + 1,
-            });
-            seen += count;
+    let lines = content.split('\n').map(|raw| raw.strip_suffix('\r').unwrap_or(raw));
+    if matcher.regex.is_none() {
+        // All toggles OFF: the 要件#55 path, unchanged.
+        // Occurrences seen so far in this file (non-overlapping, case-insensitive,
+        // the same rule as `findMatches` on the front end).
+        let mut seen: u32 = 0;
+        for (i, line) in lines.enumerate() {
+            let count = line.to_lowercase().matches(&matcher.query_lower).count() as u32;
+            if count > 0 {
+                hits.push(SearchHit {
+                    path: rel.to_string(),
+                    line: (i + 1) as u32,
+                    text: line.to_string(),
+                    ordinal: seen + 1,
+                    matched: None,
+                });
+                seen += count;
+            }
+        }
+        return true;
+    }
+    let lines: Vec<&str> = lines.collect();
+    let mut counts = JumpCounts::new(&lines);
+    let mut check = CancelCheck::new(cancel);
+    for (i, line) in lines.iter().enumerate() {
+        if check.tick() {
+            return false;
+        }
+        let Some(first) = matcher.first_in_line(line) else {
+            continue;
+        };
+        let matched = matcher.options.use_regex.then(|| line[first.clone()].to_string());
+        // The word handed to 要件#54 (契約10) and counted the way 要件#54 counts (契約6).
+        let jump_lower = match &matched {
+            Some(m) => m.to_lowercase(),
+            None => matcher.query_lower.clone(),
+        };
+        let before_in_line = line[..first.start].to_lowercase().matches(&jump_lower).count() as u32;
+        let Some(before_lines) = counts.before_line(&jump_lower, i, &mut check) else {
+            return false;
+        };
+        let ordinal = 1 + before_lines + before_in_line;
+        hits.push(SearchHit {
+            path: rel.to_string(),
+            line: (i + 1) as u32,
+            text: line.to_string(),
+            ordinal,
+            matched,
+        });
+    }
+    true
+}
+
+/// regex を通る経路で打ち切りを確かめる間隔(行の処理と数え直しで見た行を合わせた行数・
+/// 要件#66 追補a 契約1)。
+const CANCEL_CHECK_LINES: usize = 1_000;
+
+/// 見た行を数え、[`CANCEL_CHECK_LINES`] 行ごとに打ち切りを確かめる係。
+struct CancelCheck<'c> {
+    cancel: &'c (dyn Fn() -> bool + Send + Sync),
+    /// 前に確かめてから見た行数。
+    since_check: usize,
+}
+
+impl<'c> CancelCheck<'c> {
+    fn new(cancel: &'c (dyn Fn() -> bool + Send + Sync)) -> Self {
+        Self { cancel, since_check: 0 }
+    }
+
+    /// 1 行見たことを数え、間隔に達したら打ち切りを確かめる。打ち切りなら true。
+    fn tick(&mut self) -> bool {
+        self.since_check += 1;
+        if self.since_check < CANCEL_CHECK_LINES {
+            return false;
+        }
+        self.since_check = 0;
+        (self.cancel)()
+    }
+}
+
+/// 跳ぶときに渡す語ごとの、ファイルの先頭から数えた出現数(要件#66 契約6)。語(小文字)ごとに
+/// 「どの行の手前まで数えたか」と数を持ち、次に聞かれたらその続きから数える(.* ON では行ごとに
+/// 語が変わりうる)。
+struct JumpCounts<'a> {
+    lines: &'a [&'a str],
+    /// 行ごとの `to_lowercase`(初めて数えるときに作る)。
+    lowered: Vec<Option<String>>,
+    /// 語(小文字) → (数え終えた行数, 出現数)
+    by_word: HashMap<String, (usize, u32)>,
+}
+
+impl<'a> JumpCounts<'a> {
+    fn new(lines: &'a [&'a str]) -> Self {
+        Self { lines, lowered: vec![None; lines.len()], by_word: HashMap::new() }
+    }
+
+    /// `line` 行目(0 始まり)より前のすべての行にある `word_lower` の重ならない出現の数。
+    /// 数え直しで見た行も `check` に数え、打ち切りが分かったら None(要件#66 追補a 契約1)。
+    fn before_line(&mut self, word_lower: &str, line: usize, check: &mut CancelCheck<'_>) -> Option<u32> {
+        let (upto, count) = self.by_word.get(word_lower).copied().unwrap_or((0, 0));
+        let mut count = count;
+        for i in upto..line {
+            if check.tick() {
+                return None;
+            }
+            let lowered = self.lowered[i].get_or_insert_with(|| self.lines[i].to_lowercase());
+            count += lowered.matches(word_lower).count() as u32;
+        }
+        self.by_word.insert(word_lower.to_string(), (line.max(upto), count));
+        Some(count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 照合の3トグル(要件#66 契約2〜5)
+// ---------------------------------------------------------------------------
+
+/// 壊れた正規表現のときに command が返す文言(契約5・値固定)。フロントの
+/// `FIND_IN_FOLDER_INVALID_REGEX`(`src/lib/find-in-folder.ts`)と同じ値。
+pub const INVALID_PATTERN_MESSAGE: &str = "Invalid regular expression";
+
+/// 検索欄の右端の3トグル(契約1・2)。`Default` = 3 つとも false(= 要件#55 の規則)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MatchOptions {
+    /// Aa(Match Case)
+    pub match_case: bool,
+    /// ab(Match Whole Word)
+    pub whole_word: bool,
+    /// .*(Use Regular Expression)
+    pub use_regex: bool,
+}
+
+/// .* ON の語が `regex` として組めない(契約5)。詳しいエラー文は状態表示に出さない。
+#[derive(Clone, Debug)]
+pub struct InvalidPattern(pub String);
+
+/// 語とトグルから組んだ照合器(契約2〜4)。1 行(行末の `\n` / `\r\n` を除いたもの)ずつ当てる。
+///
+/// - 全部 OFF: `to_lowercase` の部分一致(regex を通さない=要件#55 のまま)
+/// - それ以外: `regex` で組む。.* OFF の語は `regex::escape`(記号も文字のまま)。ab ON は
+///   `\b{start-half}(?:E)\b{end-half}` で包む(一致の前後の文字だけを見る=ripgrep の `-w`。
+///   単語の文字は Unicode の `\w`=仮名・漢字も含む)。Aa OFF は `case_insensitive(true)`
+/// - 長さ 0 の一致は一致として数えない(`^`・`a*` の空一致で全行が当たらない)
+#[derive(Clone, Debug)]
+pub struct QueryMatcher {
+    options: MatchOptions,
+    /// 全部 OFF の照合と、`ordinal` の数え方(要件#54 の大小無視の出現)に使う。
+    query_lower: String,
+    /// 全部 OFF なら None。
+    regex: Option<Regex>,
+}
+
+impl QueryMatcher {
+    /// .* ON で組めない式(上限を超える式を含む)は Err。.* OFF は Err にならない。
+    pub fn new(query: &str, options: MatchOptions) -> Result<QueryMatcher, InvalidPattern> {
+        let query_lower = query.to_lowercase();
+        if options == MatchOptions::default() {
+            return Ok(Self { options, query_lower, regex: None });
+        }
+        let build = |pattern: &str| {
+            RegexBuilder::new(pattern)
+                .case_insensitive(!options.match_case)
+                .build()
+                .map_err(|e| InvalidPattern(e.to_string()))
+        };
+        let pattern = if options.use_regex {
+            // Check the expression on its own first: wrapping it for ab could otherwise
+            // turn a broken one such as `a)(?:b` into a valid pattern.
+            build(query)?;
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        let regex = if options.whole_word {
+            build(&format!(r"\b{{start-half}}(?:{pattern})\b{{end-half}}"))?
+        } else {
+            build(&pattern)?
+        };
+        Ok(Self { options, query_lower, regex: Some(regex) })
+    }
+
+    /// 1 行の中の長さ 1 以上の一致のバイト範囲を、左から重ならずに(`find_iter` の順)。
+    pub fn find_in_line(&self, line: &str) -> Vec<Range<usize>> {
+        match &self.regex {
+            Some(regex) => regex.find_iter(line).map(|m| m.range()).filter(|r| !r.is_empty()).collect(),
+            None => lowercase_ranges(line, &self.query_lower),
         }
     }
+
+    /// その行の最初の(長さ 1 以上の)一致。
+    fn first_in_line(&self, line: &str) -> Option<Range<usize>> {
+        match &self.regex {
+            Some(regex) => regex.find_iter(line).map(|m| m.range()).find(|r| !r.is_empty()),
+            None => lowercase_ranges(line, &self.query_lower).into_iter().next(),
+        }
+    }
+}
+
+/// `line.to_lowercase()` の中の `query_lower` の重ならない出現を、元の `line` のバイト範囲に
+/// 写して返す(全部 OFF の [`QueryMatcher::find_in_line`])。`to_lowercase` は文字ごとに
+/// 長さが変わりうるので、文字の境目で小文字側と元の位置を対応させる。
+fn lowercase_ranges(line: &str, query_lower: &str) -> Vec<Range<usize>> {
+    if query_lower.is_empty() {
+        return Vec::new();
+    }
+    let lowered = line.to_lowercase();
+    // (小文字側の位置, 元の位置) を文字の境目ごとに。
+    let mut bounds: Vec<(usize, usize)> = Vec::with_capacity(line.len() + 1);
+    let mut at = 0usize;
+    for (i, c) in line.char_indices() {
+        bounds.push((at, i));
+        at += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    bounds.push((at, line.len()));
+    let start_of = |lo: usize| bounds[bounds.partition_point(|b| b.0 <= lo) - 1].1;
+    let end_of = |lo: usize| bounds[bounds.partition_point(|b| b.0 < lo).min(bounds.len() - 1)].1;
+    lowered
+        .match_indices(query_lower)
+        .map(|(lo, m)| start_of(lo)..end_of(lo + m.len()))
+        .collect()
 }
 
 /// 走査の本体を「全部ためる sink」で呼ぶ薄い層(窓を持たない呼び出し元・テスト用)。
@@ -180,20 +404,31 @@ impl Default for SearchFilter {
     }
 }
 
-/// 1 回の検索が使う設定と欄。`Default` は既定の設定と空の欄=要件#55 の除外と同じ。
+/// 1 回の検索が使う設定と欄とトグル。`Default` は既定の設定と空の欄と全部 OFF のトグル
+/// =要件#55 の除外と照合と同じ。
 #[derive(Clone, Debug, Default)]
 pub struct SearchScope {
     pub settings: Settings,
     pub filter: SearchFilter,
+    /// 検索欄の3トグル(要件#66)。
+    pub options: MatchOptions,
 }
 
 impl SearchScope {
+    /// トグルは全部 OFF(変えるなら [`Self::with_options`])。
     pub fn new(settings: Settings, filter: SearchFilter) -> Self {
-        Self { settings, filter }
+        Self { settings, filter, options: MatchOptions::default() }
+    }
+
+    /// 照合のトグルを差し替える(要件#66 契約7)。
+    pub fn with_options(self, options: MatchOptions) -> Self {
+        Self { options, ..self }
     }
 
     /// 走査の本体(引数・戻り・バッチ・打ち切りは free fn の [`search_in_folder_streaming`] と同じ)。
-    /// 除外はこの scope の設定と欄(要件#65 契約13 の判定順=[`ScanRules`])。
+    /// 除外はこの scope の設定と欄(要件#65 契約13 の判定順=[`ScanRules`])・照合はトグル
+    /// ([`QueryMatcher`])。組めない式は `list` も `read_bytes` も sink も呼ばずに `total: 0`
+    /// (文言は command が先に [`QueryMatcher::new`] で判定する=要件#66 契約5)。
     pub async fn search_in_folder_streaming(
         &self,
         provider: &dyn FileProvider,
@@ -202,7 +437,10 @@ impl SearchScope {
         sink: &mut (dyn FnMut(SearchProgress) -> SearchControl + Send),
         cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<SearchSummary, FsError> {
-        scan(&self.rules(), provider, root, query, sink, cancel).await
+        let Ok(matcher) = QueryMatcher::new(query, self.options) else {
+            return Ok(SearchSummary { total: 0, files: 0, stopped: false });
+        };
+        scan(&self.rules(), &matcher, provider, root, query, sink, cancel).await
     }
 
     /// 全部ためる薄い層(戻りは free fn の [`search_in_folder_with`] と同じ)。
@@ -500,7 +738,8 @@ fn join_rel(dir_rel: &str, name: &str) -> String {
 /// 返したら以後 `list` / `read_bytes` を発行せず `stopped: true` で返す(d-3)。
 /// `cancel` は各ディレクトリの `list` 前(root 含む)と各ファイルの `read_bytes` 前に呼び、
 /// true なら以後 `list` / `read_bytes` を発行せず、sink も呼ばずに `stopped: true` で返す
-/// (一致が無く sink に問えない古い走査も止める=d-3 の補足)。
+/// (一致が無く sink に問えない古い走査も止める=d-3 の補足)。regex を通る経路では 1 ファイルの
+/// 中でも行の処理と数え直しの途中で確かめ、true なら残りの行を見ずに同じく返す(要件#66 追補a)。
 /// 空文字の query は sink を呼ばず `total: 0`。root 自体が一覧できなければ Err、
 /// 配下の読み取り失敗はそこだけ飛ばす(fail-open)。
 ///
@@ -519,6 +758,7 @@ pub async fn search_in_folder_streaming(
 /// 走査の本体([`SearchScope::search_in_folder_streaming`] の中身)。
 async fn scan(
     rules: &ScanRules<'_>,
+    matcher: &QueryMatcher,
     provider: &dyn FileProvider,
     root: &Uri,
     query: &str,
@@ -538,7 +778,6 @@ async fn scan(
     if query.is_empty() {
         return Ok(batch.summary(false));
     }
-    let query_lower = query.to_lowercase();
 
     // 深さ優先のフレーム: (ディレクトリの相対パス, 残りの対象=名前順)。
     if cancel() {
@@ -596,7 +835,9 @@ async fn scan(
                     let rel = rels.pop_front().expect("one rel per read");
                     batch.files_scanned += 1;
                     if let Ok(bytes) = result {
-                        collect_hits(&rel, &bytes, &query_lower, &mut batch.pending);
+                        if !collect_hits(&rel, &bytes, matcher, &mut batch.pending, cancel) {
+                            return Ok(batch.summary(true));
+                        }
                     }
                     if !batch.flush_due() {
                         return Ok(batch.summary(true));

@@ -42,10 +42,24 @@ export const FIND_IN_FOLDER_NO_RESULTS = 'No results';
 export const FIND_IN_FOLDER_SEARCHING = 'Searching…';
 
 /**
+ * 壊れた正規表現のときの状態表示(英語=要件#51・要件#66 契約5)。Rust の
+ * `search::INVALID_PATTERN_MESSAGE` と同値で、`search_in_folder` の reject の値がこれと
+ * 一致したら壊れた式の表示にする。
+ */
+export const FIND_IN_FOLDER_INVALID_REGEX = 'Invalid regular expression';
+
+/**
  * Rust の SearchHit と同形。path は root からの相対・line は 1 始まり。
  * `ordinal` はそのファイルの先頭からの語の出現の通し番号(1 始まり=追補a)。無い応答もある。
+ * `matched` は .* ON のときだけ入る、その行で最初に当たった文字列(要件#66 契約6・10)。
  */
-export type SearchHit = { path: string; line: number; text: string; ordinal?: number };
+export type SearchHit = {
+	path: string;
+	line: number;
+	text: string;
+	ordinal?: number;
+	matched?: string;
+};
 
 /**
  * command の戻り。generation は投げた世代がそのまま返る。`total` / `files` は全件の値、
@@ -177,13 +191,20 @@ export function matchIndex(hits: SearchHit[], clicked: SearchHit, query: string)
 /**
  * 検索パネルの欄(要件#65 契約13)。files to include / files to exclude の中身(glob を
  * カンマ区切りで書いたそのままの文字列)・歯車(Use Exclude Settings)の ON/OFF・
- * 2 欄を出しているか(Toggle Search Details)。
+ * 2 欄を出しているか(Toggle Search Details)。検索欄の右端の Aa / ab / .* の ON/OFF
+ * (要件#66 契約8。照合は Rust で、ここは bool を覚えるだけ)。
  */
 export type SearchScopeFields = {
 	include: string;
 	exclude: string;
 	useExcludeSettings: boolean;
 	detailsOpen: boolean;
+	/** Aa(Match Case) */
+	matchCase: boolean;
+	/** ab(Match Whole Word) */
+	wholeWord: boolean;
+	/** .*(Use Regular Expression) */
+	useRegex: boolean;
 };
 
 const DEFAULT_SEARCH_SCOPE: SearchScopeFields = {
@@ -191,6 +212,9 @@ const DEFAULT_SEARCH_SCOPE: SearchScopeFields = {
 	exclude: '',
 	useExcludeSettings: true,
 	detailsOpen: true,
+	matchCase: false,
+	wholeWord: false,
+	useRegex: false,
 };
 
 /**
@@ -210,7 +234,7 @@ export function setSearchScope(patch: Partial<SearchScopeFields>): void {
 	searchScope = { ...searchScope, ...patch };
 }
 
-/** 欄を既定(空・歯車 ON・2 欄を出す)に戻す。 */
+/** 欄を既定(空・歯車 ON・2 欄を出す・3 トグル OFF)に戻す。 */
 export function resetSearchScope(): void {
 	searchScope = { ...DEFAULT_SEARCH_SCOPE };
 }

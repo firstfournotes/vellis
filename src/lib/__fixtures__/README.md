@@ -29,3 +29,12 @@ Python(zipfile / struct)による一回きりの生成物。手で編集しな�
 | `empty.ply` | 頂点0(`element vertex 0`)— 既存の失敗経路へ落ちる入力 |
 
 壊れたヘッダの PLY はフィクスチャにせず、テスト内でバイト列を組む。
+
+## 色つき 3MF(要件#23 追補e・Issue #558 — `model-3mf-color.acceptance.test.ts`)
+
+`python3 generate-3mf-color.py`(同ディレクトリ・標準ライブラリ zipfile のみ)による生成物。
+手で編集しないこと。
+
+| ファイル | 内容 |
+|---|---|
+| `cube-color.3mf` | 立方体 **[0,40]^3**・12 三角形。`basematerials`(id=2)の `base displaycolor="#FF0000"`(name=Red)を `object pid="2" pindex="0"` で全三角形に当てたもの。`ThreeMFLoader` はこれを非インデックスの Mesh 1 つ(36 頂点)+ `MeshPhongMaterial`(色は `setStyle('#FF0000', SRGBColorSpace)`)に組む |

@@ -367,13 +367,18 @@ describe('AC-55-15: 入力すると invoke(search_in_folder, { root, query, gene
 		expect(p.args.generation).toBeGreaterThanOrEqual(1);
 		// 要件側更新(要件#65 契約11・13・2026-09-25): 検索パネルの欄の 3 引数
 		// (include / exclude / useExcludeSettings)が加わった。他の assert は無改変。
+		// 要件側更新(要件#66 契約7・12・2026-10-08): 3 トグルの 3 引数
+		// (matchCase / wholeWord / useRegex)が加わり 9 キー。他の assert は無改変。
 		expect(Object.keys(p.args).sort()).toEqual([
 			'exclude',
 			'generation',
 			'include',
+			'matchCase',
 			'query',
 			'root',
 			'useExcludeSettings',
+			'useRegex',
+			'wholeWord',
 		]);
 	});
 
@@ -1547,7 +1552,7 @@ describe('要件#65 契約13・AC-65-15: 検索パネルの欄 — include / exc
 		expect(includeField().compareDocumentPosition(excludeField()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
-	it('語を入れると include: []・exclude: []・useExcludeSettings: true が渡る(引数キーは 6 つ)', async () => {
+	it('語を入れると include: []・exclude: []・useExcludeSettings: true が渡る(引数キーは 9 つ)', async () => {
 		mountPanel();
 
 		const p = await typeAndWait('alpha');
@@ -1558,13 +1563,17 @@ describe('要件#65 契約13・AC-65-15: 検索パネルの欄 — include / exc
 		expect(args.include).toEqual([]);
 		expect(args.exclude).toEqual([]);
 		expect(args.useExcludeSettings).toBe(true);
+		// 要件側更新(要件#66 契約7・12・2026-10-08): matchCase / wholeWord / useRegex が加わり 9 キー。
 		expect(Object.keys(p.args).sort()).toEqual([
 			'exclude',
 			'generation',
 			'include',
+			'matchCase',
 			'query',
 			'root',
 			'useExcludeSettings',
+			'useRegex',
+			'wholeWord',
 		]);
 	});
 
@@ -1737,5 +1746,609 @@ describe('要件#65 契約13・AC-65-15: 検索パネルの欄 — include / exc
 				expect(el.getAttribute(attr) ?? '').not.toMatch(CJK);
 			}
 		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#66(2026-10-08 起案・docs/requirements/req-66.md)— AC-66-13〜17
+// Aa / ab / .* の 3 トグル(大文字小文字の区別・単語単位・正規表現)=フロントの配線
+//
+// 配線に求める契約(implementer はこれに従う。照合は Rust=契約7。フロントは bool を渡すだけ):
+// - `$lib/find-in-folder` に追加(要件#65 契約13 の「窓の生存中だけ覚える」変数に載せる):
+//   `SearchScopeFields` に `matchCase: boolean; wholeWord: boolean; useRegex: boolean`(既定 false)。
+//   `getSearchScope` / `setSearchScope` / `resetSearchScope` で扱う(`resetSearchScope` で 3 つとも OFF)。
+//   `export const FIND_IN_FOLDER_INVALID_REGEX = 'Invalid regular expression'`(Rust の `INVALID_PATTERN_MESSAGE` と同値)。
+//   `SearchHit` に `matched?: string`(.* ON のときだけ Rust が値を入れる)
+// - `FindInFolder.svelte`: 検索欄(`find-in-folder-input`)の**内側の右端**に 3 つの `<button type="button">`。
+//   DOM の順= 検索欄 → `find-in-folder-match-case`(文字 `Aa`・title / aria-label `Match Case`)
+//   → `find-in-folder-whole-word`(`ab`・`Match Whole Word`)→ `find-in-folder-use-regex`(`.*`・`Use Regular Expression`)
+//   → `find-in-folder-toggle-details`(今の `…`)。3 つとも `.find-in-folder-query-row` の中。
+//   `aria-pressed` が `"true"` / `"false"`。既定は 3 つとも `"false"`。文字はテキスト(画像・アイコンフォント無し)
+// - `search_in_folder` の invoke 引数に `matchCase` / `wholeWord` / `useRegex`(boolean)を足す= 9 キー
+//   (`root` / `query` / `generation` / `include` / `exclude` / `useExcludeSettings` / `matchCase` / `wholeWord` / `useRegex`)
+// - トグルを押したら `setSearchScope` へ書き、語が入っていれば `rescope()` と同じ経路(世代を進めて
+//   debounce → invoke)で探し直す。語が空なら invoke しない(状態だけ変わり、次に語を入れたときに渡る)
+// - invoke の reject の値が `FIND_IN_FOLDER_INVALID_REGEX` と一致したら、状態表示をその文言にし、結果一覧を
+//   空にし、検索欄に `aria-invalid="true"` を付ける(`Search failed` にはしない)。それ以外の reject は
+//   今までどおり `Search failed`。語を直す・トグルを切り替える・語を消すと通常に戻る(新しい世代で上書き)
+// - 結果クリック: `onOpen(uri, hit.matched ?? resultsQuery, matchIndex(..))`(引数は 3 つのまま・
+//   Aa / ab / .* の状態は渡さない)。同じ文書なら開き直さない(追補b-2 のまま)
+// - 設定ファイル・`localStorage`・`sessionStorage` には書かない。文言は英語(要件#51)
+// ---------------------------------------------------------------------------
+
+type ToggleArgs = ScopeArgs & { matchCase: boolean; wholeWord: boolean; useRegex: boolean };
+
+const toggleArgs = (p: Pending): ToggleArgs => p.args as unknown as ToggleArgs;
+
+const NINE_KEYS = [
+	'exclude',
+	'generation',
+	'include',
+	'matchCase',
+	'query',
+	'root',
+	'useExcludeSettings',
+	'useRegex',
+	'wholeWord',
+];
+
+const matchCaseButton = () => screen.getByTestId('find-in-folder-match-case') as HTMLButtonElement;
+const wholeWordButton = () => screen.getByTestId('find-in-folder-whole-word') as HTMLButtonElement;
+const useRegexButton = () => screen.getByTestId('find-in-folder-use-regex') as HTMLButtonElement;
+const pressed = (el: HTMLElement) => el.getAttribute('aria-pressed');
+
+/** トグルを押して invoke が 1 件増えるまで待つ(検索欄の入力と同じ経路=debounce があっても 300ms 以下)。 */
+async function clickToggleAndWait(el: HTMLButtonElement) {
+	const before = searchCalls().length;
+	await fireEvent.click(el);
+	await waitFor(() => expect(searchCalls().length).toBe(before + 1), { timeout: 1500 });
+	return pending[pending.length - 1];
+}
+
+/** 語が空のままトグルを押す(invoke は増えない)。 */
+async function clickToggle(el: HTMLButtonElement) {
+	await fireEvent.click(el);
+	await settle();
+}
+
+/** .* ON の応答(Rust が `matched` を添える形)。語は `fo+`。 */
+const REGEX_HITS: SearchHit[] = [
+	{ path: 'docs/a.md', line: 3, text: 'food fooo', ordinal: 1, matched: 'foo' },
+	{ path: 'docs/a.md', line: 7, text: 'x fooo', ordinal: 2, matched: 'fooo' },
+	// Rust は .* ON なら必ず `matched` を入れるが、無い行(古い応答)は検索欄の語に落ちる。
+	{ path: 'b.txt', line: 1, text: 'fo', ordinal: 1 },
+];
+
+describe('要件#66・AC-66-13: トグルの表示 — Aa / ab / .* が検索欄の内側の右端に並ぶ(契約1)', () => {
+	beforeEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+	afterEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+
+	it('testid の <button type="button"> が 3 つあり、文字は Aa・ab・.*', () => {
+		mountPanel();
+
+		for (const [button, text] of [
+			[matchCaseButton(), 'Aa'],
+			[wholeWordButton(), 'ab'],
+			[useRegexButton(), '.*'],
+		] as const) {
+			expect(button.tagName).toBe('BUTTON');
+			expect(button.getAttribute('type')).toBe('button');
+			expect(button.textContent?.trim()).toBe(text);
+			expect(button.querySelector('img, svg, i')).toBeNull();
+		}
+	});
+
+	it('title と aria-label は Match Case / Match Whole Word / Use Regular Expression(値固定・英語)', () => {
+		mountPanel();
+
+		for (const [button, label] of [
+			[matchCaseButton(), 'Match Case'],
+			[wholeWordButton(), 'Match Whole Word'],
+			[useRegexButton(), 'Use Regular Expression'],
+		] as const) {
+			expect(button.getAttribute('title')).toBe(label);
+			expect(button.getAttribute('aria-label')).toBe(label);
+		}
+	});
+
+	it('初期の aria-pressed は 3 つとも "false"(既定は OFF=今の規則)', () => {
+		mountPanel();
+
+		expect(pressed(matchCaseButton())).toBe('false');
+		expect(pressed(wholeWordButton())).toBe('false');
+		expect(pressed(useRegexButton())).toBe('false');
+	});
+
+	it('DOM の順は 検索欄 → Aa → ab → .* → …(Toggle Search Details)で、3 つとも .find-in-folder-query-row の中', () => {
+		mountPanel();
+
+		const follows = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+		expect(follows(input(), matchCaseButton())).toBe(true);
+		expect(follows(matchCaseButton(), wholeWordButton())).toBe(true);
+		expect(follows(wholeWordButton(), useRegexButton())).toBe(true);
+		expect(follows(useRegexButton(), detailsToggle())).toBe(true);
+
+		const row = input().closest('.find-in-folder-query-row');
+		expect(row, '検索欄は .find-in-folder-query-row の中').toBeTruthy();
+		for (const button of [matchCaseButton(), wholeWordButton(), useRegexButton()]) {
+			expect(button.closest('.find-in-folder-query-row')).toBe(row);
+		}
+		// 2 欄の側(find-in-folder-details)には無い。
+		for (const button of [matchCaseButton(), wholeWordButton(), useRegexButton()]) {
+			expect(button.closest('.find-in-folder-details')).toBeNull();
+		}
+	});
+
+	it('… で 2 欄を隠しても 3 トグルは残る(検索欄の中にある)', async () => {
+		mountPanel();
+
+		await fireEvent.click(detailsToggle());
+		await settle();
+
+		expect(detailsToggle().getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByTestId('find-in-folder-include')).toBeNull();
+		expect(screen.queryByTestId('find-in-folder-match-case')).toBeTruthy();
+		expect(screen.queryByTestId('find-in-folder-whole-word')).toBeTruthy();
+		expect(screen.queryByTestId('find-in-folder-use-regex')).toBeTruthy();
+	});
+
+	it('パネルの文言に CJK が無い(要件#51)— トグルの文字・title・aria-label も', async () => {
+		mountPanel();
+		const p = await typeAndWait('alpha');
+		p.resolve(HITS);
+		await settle();
+
+		expect(screen.getByTestId('find-in-folder').textContent ?? '').not.toMatch(CJK);
+		for (const button of [matchCaseButton(), wholeWordButton(), useRegexButton()]) {
+			for (const attr of ['title', 'aria-label']) {
+				expect(button.getAttribute(attr) ?? '').not.toMatch(CJK);
+			}
+		}
+	});
+});
+
+describe('要件#66・AC-66-14: invoke の引数(9 キー)と、トグルを押したら直ちに探し直す(契約7・9)', () => {
+	beforeEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+	afterEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+
+	it('語 alpha を入れると matchCase: false・wholeWord: false・useRegex: false が渡り、引数キーは 9 つ', async () => {
+		mountPanel();
+
+		const p = await typeAndWait('alpha');
+
+		const args = toggleArgs(p);
+		expect(args.query).toBe('alpha');
+		expect(args.root).toBe(ROOT);
+		expect(args.matchCase).toBe(false);
+		expect(args.wholeWord).toBe(false);
+		expect(args.useRegex).toBe(false);
+		expect(Object.keys(p.args).sort()).toEqual(NINE_KEYS);
+	});
+
+	/** 1 つのトグルを押す → 新しい世代で `key: true`・もう一度押す → `key: false`。ほかの 2 つは false のまま。 */
+	async function roundTrip(button: () => HTMLButtonElement, key: 'matchCase' | 'wholeWord' | 'useRegex') {
+		mountPanel();
+		const p1 = await typeAndWait('alpha');
+		expect(toggleArgs(p1)[key]).toBe(false);
+
+		const p2 = await clickToggleAndWait(button());
+
+		expect(searchCalls()).toHaveLength(2);
+		expect(pressed(button())).toBe('true');
+		expect(toggleArgs(p2)[key]).toBe(true);
+		expect(toggleArgs(p2).query).toBe('alpha');
+		expect(toggleArgs(p2).root).toBe(ROOT);
+		expect(toggleArgs(p2).generation).toBeGreaterThan(toggleArgs(p1).generation);
+		expect(Object.keys(p2.args).sort()).toEqual(NINE_KEYS);
+		for (const other of ['matchCase', 'wholeWord', 'useRegex'] as const) {
+			if (other !== key) expect(toggleArgs(p2)[other]).toBe(false);
+		}
+		// 探し直している間の状態表示は Searching…(新しい世代)。
+		expect(status().textContent?.trim()).toBe('Searching…');
+
+		const p3 = await clickToggleAndWait(button());
+
+		expect(searchCalls()).toHaveLength(3);
+		expect(pressed(button())).toBe('false');
+		expect(toggleArgs(p3)[key]).toBe(false);
+		expect(toggleArgs(p3).generation).toBeGreaterThan(toggleArgs(p2).generation);
+		expect(input().value).toBe('alpha');
+	}
+
+	it('Aa を押すと新しい世代で matchCase: true の invoke が 1 回増え aria-pressed="true"。もう一度押すと false で呼び直す', async () => {
+		await roundTrip(matchCaseButton, 'matchCase');
+	});
+
+	it('ab を押すと wholeWord: true で呼び直し、もう一度押すと false', async () => {
+		await roundTrip(wholeWordButton, 'wholeWord');
+	});
+
+	it('.* を押すと useRegex: true で呼び直し、もう一度押すと false', async () => {
+		await roundTrip(useRegexButton, 'useRegex');
+	});
+
+	it('3 つを ON にすると 3 つとも true で渡る(世代は押すたびに進む)', async () => {
+		mountPanel();
+		const p1 = await typeAndWait('alpha');
+		const p2 = await clickToggleAndWait(matchCaseButton());
+		const p3 = await clickToggleAndWait(wholeWordButton());
+		const p4 = await clickToggleAndWait(useRegexButton());
+
+		expect(toggleArgs(p4)).toMatchObject({ matchCase: true, wholeWord: true, useRegex: true, query: 'alpha' });
+		expect(toggleArgs(p3)).toMatchObject({ matchCase: true, wholeWord: true, useRegex: false });
+		expect(toggleArgs(p2)).toMatchObject({ matchCase: true, wholeWord: false, useRegex: false });
+		expect(toggleArgs(p4).generation).toBeGreaterThan(toggleArgs(p3).generation);
+		expect(toggleArgs(p3).generation).toBeGreaterThan(toggleArgs(p2).generation);
+		expect(toggleArgs(p2).generation).toBeGreaterThan(toggleArgs(p1).generation);
+		expect(pressed(matchCaseButton())).toBe('true');
+		expect(pressed(wholeWordButton())).toBe('true');
+		expect(pressed(useRegexButton())).toBe('true');
+	});
+
+	it('語が空のときはトグルを押しても invoke は増えず、あとで語を入れたときに押した状態で渡る', async () => {
+		mountPanel();
+
+		await clickToggle(matchCaseButton());
+		await clickToggle(useRegexButton());
+		await new Promise((r) => setTimeout(r, 350));
+		await settle();
+
+		expect(searchCalls()).toHaveLength(0);
+		expect(pressed(matchCaseButton())).toBe('true');
+		expect(pressed(wholeWordButton())).toBe('false');
+		expect(pressed(useRegexButton())).toBe('true');
+		expect(status().textContent?.trim()).toBe('');
+
+		const p = await typeAndWait('alpha');
+		expect(toggleArgs(p)).toMatchObject({ matchCase: true, wholeWord: false, useRegex: true, query: 'alpha' });
+		expect(searchCalls()).toHaveLength(1);
+	});
+
+	it('トグルの切り替えで古い世代の応答は捨てられる(契約⑧のまま)', async () => {
+		mountPanel();
+		const p1 = await typeAndWait('alpha');
+		const p2 = await clickToggleAndWait(matchCaseButton());
+
+		p1.resolve(HITS);
+		await settle();
+		expect(hitRows()).toHaveLength(0);
+
+		p2.resolve([HITS[1]]);
+		await settle();
+		expect(hitRows()).toHaveLength(1);
+		expect(status().textContent?.trim()).toBe('1 result in 1 file');
+	});
+});
+
+describe('要件#66・AC-66-15: 壊れた式の表示 — Invalid regular expression・結果 0・aria-invalid(契約5)', () => {
+	const INVALID = 'Invalid regular expression';
+
+	beforeEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+	afterEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+
+	it('.* ON の invoke が文字列 `Invalid regular expression` で reject → 状態表示がその文言・結果の行が 0・検索欄の aria-invalid="true"', async () => {
+		mountPanel();
+		const p1 = await typeAndWait('alpha');
+		p1.resolve(HITS);
+		await settle();
+		expect(hitRows()).toHaveLength(3);
+
+		const p2 = await clickToggleAndWait(useRegexButton());
+		expect(toggleArgs(p2).useRegex).toBe(true);
+		p2.reject(INVALID);
+		await settle();
+		await settle();
+
+		expect(status().textContent?.trim()).toBe(INVALID);
+		expect(status().textContent?.trim()).toBe(findInFolderModule.FIND_IN_FOLDER_INVALID_REGEX);
+		expect(hitRows()).toHaveLength(0);
+		expect(groups()).toHaveLength(0);
+		expect(showMore()).toBeNull();
+		expect(input().getAttribute('aria-invalid')).toBe('true');
+		expect(input().value).toBe('alpha');
+		expect(pressed(useRegexButton())).toBe('true');
+		expect(screen.getByTestId('find-in-folder')).toBeTruthy();
+		expect(screen.getByTestId('find-in-folder').textContent ?? '').not.toMatch(CJK);
+	});
+
+	it('語を直して新しい世代の応答が返ると、状態表示は件数の文言に戻り aria-invalid が外れる', async () => {
+		mountPanel();
+		await clickToggle(useRegexButton());
+		const p1 = await typeAndWait('(');
+		p1.reject(INVALID);
+		await settle();
+		await settle();
+		expect(status().textContent?.trim()).toBe(INVALID);
+		expect(input().getAttribute('aria-invalid')).toBe('true');
+
+		const p2 = await typeAndWait('(x)');
+		expect(toggleArgs(p2)).toMatchObject({ useRegex: true, query: '(x)' });
+		p2.resolve(HITS);
+		await settle();
+
+		expect(status().textContent?.trim()).toBe('3 results in 2 files');
+		expect(hitRows()).toHaveLength(3);
+		expect(input().getAttribute('aria-invalid')).not.toBe('true');
+	});
+
+	it('トグルを切り替えて(.* OFF)新しい世代の応答が返っても通常に戻る・0 件なら No results', async () => {
+		mountPanel();
+		await clickToggle(useRegexButton());
+		const p1 = await typeAndWait('(');
+		p1.reject(INVALID);
+		await settle();
+		await settle();
+		expect(input().getAttribute('aria-invalid')).toBe('true');
+
+		const p2 = await clickToggleAndWait(useRegexButton());
+		expect(toggleArgs(p2)).toMatchObject({ useRegex: false, query: '(' });
+		p2.resolve([]);
+		await settle();
+
+		expect(status().textContent?.trim()).toBe('No results');
+		expect(input().getAttribute('aria-invalid')).not.toBe('true');
+	});
+
+	it('語を消すと状態表示は空に戻り aria-invalid が外れる(invoke はしない)', async () => {
+		mountPanel();
+		await clickToggle(useRegexButton());
+		const p1 = await typeAndWait('(');
+		p1.reject(INVALID);
+		await settle();
+		await settle();
+		expect(status().textContent?.trim()).toBe(INVALID);
+
+		await fireEvent.input(input(), { target: { value: '' } });
+		await new Promise((r) => setTimeout(r, 350));
+		await settle();
+
+		expect(searchCalls()).toHaveLength(1);
+		expect(status().textContent?.trim()).toBe('');
+		expect(input().getAttribute('aria-invalid')).not.toBe('true');
+	});
+
+	it('別の文字列(boom)や Error で reject したときは今までどおり Search failed(aria-invalid は付かない)', async () => {
+		mountPanel();
+		await clickToggle(useRegexButton());
+		const p1 = await typeAndWait('alpha');
+		p1.reject('boom');
+		await settle();
+		await settle();
+
+		expect(status().textContent?.trim()).toBe('Search failed');
+		expect(hitRows()).toHaveLength(0);
+		expect(input().getAttribute('aria-invalid')).not.toBe('true');
+		expect(screen.getByTestId('find-in-folder')).toBeTruthy();
+
+		const p2 = await typeAndWait('alphab');
+		p2.reject(new Error(INVALID));
+		await settle();
+		await settle();
+
+		// reject の値が文字列として一致したときだけ壊れた式の表示(Error オブジェクトは今までどおり)。
+		expect(status().textContent?.trim()).toBe('Search failed');
+		expect(input().value).toBe('alphab');
+	});
+
+	it('古い世代の壊れた式の reject は表示に触れない(新しい世代の結果が残る)', async () => {
+		mountPanel();
+		await clickToggle(useRegexButton());
+		const p1 = await typeAndWait('(');
+		const p2 = await typeAndWait('(x)');
+		p2.resolve(HITS);
+		await settle();
+		expect(hitRows()).toHaveLength(3);
+
+		p1.reject(INVALID);
+		await settle();
+		await settle();
+
+		expect(status().textContent?.trim()).toBe('3 results in 2 files');
+		expect(hitRows()).toHaveLength(3);
+		expect(input().getAttribute('aria-invalid')).not.toBe('true');
+	});
+});
+
+describe('要件#66・AC-66-16: 覚え方 — 窓の生存中だけ(パネルを閉じて開き直しても残る・ストレージに書かない)(契約8)', () => {
+	beforeEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+	afterEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+
+	it('Aa と .* を ON にしてパネルを閉じて開き直すと Aa と .* が "true"・ab が "false" のまま残り、次の invoke に渡る', async () => {
+		const first = mountPanel();
+		await clickToggle(matchCaseButton());
+		await clickToggle(useRegexButton());
+		expect(pressed(matchCaseButton())).toBe('true');
+		expect(pressed(useRegexButton())).toBe('true');
+
+		first.unmount();
+		await settle();
+		expect(screen.queryByTestId('find-in-folder')).toBeNull();
+
+		mountPanel();
+
+		expect(pressed(matchCaseButton())).toBe('true');
+		expect(pressed(wholeWordButton())).toBe('false');
+		expect(pressed(useRegexButton())).toBe('true');
+
+		const p = await typeAndWait('alpha');
+		expect(toggleArgs(p)).toMatchObject({ matchCase: true, wholeWord: false, useRegex: true });
+	});
+
+	it('語を入れて探した後に押した状態も開き直しで残る(欄・歯車と同じ変数=要件#65 契約13)', async () => {
+		const first = mountPanel();
+		await typeAndWait('alpha');
+		await clickToggleAndWait(wholeWordButton());
+		expect(findInFolderModule.getSearchScope().wholeWord).toBe(true);
+		expect(findInFolderModule.getSearchScope().matchCase).toBe(false);
+		expect(findInFolderModule.getSearchScope().useRegex).toBe(false);
+
+		first.unmount();
+		await settle();
+		mountPanel();
+
+		expect(pressed(wholeWordButton())).toBe('true');
+		expect(pressed(matchCaseButton())).toBe('false');
+		expect(pressed(useRegexButton())).toBe('false');
+		const p = await typeAndWait('alpha');
+		expect(toggleArgs(p)).toMatchObject({ matchCase: false, wholeWord: true, useRegex: false });
+	});
+
+	it('resetSearchScope() の後にマウントすると 3 つとも "false"(窓を新しく開いたときと同じ)', async () => {
+		const first = mountPanel();
+		await clickToggle(matchCaseButton());
+		await clickToggle(wholeWordButton());
+		await clickToggle(useRegexButton());
+		first.unmount();
+		await settle();
+
+		findInFolderModule.resetSearchScope();
+		mountPanel();
+
+		expect(pressed(matchCaseButton())).toBe('false');
+		expect(pressed(wholeWordButton())).toBe('false');
+		expect(pressed(useRegexButton())).toBe('false');
+		const p = await typeAndWait('alpha');
+		expect(toggleArgs(p)).toMatchObject({ matchCase: false, wholeWord: false, useRegex: false });
+	});
+
+	it('トグルを押した後も localStorage / sessionStorage のキーは空', async () => {
+		mountPanel();
+		await typeAndWait('alpha');
+		await clickToggleAndWait(matchCaseButton());
+		await clickToggleAndWait(wholeWordButton());
+		await clickToggleAndWait(useRegexButton());
+
+		expect(Object.keys(localStorage)).toEqual([]);
+		expect(Object.keys(sessionStorage)).toEqual([]);
+	});
+});
+
+describe('要件#66・AC-66-17: 結果クリック → onOpen(uri, 語, ordinal - 1)— トグルは渡さない・.* ON は matched を渡す(契約10)', () => {
+	const A_URI = `${ROOT}/docs/a.md`;
+
+	beforeEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+	afterEach(() => {
+		findInFolderModule.resetSearchScope();
+	});
+
+	it('Aa ON・ab ON で検索した結果の行をクリックすると onOpen(uri, "alpha", ordinal - 1) が 1 回(引数は 3 つのまま)', async () => {
+		const { onOpen } = mountPanel();
+		await clickToggle(matchCaseButton());
+		await clickToggle(wholeWordButton());
+		const p = await typeAndWait('alpha');
+		expect(toggleArgs(p)).toMatchObject({ matchCase: true, wholeWord: true, useRegex: false });
+		p.resolve(HITS);
+		await settle();
+
+		await fireEvent.click(hitRows()[1]); // docs/a.md line 7, ordinal 2
+		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+
+		expect(onOpen.mock.calls[0]).toHaveLength(3);
+		expect(onOpen.mock.calls[0]).toEqual([A_URI, 'alpha', 1]);
+		expect(openCalls()).toHaveLength(1);
+		expect(openCalls()[0][1]).toEqual({ uri: A_URI });
+	});
+
+	it('同じ文書なら開き直さない(追補b-2 のまま): confirmDiscardEdits / open_document を呼ばず onOpen だけ', async () => {
+		const { onOpen } = mountPanel();
+		await clickToggle(matchCaseButton());
+		const p = await typeAndWait('alpha');
+		p.resolve(HITS);
+		await settle();
+		windowState.setDocument({ uri: A_URI, content: '# a\n\nalpha one\n', modified: 1 });
+		const setDocumentSpy = vi.spyOn(windowState, 'setDocument');
+		setDocumentSpy.mockClear();
+		confirmMock.mockClear();
+		invokeMock.mockClear();
+
+		await fireEvent.click(hitRows()[0]); // docs/a.md line 3, ordinal 1
+		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+		await settle();
+
+		expect(onOpen.mock.calls[0]).toEqual([A_URI, 'alpha', 0]);
+		expect(confirmMock).not.toHaveBeenCalled();
+		expect(openCalls()).toHaveLength(0);
+		expect(setDocumentSpy).not.toHaveBeenCalled();
+		expect(windowState.currentDocument?.uri).toBe(A_URI);
+	});
+
+	it('.* ON の結果で matched: "fooo" の行をクリックすると onOpen(uri, "fooo", ordinal - 1)(式ではなく当たった文字列)', async () => {
+		const { onOpen } = mountPanel();
+		await clickToggle(useRegexButton());
+		const p = await typeAndWait('fo+');
+		expect(toggleArgs(p)).toMatchObject({ useRegex: true, query: 'fo+' });
+		p.resolve(REGEX_HITS);
+		await settle();
+		expect(hitRows()).toHaveLength(3);
+
+		await fireEvent.click(hitRows()[1]); // docs/a.md line 7, matched 'fooo', ordinal 2
+		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+
+		expect(onOpen.mock.calls[0]).toHaveLength(3);
+		expect(onOpen.mock.calls[0]).toEqual([A_URI, 'fooo', 1]);
+		expect(openCalls()[0][1]).toEqual({ uri: A_URI });
+
+		await fireEvent.click(hitRows()[0]); // docs/a.md line 3, matched 'foo', ordinal 1 (same document now)
+		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(2));
+		expect(onOpen.mock.calls[1]).toEqual([A_URI, 'foo', 0]);
+	});
+
+	it('.* ON でも matched が無い行は検索欄の語(結果を出した語)を渡す', async () => {
+		const { onOpen } = mountPanel();
+		await clickToggle(useRegexButton());
+		const p = await typeAndWait('fo+');
+		p.resolve(REGEX_HITS);
+		await settle();
+
+		await fireEvent.click(hitRows()[2]); // b.txt line 1, no matched, ordinal 1
+		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+
+		expect(onOpen.mock.calls[0]).toEqual([`${ROOT}/b.txt`, 'fo+', 0]);
+	});
+
+	it('.* ON の結果は検索欄を打ち替えた後でも表示中の結果の matched を渡す(結果を出した語の扱いと同じ)', async () => {
+		const { onOpen } = mountPanel();
+		await clickToggle(useRegexButton());
+		const p = await typeAndWait('fo+');
+		p.resolve(REGEX_HITS);
+		await settle();
+		// Retype without letting the new search resolve: the shown results are still for 'fo+'.
+		await typeAndWait('fo+x');
+
+		await fireEvent.click(hitRows()[0]);
+		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+
+		expect(onOpen.mock.calls[0]).toEqual([A_URI, 'foo', 0]);
+	});
+
+	it('progress で出した .* ON の行のクリックも matched を渡す(追補d の経路)', async () => {
+		const { onOpen } = await mountSubscribed();
+		await clickToggle(useRegexButton());
+		const p = await typeAndWait('fo+');
+		await emitProgress(p.args.generation, REGEX_HITS, 2);
+		expect(hitRows()).toHaveLength(3);
+
+		await fireEvent.click(hitRows()[1]);
+		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+
+		expect(onOpen.mock.calls[0]).toEqual([A_URI, 'fooo', 1]);
 	});
 });

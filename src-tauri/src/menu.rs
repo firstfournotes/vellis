@@ -855,8 +855,11 @@ pub fn handle_menu_open_click(app: &AppHandle<Wry>, event: &str) {
 /// dialog and root derivation; a new window has no frontend state to consult
 /// — asking a window to create its own sibling would only add a hop. It goes
 /// straight through `create_window`, the same seam the `new_window` command
-/// uses, so both routes register identical `WindowArgs` and both have their
-/// geometry restored by the window-state plugin's `window_created` hook.
+/// uses, so both routes register identical `WindowArgs` and both place the
+/// window the same way: 24px down and to the right of the front window, or
+/// centred when there is none (requirements.md #12 追補b). The window-state
+/// plugin restores only the first window of a launch (`main`), never a window
+/// opened later.
 ///
 /// Window creation is async (the manager is behind an async mutex) while the
 /// menu callback is not, so the work is spawned; failures are logged rather
@@ -956,26 +959,16 @@ pub fn handle_toggle_devtools_click(app: &AppHandle<Wry>) {
 }
 
 /// 成功ダイアログの本文(要件#35 ③=英語固定)。作られたリンクと指し先の2行に、
-/// インストール先が PATH 上かどうかで案内か警告(追記例つき)を続ける。
+/// 断定しない案内と追記例を続ける。Finder から起動したアプリは PATH を正しく
+/// 判定できないため `target_dir_on_path` は見ない(要件#35 追補b 契約3)。
+/// どの行も字下げしない(要件#35 追補d 改訂 d-2: macOS 27 の NSAlert は行頭の
+/// 空白を消すため)。
 pub fn install_cli_success_body(result: &InstallCliResult) -> String {
-    let paths = format!(
-        "Installed:\n  {}\n  → {}",
+    format!(
+        "Installed:\n{}\n→ {}\n\nOpen a new terminal window and run `vellis`.\nIf the command is not found, add the following to your ~/.zshrc or similar:\n\nexport PATH=\"$HOME/.local/bin:$PATH\"",
         result.target_path.display(),
         result.source_path.display(),
-    );
-    if result.target_dir_on_path {
-        format!("{}\n\nThe `vellis` command is now available in new shells.", paths)
-    } else {
-        format!(
-            "{}\n\n⚠ {} is not on your PATH.\nAdd the following to your ~/.zshrc or similar:\n\n  export PATH=\"$HOME/.local/bin:$PATH\"",
-            paths,
-            result
-                .target_path
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
-        )
-    }
+    )
 }
 
 /// 失敗ダイアログの本文(要件#35 ③)。`install_cli()` の Err をそのまま挟む。
@@ -1049,23 +1042,84 @@ pub fn handle_check_for_updates_click(app: &AppHandle<Wry>) {
     });
 }
 
+/// Set while an Install 'vellis' Command in PATH result dialog is up, from the
+/// click until the dialog is dismissed (requirements.md #35 追補d 契約3).
+static INSTALL_CLI_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Clears [`INSTALL_CLI_IN_FLIGHT`] when dropped, so every path out of the
+/// install — including one that never reaches the dialog — releases it.
+struct InstallCliInFlight;
+
+impl Drop for InstallCliInFlight {
+    fn drop(&mut self) {
+        INSTALL_CLI_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// The window the Install CLI result dialog is attached to as a sheet
+/// (requirements.md #35 追補d 契約2).
+///
+/// `windows` is `(label, focused, visible and not minimized)` for every
+/// webview window, print windows included, in `app.webview_windows()` order.
+/// - Print windows are never chosen: they close once printing is done.
+/// - The focused document window, if any.
+/// - Otherwise the first visible, non-minimized document window.
+/// - Otherwise `None`, and the dialog is shown without a parent.
+pub fn install_cli_dialog_parent<'a>(windows: &[(&'a str, bool, bool)]) -> Option<&'a str> {
+    let mut documents = windows
+        .iter()
+        .filter(|&&(label, _, _)| !crate::print::is_print_window(label));
+    documents
+        .clone()
+        .find(|&&(_, focused, _)| focused)
+        .or_else(|| documents.find(|&&(_, _, visible)| visible))
+        .map(|&(label, _, _)| label)
+}
+
 /// Handle the "Install 'vellis' Command in PATH" menu click — runs the shared
 /// install logic and displays a native dialog with the result.
+///
+/// Since 追補d (Issue #720・#721) the dialog is a sheet on the frontmost
+/// document window ([`install_cli_dialog_parent`]), shown with `show`:
+/// - Without a parent, rfd hands the message to the system's
+///   UserNotificationCenter. The success body used to be indented, and the
+///   indentation never showed (#720); a sheet loses it too, since NSAlert on
+///   macOS 27 strips each line's leading whitespace, so the body is no longer
+///   indented (追補d 改訂 d-2).
+/// - `blocking_show` waited on the main thread (this handler runs in the menu
+///   event), freezing every window until the dialog closed (#721). With a
+///   parent it would never return at all, since the sheet's completion has to
+///   come back through the main thread.
+///
+/// When no document window is visible the dialog has no parent; it still
+/// does not freeze. A click while the dialog is up is ignored; the in-flight
+/// guard rides into its callback.
 pub fn handle_install_cli_click(app: &AppHandle<Wry>) {
-    match crate::cli_install::install_cli() {
-        Ok(result) => {
-            app.dialog()
-                .message(install_cli_success_body(&result))
-                .title("Vellis CLI")
-                .kind(MessageDialogKind::Info)
-                .blocking_show();
-        }
-        Err(e) => {
-            app.dialog()
-                .message(install_cli_failure_body(&e))
-                .title("Vellis CLI")
-                .kind(MessageDialogKind::Error)
-                .blocking_show();
-        }
+    if INSTALL_CLI_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
     }
+    let guard = InstallCliInFlight;
+    let (body, kind) = match crate::cli_install::install_cli() {
+        Ok(result) => (install_cli_success_body(&result), MessageDialogKind::Info),
+        Err(e) => (install_cli_failure_body(&e), MessageDialogKind::Error),
+    };
+    let windows = app.webview_windows();
+    let table: Vec<(&str, bool, bool)> = windows
+        .iter()
+        .map(|(label, w)| {
+            let focused = w.is_focused().unwrap_or(false);
+            let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
+            (label.as_str(), focused, visible)
+        })
+        .collect();
+    let mut builder = app.dialog().message(body).title("Vellis CLI").kind(kind);
+    if let Some(window) = install_cli_dialog_parent(&table).and_then(|label| windows.get(label)) {
+        builder = builder.parent(window);
+    }
+    builder.show(move |_| {
+        let _guard = guard;
+    });
 }

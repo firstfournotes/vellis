@@ -97,6 +97,9 @@ import {
 	type SearchDonePayload,
 	type SearchProgressPayload,
 } from './find-in-folder';
+// 要件#66(2026-10-08)。壊れた式の文言の定数と、3 トグルの覚え方(`SearchScopeFields` の 3 キー)。
+// 名前空間 import なので、未実装でもこのファイルの読み込みは失敗しない(該当ケースだけが赤)。
+import * as findInFolderModule from './find-in-folder';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 
@@ -749,5 +752,124 @@ describe('要件#55 追補d・AC-55-39: 段階的な表示のイベント名・p
 		expect(s.startsWith(FIND_IN_FOLDER_SEARCHING)).toBe(true);
 		expect(s.endsWith(' so far')).toBe(true);
 		expect(s).not.toMatch(CJK);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#66(2026-10-08 起案・docs/requirements/req-66.md)— AC-66-18
+// 壊れた式の文言の定数と、Aa / ab / .* の覚え方の純関数(契約5・8)
+//
+// 確定契約(`src/lib/find-in-folder.ts` に追加。Tauri を import しない・`RegExp` を作らない=照合は Rust):
+//
+// ```ts
+// /** 壊れた正規表現のときの状態表示(英語=要件#51)。Rust の `search::INVALID_PATTERN_MESSAGE` と同値。
+//  *  `search_in_folder` の reject の値がこれと一致したら壊れた式の表示にする。 *\/
+// export const FIND_IN_FOLDER_INVALID_REGEX = 'Invalid regular expression';
+//
+// /** 要件#65 契約13 の欄に 3 トグルを足す(既定はすべて false=今の規則)。 *\/
+// export type SearchScopeFields = {
+//   include: string; exclude: string; useExcludeSettings: boolean; detailsOpen: boolean;
+//   matchCase: boolean; wholeWord: boolean; useRegex: boolean;
+// };
+// // getSearchScope / setSearchScope / resetSearchScope は従来どおり(resetSearchScope で 3 つとも false)。
+//
+// /** Rust の SearchHit と同形。`matched` は .* ON のときだけ入る「その行で最初に当たった文字列」。 *\/
+// export type SearchHit = { path: string; line: number; text: string; ordinal?: number; matched?: string };
+// ```
+// 配線(トグルの表示・invoke の引数・再検索・壊れた式の表示・覚え方・結果クリック)は
+// src/components/FindInFolder.wiring.test.ts(AC-66-13〜17)。照合の規則は src-tauri/tests/acceptance_req66.rs。
+// ---------------------------------------------------------------------------
+
+describe('要件#66・AC-66-18: 壊れた式の文言の定数と、3 トグルの覚え方の純関数(契約5・8)', () => {
+	test('FIND_IN_FOLDER_INVALID_REGEX は `Invalid regular expression`(値固定・英語・1 行)', () => {
+		expect(findInFolderModule.FIND_IN_FOLDER_INVALID_REGEX).toBe('Invalid regular expression');
+		expect(findInFolderModule.FIND_IN_FOLDER_INVALID_REGEX).not.toMatch(CJK);
+		expect(findInFolderModule.FIND_IN_FOLDER_INVALID_REGEX).not.toContain('\n');
+	});
+
+	test('Rust の search/mod.rs の INVALID_PATTERN_MESSAGE と同値(2 か所の定数を突き合わせる)', () => {
+		const rust = readFileSync(resolve(REPO_ROOT, 'src-tauri/src/search/mod.rs'), 'utf8');
+		const m = rust.match(/pub const INVALID_PATTERN_MESSAGE: &str = "([^"]+)";/);
+		expect(m, 'search/mod.rs declares `pub const INVALID_PATTERN_MESSAGE: &str = "…";`').toBeTruthy();
+		expect(m?.[1]).toBe(findInFolderModule.FIND_IN_FOLDER_INVALID_REGEX);
+	});
+
+	test('resetSearchScope() の後の getSearchScope() は matchCase / wholeWord / useRegex が false(既定=今の規則)', () => {
+		findInFolderModule.resetSearchScope();
+		const scope = findInFolderModule.getSearchScope();
+		expect(scope.matchCase).toBe(false);
+		expect(scope.wholeWord).toBe(false);
+		expect(scope.useRegex).toBe(false);
+		// 要件#65 契約13 の 4 キーはそのまま。
+		expect(scope).toEqual({
+			include: '',
+			exclude: '',
+			useExcludeSettings: true,
+			detailsOpen: true,
+			matchCase: false,
+			wholeWord: false,
+			useRegex: false,
+		});
+	});
+
+	test('setSearchScope({ matchCase: true }) の後は matchCase だけが true(ほかのキーは変わらない)', () => {
+		findInFolderModule.resetSearchScope();
+		findInFolderModule.setSearchScope({ matchCase: true });
+		expect(findInFolderModule.getSearchScope()).toEqual({
+			include: '',
+			exclude: '',
+			useExcludeSettings: true,
+			detailsOpen: true,
+			matchCase: true,
+			wholeWord: false,
+			useRegex: false,
+		});
+
+		findInFolderModule.setSearchScope({ useRegex: true });
+		expect(findInFolderModule.getSearchScope()).toMatchObject({ matchCase: true, wholeWord: false, useRegex: true });
+
+		findInFolderModule.setSearchScope({ wholeWord: true, matchCase: false });
+		expect(findInFolderModule.getSearchScope()).toMatchObject({ matchCase: false, wholeWord: true, useRegex: true });
+		// 欄の値を変えてもトグルは変わらない(同じ変数の別のキー)。
+		findInFolderModule.setSearchScope({ include: 'docs/**' });
+		expect(findInFolderModule.getSearchScope()).toMatchObject({
+			include: 'docs/**',
+			matchCase: false,
+			wholeWord: true,
+			useRegex: true,
+		});
+
+		findInFolderModule.resetSearchScope();
+		expect(findInFolderModule.getSearchScope()).toMatchObject({ matchCase: false, wholeWord: false, useRegex: false, include: '' });
+	});
+
+	test('getSearchScope() は写しを返す(戻り値を書き換えても次の getSearchScope() は変わらない)', () => {
+		findInFolderModule.resetSearchScope();
+		const first = findInFolderModule.getSearchScope();
+		first.matchCase = true;
+		first.wholeWord = true;
+		first.useRegex = true;
+		const second = findInFolderModule.getSearchScope();
+		expect(second.matchCase).toBe(false);
+		expect(second.wholeWord).toBe(false);
+		expect(second.useRegex).toBe(false);
+		expect(second).not.toBe(first);
+	});
+
+	test('SearchHit.matched は省略可の string(型の固定)', () => {
+		const withMatched: SearchHit = { path: 'a.md', line: 3, text: 'food', ordinal: 1, matched: 'foo' };
+		const withoutMatched: SearchHit = { path: 'a.md', line: 3, text: 'food', ordinal: 1 };
+		expect(withMatched.matched).toBe('foo');
+		expect(withoutMatched.matched).toBeUndefined();
+		// グループ化は `matched` を落とさず壊れない(行は {line, text} だけ=契約⑥のまま)。
+		expect(groupHits([withMatched])).toEqual([{ path: 'a.md', count: 1, hits: [{ line: 3, text: 'food' }] }]);
+	});
+
+	test('find-in-folder.ts は RegExp を作らない・Tauri とストレージに触れない(照合は Rust=契約7)', () => {
+		const src = readFileSync(resolve(__dirname, 'find-in-folder.ts'), 'utf-8');
+		const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+		expect(code).not.toMatch(/RegExp/);
+		expect(code).not.toMatch(/@tauri-apps\//);
+		expect(code).not.toMatch(/localStorage|sessionStorage/);
 	});
 });

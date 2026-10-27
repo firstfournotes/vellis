@@ -1,13 +1,15 @@
 /**
  * 最近開いたファイル(Recent Files・requirements.md #64)の画面を持たない部分。
  *
- * 記録と保存は Rust(`src-tauri/src/recent_files.rs`)。文書を開くのに成功するたびに
- * `open_in_window` が記録し、「見つからない」で失敗したら除く(契約1・2・8)ので、
- * フロントは記録を呼ばない。ここが持つのは:
+ * 記録と保存は Rust(`src-tauri/src/recent_files.rs`)。テキストの文書は開くのに成功するたびに
+ * `open_in_window` が記録し、「見つからない」で失敗したら除く(契約1・2・8)。画像・PDF・
+ * 動画・音声・3D は、ビューアが最初に表示できた時点でフロントが `record_displayed_file` で
+ * 記録を頼む(追補f=開けなかったものを載せない)。ここが持つのは:
  * - メニューのイベント名・command 名・文言(英語=要件#51)
  * - 行の表示ラベル(ファイル名+root からの相対フォルダ)と、ツリーで行を見せるための
  *   祖先フォルダ(どちらも文字列だけで作る純関数)
  * - 区画を出してよいかの判定と、読み込み・消去の invoke
+ * - 表示できたときの記録の「1 回開くごとに 1 回だけ」の判定と、その invoke(追補f)
  *
  * 区画(開閉・高さ・クリック)は `src/components/RecentFiles.svelte`、開閉と高さの保存は
  * `$lib/recent-files-section`、Command + Shift + R の受け口は `src/routes/+page.svelte`。
@@ -21,6 +23,8 @@ export const MENU_RECENT_FILES_EVENT = 'menu_recent_files';
 /** Tauri command 名(契約4・9・11)。invoke の第 1 引数。 */
 export const LIST_RECENT_FILES_COMMAND = 'list_recent_files';
 export const CLEAR_RECENT_FILES_COMMAND = 'clear_recent_files';
+/** 表示できたバイナリの文書の記録を頼む command 名(追補f 契約2)。 */
+export const RECORD_DISPLAYED_FILE_COMMAND = 'record_displayed_file';
 
 /** 区画の見出し(契約6・英語=要件#51)。 */
 export const RECENT_FILES_TITLE = 'Recent Files';
@@ -126,4 +130,35 @@ export async function loadRecentFiles(root: string): Promise<string[]> {
 /** 今の root 配下の記録を消す(契約9)。ほかの root の記録は残る。 */
 export async function clearRecentFiles(root: string): Promise<void> {
 	await invoke(CLEAR_RECENT_FILES_COMMAND, { root });
+}
+
+/**
+ * ビューアが表示できた文書の記録を、いま頼むか(追補f 契約4=1 回開くごとに高々 1 回)。
+ *
+ * - `recordedUri`: この文書を開いてから既に記録を頼んだ URI(無ければ null。`+page.svelte` は
+ *   今の文書の URI が変わったら null に戻す)
+ * - `displayedUri`: ビューアが表示できた文書の URI(ビューアに渡した uri)
+ * - `currentUri`: いま開いている文書の URI(無ければ null)
+ *
+ * 表示できた文書が今の文書で、まだ記録を頼んでいないときだけ真。外部変更による取り直しや
+ * 再描画(既に頼んだ URI)と、表示できる前に別の文書へ移った場合は偽。比較は文字列の完全一致。
+ */
+export function shouldRecordDisplayedOnce(
+	recordedUri: string | null,
+	displayedUri: string,
+	currentUri: string | null
+): boolean {
+	return displayedUri === currentUri && displayedUri !== recordedUri;
+}
+
+/**
+ * 表示できた文書の記録を頼む(追補f 契約2)。記録するかどうかは Rust が呼んだ窓のセッションで
+ * 確かめる。best-effort=失敗は飲んで resolve する(記録の失敗で表示を妨げない・alert も出さない)。
+ */
+export async function recordDisplayedFile(uri: string): Promise<void> {
+	try {
+		await invoke(RECORD_DISPLAYED_FILE_COMMAND, { uri });
+	} catch {
+		// 記録は best-effort。
+	}
 }

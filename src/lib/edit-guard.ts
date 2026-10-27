@@ -32,23 +32,33 @@ export type UnsavedChoice = 'save' | 'discard' | 'cancel';
 /**
  * 保存していない変更の扱いを聞く。dirty でなければ何も聞かずに `discard`
  * (=失うものが無いのでそのまま進む)を返す。
+ *
+ * ダイアログ(`ask`)そのものが失敗したら(1枚目でも2枚目でも)`cancel` を返す
+ * (要件#48 追補k)— 聞けなかったものを「進んでよい」とは取らず、編集を残して
+ * 操作を取りやめる。失敗は `console.error` にだけ残す(出せない状況で別の
+ * ダイアログを重ねない)。
  */
 export async function askUnsavedChoice(dirty: boolean): Promise<UnsavedChoice> {
 	if (!dirty) return 'discard';
-	const proceed = await ask(UNSAVED_PROCEED_MESSAGE, {
-		title: UNSAVED_TITLE,
-		kind: 'warning',
-		okLabel: 'Continue',
-		cancelLabel: 'Cancel',
-	});
-	if (!proceed) return 'cancel';
-	const save = await ask(UNSAVED_SAVE_MESSAGE, {
-		title: UNSAVED_TITLE,
-		kind: 'warning',
-		okLabel: 'Save',
-		cancelLabel: "Don't Save",
-	});
-	return save ? 'save' : 'discard';
+	try {
+		const proceed = await ask(UNSAVED_PROCEED_MESSAGE, {
+			title: UNSAVED_TITLE,
+			kind: 'warning',
+			okLabel: 'Continue',
+			cancelLabel: 'Cancel',
+		});
+		if (!proceed) return 'cancel';
+		const save = await ask(UNSAVED_SAVE_MESSAGE, {
+			title: UNSAVED_TITLE,
+			kind: 'warning',
+			okLabel: 'Save',
+			cancelLabel: "Don't Save",
+		});
+		return save ? 'save' : 'discard';
+	} catch (err) {
+		console.error('Unsaved Changes dialog failed; keeping the edits', err);
+		return 'cancel';
+	}
 }
 
 /**

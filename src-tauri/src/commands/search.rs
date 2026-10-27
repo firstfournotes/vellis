@@ -16,6 +16,10 @@
 //!
 //! 要件#65: 検索のたびに設定ファイルを読み(`load_settings`=次の検索から効く)、検索パネルの
 //! 欄(`include` / `exclude` / `use_exclude_settings`)と合わせた [`SearchScope`] で走査する。
+//!
+//! 要件#66: 検索欄の3トグル(`match_case` / `whole_word` / `use_regex`)を [`MatchOptions`] にして
+//! scope に載せる。`begin` の後、走査の前に [`QueryMatcher::new`] で式を検査し、組めなければ
+//! 走査せずに [`INVALID_PATTERN_MESSAGE`] を返す。
 
 use std::sync::Mutex;
 
@@ -24,8 +28,9 @@ use tauri::Emitter;
 
 use crate::fs::uri::Uri;
 use crate::search::{
-    ResultStore, SearchControl, SearchDoneEvent, SearchFilter, SearchHit, SearchProgress,
-    SearchProgressEvent, SearchScope, SEARCH_DONE_EVENT, SEARCH_PROGRESS_EVENT,
+    MatchOptions, QueryMatcher, ResultStore, SearchControl, SearchDoneEvent, SearchFilter, SearchHit,
+    SearchProgress, SearchProgressEvent, SearchScope, INVALID_PATTERN_MESSAGE, SEARCH_DONE_EVENT,
+    SEARCH_PROGRESS_EVENT,
 };
 use crate::settings::load_settings;
 
@@ -45,7 +50,8 @@ pub struct PageResponse {
 }
 
 /// `include` / `exclude` は検索パネルの欄を割った glob の並び・`use_exclude_settings` は歯車
-/// (要件#65 契約13。フロントからは `useExcludeSettings`)。
+/// (要件#65 契約13。フロントからは `useExcludeSettings`)。`match_case` / `whole_word` / `use_regex` は
+/// 検索欄の Aa / ab / .*(要件#66 契約7。フロントからは `matchCase` / `wholeWord` / `useRegex`)。
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn search_in_folder(
@@ -55,6 +61,9 @@ pub async fn search_in_folder(
     include: Vec<String>,
     exclude: Vec<String>,
     use_exclude_settings: bool,
+    match_case: bool,
+    whole_word: bool,
+    use_regex: bool,
     window: tauri::Window,
     state: tauri::State<'_, AppState>,
     results: tauri::State<'_, SearchResults>,
@@ -64,11 +73,16 @@ pub async fn search_in_folder(
     let scope = SearchScope::new(
         load_settings().settings,
         SearchFilter { include, exclude, use_exclude_settings },
-    );
+    )
+    .with_options(MatchOptions { match_case, whole_word, use_regex });
     let label = window.label().to_string();
     // The epoch changes when the panel is reopened (search_in_folder_reset), so a scan from
     // the previous panel stops at its next check and never overwrites the new panel's results.
     let epoch = results.0.lock().map_err(|e| e.to_string())?.begin(&label, generation);
+    // A broken pattern is checked after `begin`, so an older scan still stops at its next check.
+    if QueryMatcher::new(&query, scope.options).is_err() {
+        return Err(INVALID_PATTERN_MESSAGE.to_string());
+    }
 
     // All hits in scan order, kept for `ResultStore::store_at` (Show more pages from it).
     let mut all: Vec<SearchHit> = Vec::new();

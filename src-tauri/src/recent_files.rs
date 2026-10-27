@@ -36,6 +36,8 @@ use std::sync::{Mutex, MutexGuard};
 use thiserror::Error;
 
 use crate::errors::FsError;
+use crate::fs::entry::Entry;
+use crate::fs::uri::Uri;
 
 /// Overall cap on remembered files (契約3). The oldest entries are dropped.
 pub const MAX_RECENT_FILES: usize = 100;
@@ -187,6 +189,61 @@ pub fn is_under_root(uri: &str, root: &str) -> bool {
 /// temporary, and losing the entry for them would be a surprise.
 pub fn should_forget_on_open_error(err: &FsError) -> bool {
     matches!(err, FsError::NotFound(_))
+}
+
+/// Whether a failed open must list the file's parent folder before deciding
+/// (要件#64 追補e 契約1・2): only over ssh, and only when the stat said "not
+/// found". There `sftp_to_fs` also maps the generic `Failure` — what macOS's
+/// sftp-server answers for a missing file, and for passing trouble too — to
+/// `NotFound`, so the stat alone cannot tell a deleted file from a hiccup. A
+/// local stat is trusted as it is.
+pub fn needs_parent_listing(uri: &Uri, stat: &Result<Entry, FsError>) -> bool {
+    uri.scheme == "ssh" && matches!(stat, Err(FsError::NotFound(_)))
+}
+
+/// Whether a failed open should drop the file from the list, with the parent
+/// folder's listing to hand when [`needs_parent_listing`] asked for one
+/// (要件#64 追補e).
+///
+/// `stat` is the provider's stat of `uri` after the open failed and
+/// `parent_listing` its listing of the parent folder (`None` when not taken).
+/// A successful stat keeps the entry. A local file follows
+/// [`should_forget_on_open_error`] (契約2) and the listing is not looked at.
+/// Over ssh the entry goes only when the stat said "not found" *and* the
+/// parent folder could be listed *and* no row of it carries the file's name
+/// (契約1): a failed or missing listing confirms nothing, and a name still
+/// listed means the "not found" was a passing failure. Rows are matched by
+/// `Entry::name`, whatever their kind, not by their URI's spelling.
+pub fn should_forget_on_open_error_with_listing(
+    uri: &Uri,
+    stat: &Result<Entry, FsError>,
+    parent_listing: Option<&Result<Vec<Entry>, FsError>>,
+) -> bool {
+    let Err(err) = stat else {
+        return false;
+    };
+    if uri.scheme != "ssh" {
+        return should_forget_on_open_error(err);
+    }
+    if !needs_parent_listing(uri, stat) {
+        return false;
+    }
+    let (Some(Ok(entries)), Some(name)) = (
+        parent_listing,
+        uri.path.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return false;
+    };
+    !entries.iter().any(|entry| entry.name == name)
+}
+
+/// Whether a viewer's "displayed" report should be recorded (要件#64 追補f
+/// 契約2): only when the calling window's current session (`session_uri`,
+/// `None` when it has none — a print window, say) is the very document the
+/// viewer showed. Exact string match, the same rule as the list's duplicate
+/// check: a report that arrives after the window moved on records nothing.
+pub fn should_record_displayed(session_uri: Option<&str>, uri: &str) -> bool {
+    session_uri == Some(uri)
 }
 
 /// Default store file: `<app config dir>/recent-files.json`, next to the

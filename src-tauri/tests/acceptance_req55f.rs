@@ -56,11 +56,13 @@ const LABEL: &str = "main";
 const OTHER: &str = "second";
 
 fn hit(path: &str, line: u32, ordinal: u32) -> SearchHit {
+    // 要件側更新 2026-10-08(要件#66 契約12): `matched: Option<String>` を +1(.* OFF では None)。
     SearchHit {
         path: path.to_string(),
         line,
         text: format!("alpha {line}"),
         ordinal,
+        matched: None,
     }
 }
 

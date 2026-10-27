@@ -43,18 +43,20 @@ pub const SETTINGS_CHANGED_EVENT: &str = "settings_changed";
 const SETTINGS_DIR: &str = "vellis";
 
 /// Default `files.exclude` (契約5): every dot name (the old rule of `list`),
-/// plus `.git` and `.DS_Store`, which stay hidden when `**/.*` is turned off.
-const DEFAULT_FILES_EXCLUDE: &[&str] = &["**/.*", "**/.git", "**/.DS_Store"];
+/// plus `.git`, `.DS_Store` and `.vellis` (the snapshot folder of #48, 追補a),
+/// which stay hidden when `**/.*` is turned off.
+const DEFAULT_FILES_EXCLUDE: &[&str] = &["**/.*", "**/.git", "**/.DS_Store", "**/.vellis"];
 
-/// What "Settings…" writes when the file is missing (契約6). The same content
-/// as the example in req-65.md; it reads back as `Settings::default()` with no
-/// warnings (checked by the acceptance tests, so it cannot drift from the
-/// constants above).
+/// What "Settings…" writes when the file is missing (契約6). The example in
+/// req-65.md plus the `**/.vellis` line of 追補a; it reads back as
+/// `Settings::default()` with no warnings (checked by the acceptance tests, so
+/// it cannot drift from the constants above).
 const DEFAULT_SETTINGS_JSON: &str = r#"{
   "files.exclude": {
     "**/.*": true,
     "**/.git": true,
-    "**/.DS_Store": true
+    "**/.DS_Store": true,
+    "**/.vellis": true
   },
   "search.exclude": {
     "**/node_modules": true,

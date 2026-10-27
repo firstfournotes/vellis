@@ -1,4 +1,5 @@
 //! `set_root` command — switch the explorer root directory.
+//! `switch_root_confirmed` command — the same for a `vellis -r` switch the window confirmed.
 
 use serde::Serialize;
 use tauri::{Manager, Window};
@@ -6,6 +7,7 @@ use tauri::{Manager, Window};
 use crate::exclude::filter_tree_entries;
 use crate::fs::entry::Entry;
 use crate::fs::uri::Uri;
+use crate::ipc::protocol::Response;
 use crate::watch::hub::WindowId;
 
 use super::AppState;
@@ -133,6 +135,24 @@ pub async fn set_root(
         entries,
         document_retained,
     })
+}
+
+/// Perform a `vellis -r` root switch for the calling window, once it has
+/// confirmed it (requirements.md #48 追補m).
+///
+/// The IPC `SwitchRoot` only checks the new root and sends the front window
+/// a `root_switch_requested` event; the window asks about unsaved edits and
+/// then invokes this. The switch itself is the IPC one (`handle_switch_root`),
+/// so its result is unchanged: it arrives as `root_changed` (not as the return
+/// value) and nothing is recorded in the history. The window switched is the
+/// caller, i.e. the one that confirmed.
+#[tauri::command]
+pub async fn switch_root_confirmed(uri: String, window: Window) -> Result<(), String> {
+    match crate::ipc::handler::handle_switch_root(window.app_handle(), window.label(), &uri).await
+    {
+        Response::Ok => Ok(()),
+        Response::Error { message, .. } => Err(message),
+    }
 }
 
 #[cfg(test)]

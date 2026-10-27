@@ -401,14 +401,16 @@ fn hit(path: &str, line: u32, text: &str) -> SearchHit {
 
 /// `ordinal` を明示する一致(そのファイルの先頭からの出現の通し番号・1 始まり=追補a)。
 fn hit_nth(path: &str, line: u32, ordinal: u32, text: &str) -> SearchHit {
-    // 構造体リテラルで組む=フィールドが path / line / text / ordinal の 4 つだけであることの
-    // コンパイル時の担保(打ち切りフラグ等が増えるとここが通らない=AC-55-9。
-    // 要件側更新 2026-09-25 追補a: `ordinal: u32` を +1)。
+    // 構造体リテラルで組む=フィールドが .* OFF の 4 つ(path / line / text / ordinal)+ 要件#66 の
+    // `matched` であることのコンパイル時の担保(打ち切りフラグ等が増えるとここが通らない=AC-55-9。
+    // 要件側更新 2026-09-25 追補a: `ordinal: u32` を +1。
+    // 要件側更新 2026-10-08 要件#66 契約12: `matched: Option<String>` を +1=.* OFF では None)。
     SearchHit {
         path: path.to_string(),
         line,
         text: text.to_string(),
         ordinal,
+        matched: None,
     }
 }
 
@@ -1200,6 +1202,8 @@ fn cargo_dependencies_are_unchanged() {
             "toml",
             "tauri-plugin-webdriver",
             "tauri-plugin-window-state",
+            // 要件#66 で `regex` を直接宣言=2026-10-08 由谷承認(契約12)。
+            "regex",
         ])
     );
 }

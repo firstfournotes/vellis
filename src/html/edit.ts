@@ -60,6 +60,12 @@ export type EditSurface = {
 	index: EditSurfaceIndex;
 	/** `<head>` の `<style>` の中身(編集面へ移して効かせる=契約②)。 */
 	styles: string[];
+	/**
+	 * 文書の `<html>` → `<body>` の class の語(出てきた順・重複なし・大小は
+	 * そのまま)。無ければ `[]`。Shadow の中に `<html>` / `<body>` は無いので、
+	 * `html.dark body{…}` を畳んだ規則が当たるよう面のルートに足す(要件#54 追補e)。
+	 */
+	rootClasses: string[];
 };
 
 export type CommitResult =
@@ -218,6 +224,16 @@ function textOf(node: Element): string {
 }
 
 /**
+ * 要素の class の語(hast は `className` を ASCII 空白で割った配列で持つ)。
+ * id や他の属性は持ち出さない(要件#54 追補e 起案時判断 (b))。
+ */
+function classWordsOf(node: Element | null): string[] {
+	const value = node?.properties?.className;
+	if (!Array.isArray(value)) return [];
+	return value.filter((word): word is string => typeof word === 'string' && word.length > 0);
+}
+
+/**
  * `source.slice(start, end)` がそのテキストノードの綴りそのものか。
  *
  * parse5 は文書末の暗黙の終了タグをまたいで文字トークンを1つのテキストノードへ
@@ -272,12 +288,15 @@ function retargetAndRewrite(tree: Root, docUri: string): void {
  * 原文(現在の編集バッファ)から編集面を作る(契約②)。
  *
  * parse(位置付き)→ sanitize → hid の stamp → stringify。`<head>` は出さず、
- * その `<style>` の中身だけを `styles` で持ち出して編集面へ移す。
+ * その `<style>` の中身だけを `styles` で持ち出して編集面へ移す。`<html>` /
+ * `<body>` の class の語も `rootClasses` で持ち出す(面のルートに付けるのは
+ * 呼び出し側=要件#54 追補e)。
  */
 export function buildEditSurface(source: string, docUri: string): EditSurface {
 	const tree = parser.parse(source);
 	const head = findElement(tree, 'head');
 	const body = findElement(tree, 'body');
+	const rootClasses = uniq([...classWordsOf(findElement(tree, 'html')), ...classWordsOf(body)]);
 
 	const styles: string[] = [];
 	if (head) {
@@ -333,7 +352,7 @@ export function buildEditSurface(source: string, docUri: string): EditSurface {
 		index.set(hid, ranges);
 	});
 
-	return { html: stringifier.stringify(clean), index, styles };
+	return { html: stringifier.stringify(clean), index, styles, rootClasses };
 }
 
 // ---------------------------------------------------------------------------

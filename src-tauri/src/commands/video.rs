@@ -23,7 +23,7 @@ use crate::video_frames::{parse_frame_index, VideoFrameIndex};
 use super::AppState;
 
 /// Bytes of a box header — enough for the 64-bit `largesize` form.
-const BOX_HEADER_LEN: u64 = 16;
+pub(crate) const BOX_HEADER_LEN: u64 = 16;
 
 /// Largest `moov` box this command will pull into memory (64 MiB).
 ///
@@ -31,7 +31,7 @@ const BOX_HEADER_LEN: u64 = 16;
 /// is a few hundred bytes and even a pathological per-frame table stays far
 /// under this. The cap is here because the size is read out of the file: a
 /// corrupt header must not turn into a multi-gigabyte allocation.
-const MAX_MOOV_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_MOOV_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Frame index of the first video track, or `null` when the movie has none that
 /// can be read (webm, audio-only, a container this parser does not understand).
@@ -92,7 +92,7 @@ pub async fn get_video_frame_index(
 /// `remaining` is how much file is left from that box onwards, and is both the
 /// meaning of a declared size of zero ("to the end") and the bound every other
 /// size is checked against.
-fn top_level_box(header: &[u8], remaining: u64) -> Option<([u8; 4], u64)> {
+pub(crate) fn top_level_box(header: &[u8], remaining: u64) -> Option<([u8; 4], u64)> {
     let size32 = u32::from_be_bytes(header.get(0..4)?.try_into().ok()?);
     let kind: [u8; 4] = header.get(4..8)?.try_into().ok()?;
 

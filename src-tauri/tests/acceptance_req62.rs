@@ -841,6 +841,8 @@ fn cargo_dependencies_section_is_unchanged() {
         "toml",
         "tauri-plugin-webdriver",
         "tauri-plugin-window-state",
+        // 要件#66 で `regex` を直接宣言=2026-10-08 由谷承認(契約12)。
+        "regex",
     ]
     .into_iter()
     .map(String::from)

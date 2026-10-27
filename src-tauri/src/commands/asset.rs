@@ -10,10 +10,30 @@
 //! falls back to a `200` whole-file response otherwise. That whole-file path
 //! streams too — it is not subject to `LocalProvider`'s `read_bytes` size cap,
 //! which is what used to turn files over 10 MB into a `413` (backlog #59).
+//!
+//! The protocol's entry point is [`handle_asset_for_window`], which knows the
+//! webview that asked: a `vellis-asset://ssh/…` request is served only from a
+//! host that window has open, so an image URI written into a document cannot
+//! make the app open an SSH connection anywhere else (要件#27 追補b・Issue
+//! #728).
+//!
+//! An open-GOP movie is served with the sync tables of its `moov` rewritten
+//! (see `video_sync`): an HEVC one with its CRAs moved from `stss` to `stps`
+//! (要件#37 追補f・Issue #591), an H.264 one with its non-IDR I frames moved
+//! to `stps` or out of `stss` and their lone leading frames marked in `sdtp`
+//! (要件#37 追補g・Issue #734). Ranges are cut from that rewritten file, and
+//! the file on disk is left alone.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::errors::{FsError, VellisError};
-use crate::fs::uri::Uri;
+use crate::fs::provider::FileProvider;
+use crate::fs::uri::{Authority, Uri};
+use crate::print::is_print_window;
+use crate::video_sync::{rewrite_moov_for_open_gop, MoovPatch, MoovPosition, Piece};
 
+use super::video::{top_level_box, BOX_HEADER_LEN, MAX_MOOV_BYTES};
 use super::AppState;
 
 // ---------------------------------------------------------------------------
@@ -192,9 +212,30 @@ fn safe_mime(mime: &str) -> &str {
 /// enforces its own access rules (path traversal rejection, MIME downgrade).
 const ALLOW_ORIGIN: &str = "*";
 
+/// `Content-Security-Policy` carried by every response (200 / 206 / 416 /
+/// errors); the same value as `PRINT_CSP` in `print.rs` — keep the two in step.
+///
+/// backlog 331 / 要件#82 (e): without it a scripted SVG or XHTML served here runs
+/// its scripts once a frame navigates to it as a document. The header only takes
+/// effect when the response is read as a document, so sub-resource loads
+/// (`<img>`, `<video>`, `fetch`) display exactly as before (the PDF frame too:
+/// measured unchanged in req-82.md (e)).
+const ASSET_DOCUMENT_CSP: &str = "script-src 'none'; object-src 'none'";
+
+/// `Access-Control-Expose-Headers` carried by every response (要件#23 追補d
+/// 契約6).
+///
+/// A cross-origin `fetch` only lets the page read the CORS-safelisted response
+/// headers, and `Content-Range` is not one of them. `ModelViewer` learns a
+/// file's size from the `Content-Range` of a `Range: bytes=0-0` probe before it
+/// asks for the body (so an oversized model is turned down without the whole
+/// file being read into this process); without this header every probe would
+/// read as "size unknown".
+const EXPOSE_HEADERS: &str = "Content-Range";
+
 /// Build a plain-text error response with the given HTTP status code.
 ///
-/// Errors carry the CORS header too: without it the frontend cannot even
+/// Errors carry the CORS headers too: without them the frontend cannot even
 /// observe the status code (the fetch rejects with an opaque network error),
 /// so a missing file would be indistinguishable from a broken protocol.
 pub fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
@@ -203,8 +244,29 @@ pub fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
         .header("Content-Type", "text/plain; charset=utf-8")
         .header("Cache-Control", "no-store")
         .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
+        .header("Access-Control-Expose-Headers", EXPOSE_HEADERS)
+        .header("Content-Security-Policy", ASSET_DOCUMENT_CSP)
         .body(msg.as_bytes().to_vec())
         .expect("failed to build error response")
+}
+
+/// Answer a CORS preflight (`OPTIONS`) without touching the file (要件#23
+/// 追補d 契約6).
+///
+/// WebKit may send one before a `fetch` that carries a `Range` header (the
+/// `ModelViewer` size probe). The answer is the same for every path, so the
+/// URI is not even parsed and no provider is asked anything: `204` allowing
+/// `GET` with a `Range` header from any origin.
+fn preflight_response() -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(204)
+        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
+        .header("Access-Control-Allow-Methods", "GET")
+        .header("Access-Control-Allow-Headers", "Range")
+        .header("Access-Control-Expose-Headers", EXPOSE_HEADERS)
+        .header("Content-Security-Policy", ASSET_DOCUMENT_CSP)
+        .body(Vec::new())
+        .expect("failed to build preflight response")
 }
 
 /// Map a read failure to the status code it has always produced.
@@ -228,7 +290,9 @@ fn body_response(
         .header("Content-Type", mime)
         .header("Accept-Ranges", "bytes")
         .header("Cache-Control", "no-store")
-        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+        .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
+        .header("Access-Control-Expose-Headers", EXPOSE_HEADERS)
+        .header("Content-Security-Policy", ASSET_DOCUMENT_CSP);
 
     let builder = match content_range {
         Some(range) => builder.status(206).header("Content-Range", range),
@@ -248,6 +312,8 @@ fn unsatisfiable_response(total: u64) -> http::Response<Vec<u8>> {
         .header("Accept-Ranges", "bytes")
         .header("Cache-Control", "no-store")
         .header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
+        .header("Access-Control-Expose-Headers", EXPOSE_HEADERS)
+        .header("Content-Security-Policy", ASSET_DOCUMENT_CSP)
         .body(b"range not satisfiable".to_vec())
         .expect("failed to build 416 response")
 }
@@ -356,23 +422,35 @@ fn split_bytes_unit(header: &str) -> Option<&str> {
 
 /// Handle an incoming `vellis-asset://` request.
 ///
+/// 0. A CORS preflight (`OPTIONS`) is answered at once with `204`
+///    (`preflight_response`) — no URI parsing, no provider call.
 /// 1. Parse the URI to an internal `Uri`.
 /// 2. Resolve a `FileProvider` from the registry.
 /// 3. `stat` the target for its size — needed to decide whether a `Range` can
 ///    be satisfied and to fill in `Content-Range`.
-/// 4. Read the requested slice (or the whole file) via `provider.read_range`.
-/// 5. Determine MIME type and apply the safety filter.
-/// 6. Return `206` / `200` with `Cache-Control: no-store` and the CORS header.
+/// 4. Determine MIME type and apply the safety filter.
+/// 5. For an open-GOP HEVC or H.264 movie, find the rewritten `moov`
+///    (`moov_patch`, 要件#37 追補f・追補g); from here on the file is the
+///    rewritten one — its size is the one ranges resolve against and
+///    `Content-Range` / `416` report.
+/// 6. Read the requested slice (or the whole file) via `provider.read_range`
+///    (`read_patched` for a rewritten movie).
+/// 7. Return `206` / `200` with `Cache-Control: no-store` and the CORS header.
 ///
-/// Every response this module can produce comes from one of exactly three
-/// builders — `body_response` (200 / 206), `unsatisfiable_response` (416) and
-/// `error_response` (400 / 404 / 413 / 500) — and all carry
-/// `Access-Control-Allow-Origin` so that `fetch` from the page can read the
-/// result (backlog #55).
+/// Every response this module can produce comes from one of exactly four
+/// builders — `body_response` (200 / 206), `unsatisfiable_response` (416),
+/// `error_response` (400 / 404 / 413 / 500) and `preflight_response` (204) —
+/// and all carry `Access-Control-Allow-Origin` so that `fetch` from the page
+/// can read the result (backlog #55), and `Access-Control-Expose-Headers:
+/// Content-Range` so that it can read the file's size too (要件#23 追補d).
 pub async fn handle_asset(
     state: &AppState,
     req: http::Request<Vec<u8>>,
 ) -> http::Response<Vec<u8>> {
+    if req.method() == http::Method::OPTIONS {
+        return preflight_response();
+    }
+
     let url = req.uri().to_string();
 
     let inner_uri = match parse_asset_uri(&url) {
@@ -388,10 +466,26 @@ pub async fn handle_asset(
     // `size` is `None` for anything that is not a regular file (a directory,
     // say). There is no total to range against, so the request falls through to
     // a whole-file read, which fails exactly as it did before ranges existed.
-    let total = match provider.stat(&inner_uri).await {
-        Ok(entry) => entry.size,
+    let (total, modified) = match provider.stat(&inner_uri).await {
+        Ok(entry) => (entry.size, entry.modified),
         Err(FsError::NotFound(_)) => return error_response(404, "not found"),
         Err(_) => return error_response(500, "stat error"),
+    };
+
+    let mime_raw = mime_guess::from_path(inner_uri.path_str())
+        .first_or_octet_stream()
+        .to_string();
+    let mime = safe_mime(&mime_raw);
+
+    let patch = match total {
+        Some(total) if mime.starts_with("video/") => {
+            moov_patch(provider.as_ref(), &inner_uri, total, modified).await
+        }
+        _ => None,
+    };
+    let total = match (&patch, total) {
+        (Some(patch), Some(total)) => Some(patch.patched_total(total)),
+        _ => total,
     };
 
     let range_header = req
@@ -416,17 +510,287 @@ pub async fn handle_asset(
         _ => (0, total.unwrap_or(u64::MAX), None),
     };
 
-    let bytes = match provider.read_range(&inner_uri, start, max_len).await {
+    let read = match &patch {
+        Some(patch) => read_patched(provider.as_ref(), &inner_uri, patch, start, max_len).await,
+        None => provider.read_range(&inner_uri, start, max_len).await,
+    };
+    let bytes = match read {
         Ok(b) => b,
         Err(e) => return read_error_response(e),
     };
 
-    let mime_raw = mime_guess::from_path(inner_uri.path_str())
-        .first_or_octet_stream()
-        .to_string();
-    let mime = safe_mime(&mime_raw);
-
     body_response(mime, bytes, content_range)
+}
+
+// ---------------------------------------------------------------------------
+// Open-GOP HEVC and H.264 (要件#37 追補f・追補g)
+// ---------------------------------------------------------------------------
+
+/// Most top-level boxes `find_moov_patch` steps through before giving up.
+/// Movies have a handful; the bound only keeps a file of tiny boxes from
+/// turning one request into millions of reads.
+const MAX_TOP_LEVEL_BOXES: usize = 1024;
+
+/// Movies whose decision is remembered (契約5)…
+const MOOV_PATCH_CACHE_ENTRIES: usize = 16;
+
+/// …and the rewritten `moov` bytes they may hold together. The newest entry
+/// is kept whatever its size.
+const MOOV_PATCH_CACHE_BYTES: usize = MAX_MOOV_BYTES as usize;
+
+/// The file a decision was made for: the same URI, size and modification time
+/// (契約5).
+#[derive(PartialEq, Eq)]
+struct PatchKey {
+    uri: String,
+    size: u64,
+    modified: i64,
+}
+
+/// What was decided for the movies served lately, newest first: the rewritten
+/// `moov`, or `None` for "served as it is".
+///
+/// A media element reads a movie as a run of `Range` requests, and each one
+/// would otherwise walk the top-level boxes and read and parse the `moov`
+/// again. Remembering the decision also keeps it the same for the whole run,
+/// so the sizes the requests report agree.
+type PatchCache = VecDeque<(PatchKey, Option<Arc<MoovPatch>>)>;
+
+static MOOV_PATCHES: Mutex<PatchCache> = Mutex::new(VecDeque::new());
+
+/// The rewritten `moov` to serve `uri` (a movie of `total` bytes) with, or
+/// `None` to serve the file as it is.
+///
+/// Issue #591: x265's default open-GOP output lists its CRAs as full sync
+/// samples, and a paused accurate seek in WKWebView then decodes from the CRA
+/// and cannot show the RASL frames ahead of it — the frame number moves, the
+/// picture does not. Serving those CRAs as partial sync samples
+/// (`video_sync`) lets the seek start a GOP earlier.
+///
+/// Issue #734: with x264's `open-gop`, a seek that starts decoding at a
+/// non-IDR I fails on its leading B-frames, and past the first GOP only the I
+/// frames show. Serving an I with one leading frame as a partial sync sample,
+/// with that frame marked in `sdtp` as one no other depends on, and an I with
+/// more as no sync sample at all (`video_sync`, "fs") lets every frame decode.
+///
+/// The decision is remembered when the provider reports a modification time;
+/// a read that fails is not, and the file is served as it is this time.
+async fn moov_patch(
+    provider: &dyn FileProvider,
+    uri: &Uri,
+    total: u64,
+    modified: Option<i64>,
+) -> Option<Arc<MoovPatch>> {
+    let key = modified.map(|modified| PatchKey {
+        uri: uri.raw.clone(),
+        size: total,
+        modified,
+    });
+    if let Some(remembered) = key.as_ref().and_then(remembered_patch) {
+        return remembered;
+    }
+    let patch = find_moov_patch(provider, uri, total)
+        .await
+        .ok()?
+        .map(Arc::new);
+    if let Some(key) = key {
+        remember_patch(key, patch.clone());
+    }
+    patch
+}
+
+/// Walk the top-level boxes — read as `get_video_frame_index` reads them — and
+/// rewrite the `moov` when it is worth it (契約4: any doubt serves the file as
+/// it is).
+///
+/// - The file has to start with `ftyp`; a `moof` anywhere means fragmented.
+/// - Whether the `moov` is ahead of the media data decides whether the chunk
+///   offsets move. Without an `mdat`, or with one on both sides, where they
+///   point is not certain, and nothing is rewritten.
+/// - A `moov` over `MAX_MOOV_BYTES` is not read, as in `get_video_frame_index`.
+///
+/// `Err` only for a read that failed.
+async fn find_moov_patch(
+    provider: &dyn FileProvider,
+    uri: &Uri,
+    total: u64,
+) -> Result<Option<MoovPatch>, FsError> {
+    let mut pos: u64 = 0;
+    let mut moov = None;
+    let (mut mdat_before, mut mdat_after) = (false, false);
+    for _ in 0..MAX_TOP_LEVEL_BOXES {
+        if pos >= total {
+            break;
+        }
+        let header = provider.read_range(uri, pos, BOX_HEADER_LEN).await?;
+        let Some((kind, size)) = top_level_box(&header, total - pos) else {
+            return Ok(None);
+        };
+        if pos == 0 && &kind != b"ftyp" {
+            return Ok(None);
+        }
+        match &kind {
+            b"moov" if moov.is_none() => moov = Some((pos, size)),
+            b"mdat" if moov.is_some() => mdat_after = true,
+            b"mdat" => mdat_before = true,
+            b"moof" => return Ok(None),
+            _ => {}
+        }
+        pos += size;
+    }
+    if pos < total {
+        return Ok(None);
+    }
+
+    let Some((offset, len)) = moov else {
+        return Ok(None);
+    };
+    let position = match (mdat_before, mdat_after) {
+        (false, true) => MoovPosition::BeforeMdat,
+        (true, false) => MoovPosition::AfterMdat,
+        _ => return Ok(None),
+    };
+    if len > MAX_MOOV_BYTES {
+        return Ok(None);
+    }
+    let original = provider.read_range(uri, offset, len).await?;
+    Ok(
+        rewrite_moov_for_open_gop(&original, position).map(|moov| MoovPatch {
+            offset,
+            original_len: len,
+            moov,
+        }),
+    )
+}
+
+/// Bytes `[start, start + len)` of the rewritten file: the original's bytes
+/// around the rewritten `moov`.
+async fn read_patched(
+    provider: &dyn FileProvider,
+    uri: &Uri,
+    patch: &MoovPatch,
+    start: u64,
+    len: u64,
+) -> Result<Vec<u8>, FsError> {
+    let mut out = Vec::new();
+    for piece in patch.pieces(start, len) {
+        match piece {
+            Piece::Original { offset, len } => {
+                out.extend(provider.read_range(uri, offset, len).await?)
+            }
+            Piece::Moov { start, len } => out.extend_from_slice(&patch.moov[start..start + len]),
+        }
+    }
+    Ok(out)
+}
+
+/// The remembered decision for `key` (the outer `None` is "not remembered").
+fn remembered_patch(key: &PatchKey) -> Option<Option<Arc<MoovPatch>>> {
+    let mut cache = MOOV_PATCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    let at = cache.iter().position(|(k, _)| k == key)?;
+    let entry = cache.remove(at)?;
+    let patch = entry.1.clone();
+    cache.push_front(entry);
+    Some(patch)
+}
+
+/// Remember the decision for `key`, in place of any for an older version of
+/// the same file, and drop the oldest beyond the bounds.
+fn remember_patch(key: PatchKey, patch: Option<Arc<MoovPatch>>) {
+    let mut cache = MOOV_PATCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    cache.retain(|(k, _)| k.uri != key.uri);
+    cache.push_front((key, patch));
+    let held = |cache: &PatchCache| -> usize {
+        cache
+            .iter()
+            .filter_map(|(_, patch)| patch.as_ref())
+            .map(|patch| patch.moov.len())
+            .sum()
+    };
+    while cache.len() > 1
+        && (cache.len() > MOOV_PATCH_CACHE_ENTRIES || held(&cache) > MOOV_PATCH_CACHE_BYTES)
+    {
+        cache.pop_back();
+    }
+}
+
+/// Handle a `vellis-asset://` request from the webview `label` — the entry
+/// point the protocol handler in `lib.rs` calls (要件#27 追補b 契約2).
+///
+/// A `vellis-asset://ssh/<authority>/…` request — whatever its method, a CORS
+/// preflight included — is passed on to [`handle_asset`] only when
+/// `<authority>` is one the window may reach
+/// (`allowed_ssh_authorities`); otherwise it is answered `403` from
+/// [`error_response`] — CSP and CORS headers included — **before any
+/// connection is opened** (契約1). This is what keeps an image URI written
+/// into a document from connecting to a host the user never opened (Issue
+/// #728): the frontend keeps `vellis-asset:` sources, and the CSP allows them,
+/// so this is the place that can tell them apart.
+///
+/// The authorities are compared as `Uri::parse` gives them, value for value:
+/// an alias and the host it resolves to, an omitted port and `22`, an omitted
+/// user and the default one are all different. Image URIs are built from the
+/// document's own URI (`toAssetUri`), so a document's images carry exactly its
+/// authority. Resolving aliases first would mean running `ssh -G` on a name
+/// taken from the document before deciding — the thing being guarded against.
+///
+/// Everything else goes to [`handle_asset`] as is, without looking at
+/// `label`: `vellis-asset://local/…`, and a URI that does not parse (which
+/// `handle_asset` answers `400`).
+///
+/// The window manager's lock is held only while the allowed authorities are
+/// read, never while the provider connects.
+pub async fn handle_asset_for_window(
+    state: &AppState,
+    label: &str,
+    req: http::Request<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    if let Ok(target) = parse_asset_uri(&req.uri().to_string()) {
+        if target.scheme == "ssh" {
+            let allowed = allowed_ssh_authorities(state, label).await;
+            let reachable = target
+                .authority
+                .as_ref()
+                .is_some_and(|authority| allowed.contains(authority));
+            if !reachable {
+                return error_response(403, "ssh host not open in this window");
+            }
+        }
+    }
+    handle_asset(state, req).await
+}
+
+/// The ssh authorities the window `label` may load assets from
+/// (要件#27 追補b 契約1): the authority of its root and that of the document
+/// it has open, each only when that URI is `ssh://`.
+///
+/// - A print window (`is_print_window`) borrows the allowance of the window
+///   that asked for it (`WindowManager::print_owner`); with no owner
+///   recorded, or an owner that has closed, it has none.
+/// - A label the window manager does not know has none.
+///
+/// The lock is released when this returns.
+async fn allowed_ssh_authorities(state: &AppState, label: &str) -> Vec<Authority> {
+    let manager = state.window_manager.lock().await;
+    let window_label = if is_print_window(label) {
+        match manager.print_owner(label) {
+            Some(owner) => owner,
+            None => return Vec::new(),
+        }
+    } else {
+        label
+    };
+    let Some(window) = manager.get(window_label) else {
+        return Vec::new();
+    };
+    let document = window.session.as_ref().map(|session| &session.uri);
+    window
+        .root_uri
+        .iter()
+        .chain(document)
+        .filter(|uri| uri.scheme == "ssh")
+        .filter_map(|uri| uri.authority.clone())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -114,7 +114,7 @@
 //! の Tauri 配線・応答形(256MiB 級のバイト列は `tauri::ipc::Response` 等の raw 経路)・
 //! ファイル読み・フロント(WaveformExtract)への写しは reviewer 照合(本テストの判定
 //! 対象外)。TS 側の経路判定・上限・縮退分岐は src/lib/audio-waveform.acceptance.test.ts
-//! が判定する。PCM の v1 対応範囲(契約③(b)= requirements.md 45行目が正本)=
+//! が判定する。PCM の v1 対応範囲(契約③(b)= requirements.md #41 が正本)=
 //! sowt・twos の 16bit(v0/v1 記述)+ lpcm(v2 記述)の**整数 16/24bit(LE/BE)と
 //! float32(LE・インターリーブ→ WAV format 3)**。**BE float・非インターリーブ等の
 //! lpcm 変形は Unsupported(縮退)**。

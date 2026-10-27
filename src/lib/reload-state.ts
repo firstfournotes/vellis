@@ -22,7 +22,7 @@
  * `loadSnapshot` は呼ばれるたびにそこを読む(pane-resize と同じ家風)。
  */
 import { invoke } from '$lib/ipc';
-import { openCommandFor } from '$lib/open-document';
+import { openCommandFor, openFileFailedMessage } from '$lib/open-document';
 
 /**
  * 保存キー。同一ウインドウの reload 前後(開発中はビルドをまたぐこともある)で
@@ -56,6 +56,12 @@ export type ReloadSnapshotInput = {
 export type RestoreResult<Root = unknown, Doc = unknown> =
 	| { ok: true; root: Root; document: Doc | null }
 	| { ok: false };
+
+/** `restoreSnapshot` が文書を開き直せなかったときに知らせる手段(+page は控えて alert)。 */
+export type RestoreSnapshotDeps = {
+	/** 文書コマンドが失敗したとき。整形済みの文言(`openFileFailedMessage(err)`)が渡る。 */
+	onOpenFailed: (message: string) => void;
+};
 
 /**
  * sessionStorage への参照。Tauri の WebView 以外(SSR 相当・ストレージが無効な
@@ -209,9 +215,14 @@ export function shouldShowRootPicker(
  * - 文書コマンド失敗(root は在るがファイルが消えた) → root は復元したまま
  *   `document: null`。既存の `file_removed` → `clearDocument` と同じ最終状態で、
  *   `set_root` 済みの backend とも食い違わない
+ *
+ * 追補a(Issue #382): 文書コマンドの失敗だけは `deps.onOpenFailed` で 1 回知らせる
+ * (文言は起動時の最初の文書と同じ `openFileFailedMessage`)。`set_root` の失敗は
+ * 起動時引数の挙動へ戻るだけなので知らせない。`deps` を省けば知らせずに従来どおり。
  */
 export async function restoreSnapshot<Root = unknown, Doc = unknown>(
 	snapshot: ReloadSnapshot,
+	deps?: RestoreSnapshotDeps,
 ): Promise<RestoreResult<Root, Doc>> {
 	let root: Root;
 	try {
@@ -225,7 +236,8 @@ export async function restoreSnapshot<Root = unknown, Doc = unknown>(
 	const command = openCommandFor(snapshot.docUri);
 	try {
 		return { ok: true, root, document: await invoke<Doc>(command, { uri: snapshot.docUri }) };
-	} catch {
+	} catch (err) {
+		deps?.onOpenFailed(openFileFailedMessage(err));
 		return { ok: true, root, document: null };
 	}
 }

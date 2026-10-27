@@ -482,6 +482,8 @@ describe('AC-57-15 不変 — 依存追加ゼロ(要件#57 ⑥)', () => {
 				'toml',
 				'tauri-plugin-webdriver',
 				'tauri-plugin-window-state',
+				// 要件#66 で `regex` を直接宣言=2026-10-08 由谷承認(契約12)。
+				'regex',
 			].sort(),
 		);
 	});

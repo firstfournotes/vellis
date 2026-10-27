@@ -207,8 +207,11 @@ pub fn select_source(sdk_available: bool, raw_available: bool) -> SpaceMouseSour
     }
 }
 
-/// 起動時に生きたソースを 1 つだけ持つハンドル。managed state に置いておくと
-/// プロセス終了時に Drop が走り、raw スレッドの停止 / SDK の登録解除が行われる。
+/// 起動時に生きたソースを 1 つだけ持つハンドル。managed state に置くが、
+/// アプリの終了では Drop は走らない(Tauri のイベントループは
+/// `std::process::exit` で終わり、managed state は解放されない)。そのため
+/// `lib.rs` が `RunEvent::Exit` で [`SpaceMouseHandle::shutdown`] を呼び、
+/// raw スレッドの停止 / SDK の登録解除を明示的に行う(要件#25 追補c)。
 pub enum SpaceMouseHandle {
     Sdk(sdk::SdkClient),
     Raw(SpaceMouseReader),
@@ -225,6 +228,17 @@ impl SpaceMouseHandle {
     pub fn set_window_focus(&self, label: &str, focused: bool) {
         if let SpaceMouseHandle::Sdk(client) = self {
             client.set_window_focus(label, focused);
+        }
+    }
+
+    /// 入力ソースを止める(`lib.rs` が `RunEvent::Exit` で呼ぶ)。SDK は無効化 →
+    /// 登録解除 → ハンドラ撤去(一度きり)、raw は読みスレッドの停止、無効なら
+    /// 何もしない。何度呼んでもよい。
+    pub fn shutdown(&self) {
+        match self {
+            SpaceMouseHandle::Sdk(client) => client.shutdown(),
+            SpaceMouseHandle::Raw(reader) => reader.stop(),
+            SpaceMouseHandle::Disabled => {}
         }
     }
 }
@@ -273,15 +287,22 @@ fn raw_hid_available() -> bool {
     }
 }
 
-/// 常駐スレッドの停止スイッチ。Drop で落ちるので、アプリの managed state に
-/// 置いておけばプロセス終了時にスレッドが畳まれる。
+/// 常駐スレッドの停止スイッチ。終了事象で [`SpaceMouseHandle::shutdown`] から
+/// 落とす(アプリの終了では Drop が走らないため)。Drop でも落ちる。
 pub struct SpaceMouseReader {
     stop: Arc<AtomicBool>,
 }
 
+impl SpaceMouseReader {
+    /// 読みスレッドに止まるよう伝える(何度呼んでも同じ)。
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 impl Drop for SpaceMouseReader {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop();
     }
 }
 

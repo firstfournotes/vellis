@@ -1,11 +1,17 @@
-//! `extract_waveform_audio` command — the audio of a QuickTime movie, in a
-//! wrapper the WebView can decode (requirements.md #41 契約③).
+//! `extract_waveform_audio` command — the audio of a `.mov` / `.mp4` movie, in
+//! a wrapper the WebView can decode (requirements.md #41 契約③・#45 契約①).
 //!
-//! Only `.mov` needs this. `decodeAudioData` demuxes MP4 and WebM by itself, so
-//! those go straight from `fetch` to the decoder; QuickTime it refuses whatever
-//! is inside (measured 2026-09-01), and this command is the way around it:
-//! `audio_extract` plans the extraction, this reads the bytes the plan points
-//! at, and the re-wrapped audio goes back as **raw bytes**
+//! Both containers come here: `waveformPlan` (`src/lib/audio-waveform.ts`)
+//! routes `.mov` and `.mp4` to `extract`, `.wav` to the Rust
+//! `analyze_wav_waveform`, and everything else (WebM included) still goes from
+//! `fetch` to the decoder. `.mov` needs it because
+//! `decodeAudioData` refuses QuickTime whatever is inside (measured
+//! 2026-09-01). `.mp4` it can demux by itself, but only after `fetch` has pulled
+//! in the whole movie, so the 256 MiB ceiling fell on the movie rather than on
+//! its audio and long high-bitrate videos lost their waveform (#45). This
+//! command is the way around both: `audio_extract` plans the extraction, this
+//! reads the bytes the plan points at, and the re-wrapped audio goes back as
+//! **raw bytes**
 //! (`tauri::ipc::Response`). Serialising 100 MB of audio as a JSON array of
 //! numbers is not a slower version of that — it is unusable.
 //!
@@ -15,15 +21,16 @@
 //! inside each chunk, so the reads are one per chunk rather than one per sample.
 //!
 //! The degradations are the vocabulary the waveform band speaks (契約⑤): a
-//! rejection carrying `no-audio` or `unsupported-codec` is a *fact about the
-//! movie* that the frontend prints, and anything else is `unreadable`. Those two
-//! cannot be recovered from a decode failure — an audio-less movie and an
-//! undecodable one throw the same `EncodingError` — which is exactly why they
-//! are decided here, before the bytes ever reach the decoder.
+//! rejection carrying `no-audio`, `too-large` or `unsupported-codec` is a *fact
+//! about the movie* that the frontend prints, and anything else is
+//! `unreadable`. Those cannot be recovered from a decode failure — an
+//! audio-less movie and an undecodable one throw the same `EncodingError` —
+//! which is exactly why they are decided here, before the bytes ever reach the
+//! decoder.
 
 use crate::audio_extract::{
-    normalize_sound_description, parse_audio_extraction, pcm16_be_to_le, remux_m4a, with_edit_list,
-    wrap_wav, wrap_wav_float32, AudioCodec, SampleRange,
+    normalize_sound_description, pcm16_be_to_le, plan_audio_extraction, remux_m4a, with_edit_list,
+    wrap_wav, wrap_wav_float32, AudioCodec, ExtractionRefusal, SampleRange, MAX_READ_RUNS,
 };
 use crate::fs::provider::FileProvider;
 use crate::fs::uri::Uri;
@@ -43,22 +50,41 @@ const MAX_MOOV_BYTES: u64 = 64 * 1024 * 1024;
 ///
 /// The frontend checks the same ceiling on what it receives; this one exists so
 /// that a movie claiming an absurd audio track is refused before the bytes are
-/// read rather than after.
-const MAX_AUDIO_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Largest number of separate reads one extraction may issue.
-///
-/// Samples are read per contiguous run — normally one run per chunk, so a few
-/// hundred to a few thousand for a real movie. A file that interleaves every
-/// single sample would turn into one read per sample, and at that point the
-/// extraction is not worth the seeks.
-const MAX_READ_RUNS: usize = 200_000;
+/// read rather than after (as `too-large`, 追補i: see `audio_bytes_refusal`).
+pub const MAX_AUDIO_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Rejection reasons the frontend maps onto `WaveformExtraction` (契約⑤).
 /// Anything else it sees becomes `unreadable`.
 const NO_AUDIO: &str = "no-audio";
+const TOO_LARGE: &str = "too-large";
 const UNSUPPORTED_CODEC: &str = "unsupported-codec";
 const UNREADABLE: &str = "unreadable";
+
+/// The rejection reason the frontend is sent for a refused plan (追補i 契約2):
+/// `NoAudio` → `no-audio`, `TooLarge` → `too-large`.
+pub fn refusal_reason(refusal: ExtractionRefusal) -> &'static str {
+    match refusal {
+        ExtractionRefusal::NoAudio => NO_AUDIO,
+        ExtractionRefusal::TooLarge => TOO_LARGE,
+    }
+}
+
+/// Why the audio of a plan is not read, judged on its total size alone, or
+/// `None` to read it (追補i 契約2の補足).
+///
+/// Nothing to read is `unreadable`, as it always was. More than
+/// `MAX_AUDIO_BYTES` is `too-large` — the same word the plan uses for its caps,
+/// so a long PCM movie past the ceiling is not told it could not be read.
+/// Exactly `MAX_AUDIO_BYTES` is read.
+pub fn audio_bytes_refusal(total: u64) -> Option<&'static str> {
+    if total == 0 {
+        Some(UNREADABLE)
+    } else if total > MAX_AUDIO_BYTES {
+        Some(TOO_LARGE)
+    } else {
+        None
+    }
+}
 
 /// The first audio track of `uri`, re-wrapped for `decodeAudioData`.
 ///
@@ -80,10 +106,12 @@ pub async fn extract_waveform_audio(
     let moov = read_moov(provider.as_ref(), &parsed)
         .await?
         .ok_or_else(|| UNREADABLE.to_string())?;
-    // No plan means no audio track, or a sample table too broken to point at
-    // one. The two cannot be told apart from here, and "no audio" is the far
-    // more common of them — the band says so rather than inventing a fault.
-    let plan = parse_audio_extraction(&moov).ok_or_else(|| NO_AUDIO.to_string())?;
+    // No plan means no audio track or a sample table too broken to point at one
+    // (`no-audio` — the two cannot be told apart from here, and "no audio" is
+    // the far more common of them), or an audio track whose tables are past a
+    // cap (`too-large`, 追補i: a long PCM movie is not one without audio).
+    let plan =
+        plan_audio_extraction(&moov).map_err(|refusal| refusal_reason(refusal).to_string())?;
 
     if plan.codec == AudioCodec::Unsupported {
         return Err(UNSUPPORTED_CODEC.to_string());
@@ -223,10 +251,12 @@ async fn read_samples(
     ranges: &[SampleRange],
 ) -> Result<Vec<u8>, String> {
     let total: u64 = ranges.iter().map(|r| u64::from(r.size)).sum();
-    if total == 0 || total > MAX_AUDIO_BYTES {
-        return Err(UNREADABLE.to_string());
+    if let Some(reason) = audio_bytes_refusal(total) {
+        return Err(reason.to_string());
     }
 
+    // Runs never outnumber chunks, and the plan already refuses more chunks than
+    // this as too large (追補i); this stays as the bound on the reads themselves.
     let runs = contiguous_runs(ranges);
     if runs.len() > MAX_READ_RUNS {
         return Err(UNREADABLE.to_string());

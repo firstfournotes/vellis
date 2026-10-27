@@ -31,11 +31,11 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const JUDGE = path.join(repoRoot, 'scripts', 'self-check-judge.mjs');
@@ -91,6 +91,10 @@ function cleanReport(over: Partial<Report> = {}): Report {
 
 let counter = 0;
 const tmp = mkdtempSync(path.join(os.tmpdir(), 'vellis-self-check-judge-'));
+// 要件72 追補b 契約1(backlog 340): 作った一時フォルダはこのファイルのテストがすべて終わったあとに中身ごと消す
+afterAll(() => {
+	rmSync(tmp, { recursive: true, force: true });
+});
 function writeReport(content: string | Report): string {
 	const p = path.join(tmp, `report-${counter++}.json`);
 	writeFileSync(p, typeof content === 'string' ? content : JSON.stringify(content));

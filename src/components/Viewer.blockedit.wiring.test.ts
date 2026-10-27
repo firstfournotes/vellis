@@ -1594,7 +1594,7 @@ describe('Viewer — inline code の上のダブルクリックはその段落�
 //   残っていれば戻してから捨てる。`{@html}` は文字列が同じだと DOM を作り直さないので、
 //   レンダー結果が同じ外部変更(末尾の空行だけが増えた等)が編集中(非 dirty)に apply される
 //   と、`index` だけが差し替わって打った文字が画面に残る。残った文字は再入場で「編集前」として
-//   掴まれ、確定で原文へ書かれる
+//   掴まれ、確定で原文へ書かれる。再入場→無編集の確定は追補j(2) のとおり閲覧へ戻る(追補j(4) 改訂)
 //
 // 「未確定の内側を掴んだまま外側を掴む」形は配線上たどれない ―― 外側への mousedown は内側の
 // ブロック**外**なので先に内側が確定する(契約②)。したがって確定済み(dirty)の形だけを固定する。
@@ -1755,7 +1755,10 @@ describe('Viewer — 再レンダーで掴みを捨てるとき、DOM が残っ�
 		expect(renderedSeqTrailing.index).not.toBe(renderedSeq.index);
 	});
 
-	it('打って確定しないまま同じ HTML の外部変更が apply: 段落の表示は編集前へ戻り、再入場→無編集で確定しても打った文字が原文へ書かれない', async () => {
+	// 追補j(4) で改訂(2026-10-19): 再入場→無編集の確定は、閲覧から入ってまだ何も確定していないので
+	// 書き戻さず閲覧へ戻る(`editBuffer` null・editMode 'view')。打った文字が原文へ書かれない・
+	// dirty でない・表示が元のまま、は不変。
+	it('打って確定しないまま同じ HTML の外部変更が apply: 段落の表示は編集前へ戻り、再入場→無編集で確定すると打った文字が原文へ書かれずに閲覧へ戻る', async () => {
 		const r = mountDoc(SEQ_MD, renderedSeq);
 		const p1 = paragraphs(r.container)[0];
 		await typeInto(p1, TYPED);
@@ -1784,9 +1787,12 @@ describe('Viewer — 再レンダーで掴みを捨てるとき、DOM が残っ�
 		expect(isEditable(again)).toBe(true);
 		await clickOutside(r.container);
 
-		expect(windowState.editBuffer).toBe(SEQ_TRAILING_MD);
+		expect(windowState.editMode).toBe('view');
+		expect(windowState.editBuffer).toBeNull();
 		expect(windowState.dirty).toBe(false);
 		expect(windowState.currentDocument?.content).toBe(SEQ_TRAILING_MD);
+		expect(editables(r.container)).toEqual([]);
 		expect(paragraphs(r.container)[0].textContent).toBe(P1);
+		expect(r.container.textContent).not.toContain(TYPED);
 	});
 });

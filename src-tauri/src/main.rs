@@ -3,7 +3,7 @@
 
 use clap::Parser;
 
-use vellis_lib::cli::Cli;
+use vellis_lib::cli::{missing_local_path, Cli};
 use vellis_lib::cli_fix;
 use vellis_lib::cli_install;
 use vellis_lib::ipc::client::IpcClient;
@@ -86,6 +86,19 @@ fn main() {
                 eprintln!("vellis: failed to install CLI symlink: {}", e);
                 std::process::exit(1);
             }
+        }
+    }
+
+    // 要件#5 追補d: a local path that is not there ends the CLI here with
+    // exit 2, before the IPC probe and before the app starts — nothing is
+    // sent, nothing opens and nothing lands in Recent Files. `://` arguments
+    // are not checked, and a path whose existence cannot be told goes on as
+    // before. The message names the path as typed.
+    if let Some(ref path) = cli.path {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        if missing_local_path(path, &cwd).is_some() {
+            eprintln!("vellis: no such file or directory: {}", path);
+            std::process::exit(2);
         }
     }
 

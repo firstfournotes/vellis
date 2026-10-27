@@ -36,16 +36,17 @@ use serde::Serialize;
 /// IPC as JSON, so an absurd table is refused rather than allocated for. The
 /// same bound applies to `ctts`, both to its entry count and to the samples it
 /// claims.
-const MAX_SAMPLES: u64 = 6_000_000;
+pub(crate) const MAX_SAMPLES: u64 = 6_000_000;
 
-/// How far a sample duration may sit from the nominal one and still count as
+/// How far a frame interval may sit from the nominal one and still count as
 /// constant rate, in permille (0.5 %).
 ///
-/// The tolerance exists because encoders routinely give the last sample a
-/// slightly different duration to land the total on a round number; treating
-/// those movies as variable rate would drop the SMPTE readout (契約①) from
-/// ordinary CFR material. The allowance is deliberately narrow — the fixtures
-/// that must read as VFR vary by whole multiples.
+/// The intervals are the gaps between consecutive frame starts. The last
+/// frame's own length, which encoders routinely trim to land the total on a
+/// round number, is not one of them (req-37 追補d, 追補h): counting it would
+/// drop the SMPTE readout (契約①) from ordinary CFR material. The allowance
+/// itself takes in a few ticks of rounding and is deliberately narrow — the
+/// fixtures that must read as VFR vary by whole multiples.
 const CFR_TOLERANCE_PERMILLE: u64 = 5;
 
 /// The first video track's frame index, as the frontend receives it
@@ -106,7 +107,7 @@ pub fn parse_frame_index(bytes: &[u8]) -> Option<VideoFrameIndex> {
 /// data and a header that cannot be trusted: a size that does not cover its own
 /// header, or a box that claims to run past the end of the buffer. Callers make
 /// no distinction — whatever was parsed before this point stands.
-fn next_box<'a>(data: &'a [u8], pos: &mut usize) -> Option<(&'a [u8], &'a [u8])> {
+pub(crate) fn next_box<'a>(data: &'a [u8], pos: &mut usize) -> Option<(&'a [u8], &'a [u8])> {
     let start = *pos;
     let size32 = read_u32(data, start)?;
     let kind = data.get(start + 4..start + 8)?;
@@ -133,12 +134,12 @@ fn next_box<'a>(data: &'a [u8], pos: &mut usize) -> Option<(&'a [u8], &'a [u8])>
     Some((kind, &data[start + header_len..end]))
 }
 
-fn read_u32(data: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     let raw: [u8; 4] = data.get(at..at + 4)?.try_into().ok()?;
     Some(u32::from_be_bytes(raw))
 }
 
-fn read_u64(data: &[u8], at: usize) -> Option<u64> {
+pub(crate) fn read_u64(data: &[u8], at: usize) -> Option<u64> {
     let raw: [u8; 8] = data.get(at..at + 8)?.try_into().ok()?;
     Some(u64::from_be_bytes(raw))
 }
@@ -390,7 +391,7 @@ fn sample_table(minf: &[u8]) -> Option<SampleTable> {
     None
 }
 
-fn parse_stts(payload: &[u8]) -> Option<Vec<(u32, u32)>> {
+pub(crate) fn parse_stts(payload: &[u8]) -> Option<Vec<(u32, u32)>> {
     let declared = read_u32(payload, 4)? as usize;
     // No `with_capacity`: the declared count is attacker-controlled, while the
     // reads below stop at the end of the payload the file actually carries.
@@ -405,7 +406,7 @@ fn parse_stts(payload: &[u8]) -> Option<Vec<(u32, u32)>> {
 /// `ctts` entries, or `None` for a table that is truncated or claims more
 /// than `MAX_SAMPLES`. Whether it covers exactly the samples of `stts` is
 /// checked once both are known (`build_index`).
-fn parse_ctts(payload: &[u8]) -> Option<Vec<(u32, i32)>> {
+pub(crate) fn parse_ctts(payload: &[u8]) -> Option<Vec<(u32, i32)>> {
     if *payload.first()? > 1 {
         return None;
     }
@@ -497,7 +498,12 @@ fn build_index(timescale: u32, table: &SampleTable, edit: Option<Edit>) -> Optio
 
 /// A movie with neither composition offsets nor an edit list is shown in
 /// decode order from zero: the frames start at the running sum of the `stts`
-/// durations, and those durations are the intervals.
+/// durations.
+///
+/// The intervals are the gaps between consecutive starts, as in
+/// [`presentation_timeline`] (req-37 追補h): every duration but the last
+/// frame's, which spaces no two frames. A lone frame has no gap, so its own
+/// length stands in.
 fn decode_timeline(stts: &[(u32, u32)], total_samples: u64) -> Timeline {
     let mut sample_times = Vec::with_capacity(total_samples as usize);
     let mut clock: u64 = 0;
@@ -507,10 +513,15 @@ fn decode_timeline(stts: &[(u32, u32)], total_samples: u64) -> Timeline {
             clock = clock.saturating_add(u64::from(*delta));
         }
     }
-    let intervals = stts
+    let mut intervals: Vec<(u64, u64)> = stts
         .iter()
         .map(|(count, delta)| (u64::from(*count), u64::from(*delta)))
         .collect();
+    if total_samples > 1 {
+        if let Some((count, _)) = intervals.iter_mut().rev().find(|(count, _)| *count > 0) {
+            *count -= 1;
+        }
+    }
     (sample_times, clock, intervals)
 }
 

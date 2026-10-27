@@ -9,7 +9,7 @@
  *   inline highlight styles survive sanitization.
  * - the `markdown-alert*` classes on `<blockquote>` / `<p>` — and only those
  *   values — for GitHub-style alerts (`plugins/alert.ts`).
- * - `vellis-asset:`, `ssh:`, `et:`, `file:` URI schemes for href/src
+ * - `vellis-asset:`, `ssh:`, `file:` URI schemes for href/src
  *   (the Tauri custom protocol + remote scheme support).
  *
  * Spec: `docs/archives/rendering-engine.md` §3.5.  The dual-defence story —
@@ -133,7 +133,6 @@ const baseProtocols = (defaultSchema.protocols ?? {}) as Record<string, string[]
 const hrefProtocols = uniq([
 	...(baseProtocols.href ?? []),
 	'ssh',
-	'et',
 	'file',
 	'vellis-asset',
 ]);

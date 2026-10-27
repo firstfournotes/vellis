@@ -604,9 +604,11 @@ describe('AC-54-14 — 不変と依存(契約⑦)', () => {
 	// 契約⑦の不変ファイルを内容の SHA-256 で固定する(要件#49 AC-49-11 / #53
 	// AC-53-11 と同じ型)。値は要件#54 着手時点(loop/req-54 4a25d01)の内容。
 	// 後続要件が正当に変える場合は要件側で決めてから固定値を更新する。
+	// 要件#8 追補a(4)(2026-10-19)で追補a(retargetLinks のコメント終端・生テキスト要素)確定後の内容に更新
+	// 要件#8 追補d(2026-10-26・由谷承認)で追補d(base の href の & を逃がす・生の文字の要素の終わりのタグに境界・svg/math/select の中は生の文字にしない=Issue #380・#705)確定後の内容に更新
 	test('src/lib/html-viewer.ts は無改変(SHA-256 固定)', () => {
 		expect(sha256(readRepoFile('src/lib/html-viewer.ts'))).toBe(
-			'087755abba702a70ec8d78b7182b3661aa6071c71945fa347fc4a813c792809e',
+			'f46496a025f1685c2bc03034a6e56b50e6dfd10a8a8d7fc6dbd03c4b83466b5d',
 		);
 	});
 
@@ -616,9 +618,10 @@ describe('AC-54-14 — 不変と依存(契約⑦)', () => {
 		);
 	});
 
+	// 要件#54 追補e(2026-10-26・由谷承認)で追補e(buildEditSurface が html/body の class を rootClasses で持ち出す=Issue #550・#551)確定後の内容に更新
 	test('src/html/edit.ts は無改変(SHA-256 固定=契約⑦「buildEditSurface を読み取り専用で流用」)', () => {
 		expect(sha256(readRepoFile('src/html/edit.ts'))).toBe(
-			'05f8eef1b9b59f87b5990010fd88ab298662f0df4816d7f88b64b2fc9a3d84ba',
+			'3cc8bb8a686126ca0567e487a8a0b4f0adcf27145d47af71aebef8d73614b21c',
 		);
 	});
 

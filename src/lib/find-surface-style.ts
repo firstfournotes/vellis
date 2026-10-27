@@ -67,8 +67,22 @@ const NESTED_AT_RULE = /^@(?:media|supports|container|layer|scope|document|-moz-
  * 直前の文字で「`body` を含むだけの語」を弾く ―― `tbody` `.tbody` `#nobody`
  * `.body` はどれも別物で、触ると文書の見た目を壊す。直後は `[\w-]` でないこと
  * (`bodyguard` のような型セレクタに当てない)。
+ *
+ * 大文字小文字は区別しない(追補e=#550)。CSS の型セレクタと `:root` は大小を
+ * 区別しないので、`BODY{}` / `:ROOT{}` も iframe では効く。置き換えるのはこの
+ * 3語だけなので、class 名・id など周りの大小はそのまま残る。
  */
-const ROOT_LIKE_SELECTOR = /(^|[^\w\-.#%\]])(?::root|body|html)(?![\w\-])/g;
+const ROOT_LIKE_SELECTOR = /(^|[^\w\-.#%\]])(?::root|body|html)(?![\w\-])/gi;
+
+/**
+ * 複合セレクタの中で型セレクタの後ろに続く修飾1つ(追補e=#551)。class・id・
+ * 属性・疑似クラス(括弧は2段まで)。`html.dark body` の `.dark` をルートへ
+ * 運ぶときに、修飾の切れ目を見分けるのに使う。
+ */
+const COMPOUND_MODIFIER =
+	'(?:[.#](?:\\\\.|[\\w\\-]|[^\\x00-\\x7f])+' +
+	'|\\[[^\\]]*\\]' +
+	'|::?(?:\\\\.|[\\w\\-]|[^\\x00-\\x7f])+(?:\\((?:[^()]|\\([^()]*\\))*\\))?)';
 
 /** 引用符で囲まれた範囲の終わり(閉じ引用符の次)。 */
 function skipQuoted(css: string, at: number): number {
@@ -193,13 +207,22 @@ function rewriteSelector(selector: string, root: string): string {
  *
  * 写しっぱなしだと `.vellis-html-find-root .vellis-html-find-root` になり、
  * ルートは1つしかないので何にも当たらなくなる(直そうとして壊す典型)。
+ *
+ * 修飾つきの組(`html.dark body` / `html.a > body.b`)も同じく1つにして、両方の
+ * 修飾をルートに付ける ―― html 側を先、body 側を後に並べる(追補e=#551)。
+ * 修飾が当たる相手は `Viewer.svelte` がルートに足す文書の `<html>` / `<body>`
+ * の class。
  */
 function collapseRepeatedRoot(selector: string, root: string): string {
 	const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-	const pair = new RegExp(escaped + '(?:\\s*>\\s*|\\s+)' + escaped + '(?![\\w\\-])', 'g');
+	const node = escaped + '(?![\\w\\-])(' + COMPOUND_MODIFIER + '*)';
+	const pair = new RegExp(node + '(?:\\s*>\\s*|\\s+)' + node, 'g');
 	let current = selector;
 	for (;;) {
-		const next = current.replace(pair, root);
+		const next = current.replace(
+			pair,
+			(_m, outer: string, inner: string) => root + outer + inner,
+		);
 		if (next === current) return current;
 		current = next;
 	}
@@ -273,8 +296,11 @@ function rewriteRules(css: string, root: string): string {
  *
  * 触るのは**セレクタだけ**で、宣言(値)と規則の並び順は無傷で通す:
  *
- * - `body` / `html` / `:root` → {@link FIND_SURFACE_ROOT_SELECTOR}
+ * - `body` / `html` / `:root` → {@link FIND_SURFACE_ROOT_SELECTOR}(大小は問わない=
+ *   `BODY` / `:ROOT` も。追補e)
  * - `html body` → ルートセレクタ**1つ**(`.root .root` にしない)
+ * - `html.dark body` / `html.a > body.b` → ルート1つに両方の修飾(`.root.dark` /
+ *   `.root.a.b`=追補e)
  * - `body > .box` / `body .content` / `body.dark` → ルートを頭にした形
  * - `,` 区切りの各セレクタ・`@media {…}` の中も同じ
  * - `tbody` / `.tbody` / `#nobody` / `.body` は**触らない**

@@ -101,6 +101,9 @@
 			'The map refers to a different video name than the one that is open. It may belong to another video.',
 		'duration-mismatch':
 			'The map duration differs from the actual video duration by more than 0.05 seconds. The map may be from before the video was rebuilt.',
+		// 要件#40 追補a
+		'overlay-empty-range':
+			'Some overlays in the map end at or before their start, so they are never shown.',
 	};
 
 	const ROLE_TEXT: Record<'out' | 'in', string> = {

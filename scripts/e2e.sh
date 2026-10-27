@@ -8,6 +8,21 @@
 #
 # Usage:
 #   ./scripts/e2e.sh
+#   ./scripts/e2e.sh --spec tests/e2e/specs/<one>.e2e.ts   (extra args go to wdio)
+#       The app runs with a throwaway home ($VELLIS_E2E_APP_HOME under the
+#       per-run temp dir, applied to the app alone by scripts/e2e-launch.sh),
+#       so it never touches the user's Recent Files, history or
+#       ~/.config/vellis/settings.json (backlog 335).
+#   ./scripts/e2e.sh --ssh [--spec …]
+#       ssh mode: starts a disposable sshd (scripts/e2e-sshd.sh), gives the
+#       app that sshd's environment (its own fake home) through
+#       scripts/e2e-launch.sh, and opens the first window on the
+#       `ssh://vellis-e2e/...` remote root instead of fixtures/start-root.
+#       Without --spec only tests/e2e/specs/ssh-root-gates.e2e.ts runs — the
+#       other specs expect the local start-root; another ssh spec is run by
+#       naming it with --spec.
+#   In both modes XDG_CONFIG_HOME is exported for wdio too (the same value
+#   the app gets), so a spec reads or writes the app's settings.json.
 #
 # Prerequisites:
 #   - cargo install tauri-webdriver --locked
@@ -26,6 +41,21 @@ set -m
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# `--ssh` is ours; everything else goes to wdio untouched.
+ssh_mode=0
+spec_given=0
+wdio_args=()
+for arg in "$@"; do
+	case "$arg" in
+	--ssh) ssh_mode=1 ;;
+	*)
+		[[ "$arg" == --spec* ]] && spec_given=1
+		wdio_args+=("$arg")
+		;;
+	esac
+done
+set -- "${wdio_args[@]+"${wdio_args[@]}"}"
 
 if ! command -v tauri-webdriver >/dev/null 2>&1; then
 	echo "tauri-webdriver not found — install with: cargo install tauri-webdriver --locked" >&2
@@ -68,6 +98,8 @@ printf '# Target child\n' >"$target_root/child-doc.md"
 # otherwise `/tmp/vellis-$UID.{sock,lock}`. Pointing it at a freshly
 # created per-run dir means the e2e binary always becomes its own
 # main process and the user's running `vellis .` is unaffected.
+# Outside ssh mode the same dir also holds the app's throwaway home
+# (below), so the cleanup's `rm -rf "$xdg_dir"` removes both.
 xdg_dir="$(mktemp -d "${TMPDIR:-/tmp}/vellis-e2e-XXXXXX")"
 export XDG_RUNTIME_DIR="$xdg_dir"
 
@@ -87,6 +119,37 @@ export XDG_RUNTIME_DIR="$xdg_dir"
 export RUST_LOG="${RUST_LOG:-info}"
 export VELLIS_E2E_BIN="$binary"
 export VELLIS_E2E_INITIAL_ROOT="$start_root"
+
+# ssh mode: a throwaway sshd on 127.0.0.1 whose keys, agent, fake HOME and
+# remote folder live in one temp dir (scripts/e2e-sshd.sh). The harness
+# exports (VELLIS_E2E_SSH_URI / _ROOT / _HOME / …) are for the specs; the
+# app's own environment (HOME, SSH_AUTH_SOCK, PATH) is applied only inside
+# scripts/e2e-launch.sh, never to wdio or tauri-webdriver. XDG_CONFIG_HOME is
+# the one exception: the app reads settings.json from there and the specs
+# write it, so both must agree.
+if ((ssh_mode)); then
+	echo "==> Starting the disposable sshd (scripts/e2e-sshd.sh)"
+	eval "$(scripts/e2e-sshd.sh start)"
+	export VELLIS_E2E_SSH_MODE=1
+	export XDG_CONFIG_HOME="$VELLIS_E2E_SSH_HOME/.config"
+	if ((!spec_given)); then
+		set -- "$@" --spec "tests/e2e/specs/ssh-root-gates.e2e.ts"
+	fi
+else
+	# Not ssh mode: the app still gets a throwaway home of its own (backlog
+	# 335). The webdriver build shares the release identifier
+	# `com.tetsuo.vellis`, so with the real HOME it writes the test files and
+	# folders into the user's `~/Library/Application Support/com.tetsuo.vellis/`
+	# `recent-files.json` / `history.json` (Recent Files is capped at 100, so
+	# test entries push the user's out) and reads their
+	# `~/.config/vellis/settings.json`. scripts/e2e-launch.sh applies HOME /
+	# CFFIXED_USER_HOME to the app only — wdio, pnpm and tauri-webdriver keep
+	# the real HOME. XDG_CONFIG_HOME is exported for wdio as well, as in ssh
+	# mode, so a spec reads the same settings.json the app does.
+	export VELLIS_E2E_APP_HOME="$xdg_dir/home"
+	mkdir -p "$VELLIS_E2E_APP_HOME"
+	export XDG_CONFIG_HOME="$VELLIS_E2E_APP_HOME/.config"
+fi
 
 # tauri-webdriver v0.1.1 spawns the application with no CLI args
 # regardless of `tauri:options.args`. See `scripts/e2e-launch.sh`
@@ -115,6 +178,11 @@ cleanup() {
 	if [[ -n "${proxy_pid:-}" ]]; then
 		kill -KILL -- "-$proxy_pid" 2>/dev/null || true
 	fi
+	# ssh mode: stop sshd + agent and delete their state dir (after the app,
+	# which held the connections, is gone).
+	if [[ -n "${VELLIS_E2E_SSHD_DIR:-}" && -d "$VELLIS_E2E_SSHD_DIR" ]]; then
+		scripts/e2e-sshd.sh clean "$VELLIS_E2E_SSHD_DIR" || true
+	fi
 	rm -rf "$xdg_dir" 2>/dev/null || true
 	# Hard backstop: if anything above still managed to keep our stdio
 	# alive, schedule a SIGKILL of the script itself in 5 seconds so the
@@ -129,14 +197,22 @@ sleep 1
 echo "==> Running WebdriverIO suite (XDG_RUNTIME_DIR=$xdg_dir)"
 export VELLIS_E2E_BINARY="$repo_root/scripts/e2e-launch.sh"
 
-# Watchdog: bound the wdio run independently of the GitLab job timeout.
-# Specs themselves complete in ~5s; 5 minutes leaves ample slack for CI
-# overhead but caps the failure mode that bit v0.1.14 (wdio finished its
-# spec run but the runner process never exited, burning the entire 1h
-# job slot). On wdio hang we SIGKILL it so the script can fall through
-# to `cleanup` and the job fails fast instead of timing out.
-WDIO_WATCHDOG_SECONDS="${WDIO_WATCHDOG_SECONDS:-300}"
-pnpm --silent exec wdio run tests/e2e/wdio.conf.ts &
+# Watchdog: bound the wdio run independently of the CI job timeout. It
+# caps the failure mode that bit v0.1.14 (wdio finished its spec run but
+# the runner process never exited, burning the entire 1h job slot). On
+# wdio hang we SIGKILL it so the script can fall through to `cleanup` and
+# the job fails fast instead of timing out.
+# The full run of every spec took 3 min 56 s on 2026-10-09 (req66 and
+# req41 are most of it), so the default is 10 minutes: about 2.5 times the
+# run, room for more specs and a slower machine (backlog 329).
+# The ssh gate spec waits on the 2-second remote poll many times, so ssh
+# mode gets a longer default.
+if ((ssh_mode)); then
+	WDIO_WATCHDOG_SECONDS="${WDIO_WATCHDOG_SECONDS:-900}"
+else
+	WDIO_WATCHDOG_SECONDS="${WDIO_WATCHDOG_SECONDS:-600}"
+fi
+pnpm --silent exec wdio run tests/e2e/wdio.conf.ts "$@" &
 wdio_pid=$!
 (
 	sleep "$WDIO_WATCHDOG_SECONDS"

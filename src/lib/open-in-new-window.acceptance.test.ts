@@ -515,6 +515,8 @@ describe('AC-59-14: src-tauri 無改変・依存追加ゼロ(契約③⑧)', () 
 				'toml',
 				'tauri-plugin-webdriver',
 				'tauri-plugin-window-state',
+				// 要件#66 で `regex` を直接宣言=2026-10-08 由谷承認(契約12)。
+				'regex',
 			].sort()
 		);
 	});

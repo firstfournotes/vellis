@@ -561,9 +561,11 @@ describe('AC-53-11 — 閲覧側の不変(契約①⑧)', () => {
 	// 内容の SHA-256 で固定する(要件#49 AC-49-11 と同じ型)。値は要件#53 着手時点
 	// (loop/req-53 c56a544)の内容。後続要件が正当に変える場合は要件側で決めてから
 	// 固定値を更新する(実装の周回で書き換えない)。
+	// 要件#8 追補a(4)(2026-10-19)で追補a(retargetLinks のコメント終端・生テキスト要素)確定後の内容に更新
+	// 要件#8 追補d(2026-10-26・由谷承認)で追補d(base の href の & を逃がす・生の文字の要素の終わりのタグに境界・svg/math/select の中は生の文字にしない=Issue #380・#705)確定後の内容に更新
 	test('src/lib/html-viewer.ts は無改変(SHA-256 固定)', () => {
 		expect(sha256(readRepoFile('src/lib/html-viewer.ts'))).toBe(
-			'087755abba702a70ec8d78b7182b3661aa6071c71945fa347fc4a813c792809e',
+			'f46496a025f1685c2bc03034a6e56b50e6dfd10a8a8d7fc6dbd03c4b83466b5d',
 		);
 	});
 
@@ -639,9 +641,10 @@ describe('AC-53-13 — 依存の固定(契約⑧)', () => {
 		expect(src).toMatch(/rehype-sanitize/);
 	});
 
+	// Issue #701(2026-10-20)で hrefProtocols から 'et' を外したあとの値に更新(要件#53 の「固定値の更新」節)
 	test('既存の vellisSchema は無改変(値固定=JSON 化した SHA-256。拡張は新しいスキーマ定数を足す形)', () => {
 		expect(sha256(JSON.stringify(vellisSchema))).toBe(
-			'e6d3aed96a88d5f873e5be1bf9954124c5c32366fcef9003b73aae05c7fcb45a',
+			'4779c02c2b402034b0cbc9bd0805f363112da7b4ea9d1c2be66031cfa3a3345a',
 		);
 	});
 });

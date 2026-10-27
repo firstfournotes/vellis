@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::errors::FsError;
 use crate::exclude::filter_tree_entries;
 use crate::fs::entry::Entry;
-use crate::fs::provider::{WatchEvent, WatchEventKind, WatchHandle};
+use crate::fs::provider::{FileProvider, WatchEvent, WatchEventKind, WatchHandle};
 use crate::fs::registry::FileProviderRegistry;
 use crate::fs::uri::Uri;
 
@@ -230,16 +230,21 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
     ) {
         let coordinator = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
+            // Whether the watched file is known to have left its path
+            // (要件#22 追補a). File and Binary watches use it; it lives in this
+            // task because the task sees the watch's events one at a time, in
+            // order, and is born and dies with the watch.
+            let mut gone = false;
             while let Some(event) = rx.recv().await {
                 match kind {
                     WatchKind::File => {
                         coordinator
-                            .handle_file_event(&canonical, event.kind)
+                            .handle_file_event(&canonical, event.kind, &mut gone)
                             .await;
                     }
                     WatchKind::Binary => {
                         coordinator
-                            .handle_binary_file_event(&canonical, event.kind)
+                            .handle_binary_file_event(&canonical, event.kind, &mut gone)
                             .await;
                     }
                     WatchKind::Directory => {
@@ -252,40 +257,103 @@ impl<R: tauri::Runtime> DocumentCoordinator<R> {
         });
     }
 
-    async fn handle_file_event(&self, canonical: &str, kind: WatchEventKind) {
+    /// Text watch: Modify re-reads the file and emits `file_changed`, Remove
+    /// emits `file_removed`.
+    ///
+    /// A rename that takes the file away from its path (a move, a rename,
+    /// Finder's Move to Trash) carries no REMOVED flag on macOS — notify hands
+    /// it over as `Create` / `Modify` only — so a re-read that finds nothing
+    /// there (`NotFound`, and nothing else) is a removal too (要件#22 追補a
+    /// 契約1). `gone` makes a removal announce once: the follow-up events of
+    /// the same move or unlink stay silent until the file is seen at its path
+    /// again (契約3).
+    async fn handle_file_event(&self, canonical: &str, kind: WatchEventKind, gone: &mut bool) {
         match kind {
             WatchEventKind::Modify => {
-                let uri = match Uri::parse(canonical) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        tracing::warn!("invalid canonical uri {}: {}", canonical, e);
-                        return;
-                    }
-                };
-                let provider = match self.providers.resolve(&uri) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!("no provider for {}: {}", canonical, e);
-                        return;
-                    }
+                let Some((uri, provider)) = self.resolve_watched(canonical) else {
+                    return;
                 };
                 match provider.read_text(&uri).await {
-                    Ok(content) => self.emit_file_changed(canonical, content).await,
+                    Ok(content) => {
+                        *gone = false;
+                        self.emit_file_changed(canonical, content).await;
+                    }
+                    Err(FsError::NotFound(_)) => self.announce_gone(canonical, gone).await,
                     Err(e) => tracing::warn!("failed to re-read {}: {}", canonical, e),
                 }
             }
-            WatchEventKind::Remove => self.emit_file_removed(canonical).await,
-            _ => {}
+            WatchEventKind::Remove => self.announce_gone(canonical, gone).await,
+            WatchEventKind::Create => self.recheck_gone(canonical, gone).await,
         }
     }
 
     /// Same shape as `handle_file_event` minus the read: Modify announces the
-    /// change, Remove goes down the shared removal path (要件#22).
-    async fn handle_binary_file_event(&self, canonical: &str, kind: WatchEventKind) {
+    /// change, Remove goes down the shared removal path (要件#22). A Modify
+    /// whose file is no longer at its path (`NotFound` from `stat`) is a
+    /// removal, announced once, and never a `binary_file_changed` (要件#22
+    /// 追補a 契約1・3). Any other `stat` failure does not mean "gone" (契約4):
+    /// the change is announced as before.
+    async fn handle_binary_file_event(
+        &self,
+        canonical: &str,
+        kind: WatchEventKind,
+        gone: &mut bool,
+    ) {
         match kind {
-            WatchEventKind::Modify => self.emit_binary_file_changed(canonical).await,
-            WatchEventKind::Remove => self.emit_file_removed(canonical).await,
-            _ => {}
+            WatchEventKind::Modify => match self.stat_watched(canonical).await {
+                Some(Err(FsError::NotFound(_))) => self.announce_gone(canonical, gone).await,
+                Some(Ok(())) => {
+                    *gone = false;
+                    self.emit_binary_file_changed(canonical).await;
+                }
+                Some(Err(_)) | None => self.emit_binary_file_changed(canonical).await,
+            },
+            WatchEventKind::Remove => self.announce_gone(canonical, gone).await,
+            WatchEventKind::Create => self.recheck_gone(canonical, gone).await,
+        }
+    }
+
+    /// Emit `file_removed` for a file watch unless this disappearance was
+    /// already announced (要件#22 追補a 契約3).
+    async fn announce_gone(&self, canonical: &str, gone: &mut bool) {
+        if !*gone {
+            *gone = true;
+            self.emit_file_removed(canonical).await;
+        }
+    }
+
+    /// A `Create` on a file watch whose file left its path: if the file is back,
+    /// its next disappearance is announced again. Nothing is emitted here — a
+    /// `Create` never was (`file_changed` follows from the Modify a write brings).
+    async fn recheck_gone(&self, canonical: &str, gone: &mut bool) {
+        if *gone && matches!(self.stat_watched(canonical).await, Some(Ok(()))) {
+            *gone = false;
+        }
+    }
+
+    /// Look the watched file up at its path: `Some(Ok(()))` when it is there,
+    /// `Some(Err(_))` with the provider's failure, `None` when the URI or its
+    /// provider cannot be had (already warned).
+    async fn stat_watched(&self, canonical: &str) -> Option<Result<(), FsError>> {
+        let (uri, provider) = self.resolve_watched(canonical)?;
+        Some(provider.stat(&uri).await.map(|_| ()))
+    }
+
+    /// Parse a watch's canonical URI and find its provider, warning on failure.
+    fn resolve_watched(&self, canonical: &str) -> Option<(Uri, Arc<dyn FileProvider>)> {
+        let uri = match Uri::parse(canonical) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!("invalid canonical uri {}: {}", canonical, e);
+                return None;
+            }
+        };
+        match self.providers.resolve(&uri) {
+            Ok(p) => Some((uri, p)),
+            Err(e) => {
+                tracing::warn!("no provider for {}: {}", canonical, e);
+                None
+            }
         }
     }
 

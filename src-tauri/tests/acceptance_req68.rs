@@ -965,6 +965,8 @@ fn ac68_8_cargo_dependencies_are_unchanged() {
             "toml",
             "tauri-plugin-webdriver",
             "tauri-plugin-window-state",
+            // 要件#66 で `regex` を直接宣言=2026-10-08 由谷承認(契約12)。
+            "regex",
         ])
     );
     assert_eq!(

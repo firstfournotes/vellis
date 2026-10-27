@@ -21,6 +21,7 @@ pub mod settings;
 pub mod spacemouse;
 pub mod update_check;
 pub mod video_frames;
+pub mod video_sync;
 pub mod wav_waveform;
 pub mod watch;
 pub mod window;
@@ -40,15 +41,15 @@ use commands::annotation::{
     rebind_marks_for_file, remove_mark, revert_to_snapshot, update_mark,
 };
 use commands::app::init_window;
-use commands::asset::handle_asset;
+use commands::asset::handle_asset_for_window;
 use commands::build_info::get_build_info;
 use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
 use commands::document::{open_binary_document, open_document, save_document};
 use commands::history::list_history;
 use commands::list::list_dir;
 use commands::print::{print_current_window, print_html, print_pdf, set_print_available};
-use commands::recent_files::{clear_recent_files, list_recent_files};
-use commands::root::set_root;
+use commands::recent_files::{clear_recent_files, list_recent_files, record_displayed_file};
+use commands::root::{set_root, switch_root_confirmed};
 use commands::search::{search_in_folder, search_in_folder_page, search_in_folder_reset, SearchResults};
 use commands::video::get_video_frame_index;
 use commands::wav_waveform::analyze_wav_waveform;
@@ -62,6 +63,7 @@ use ipc::server::{default_lock_path, default_socket_path, IpcServer};
 use print::{handle_print_protocol, PrintAvailability, PrintDocumentStore, PRINT_SCHEME};
 use self_check::{SelfCheckSession, StartupPlan};
 use watch::hub::DocumentCoordinator;
+use window::lifecycle::should_exit_after_destroy;
 use window::manager::{WindowArgs, WindowManager};
 use window::open_with::PendingOpens;
 
@@ -162,14 +164,22 @@ pub(crate) fn run_app(
     #[cfg(all(feature = "webdriver", debug_assertions))]
     let builder = builder.plugin(tauri_plugin_webdriver::init());
 
-    // A tab is neither restored nor saved: restoring would move it — and
-    // its whole tab group — to where a window of the same label sat in an
-    // earlier launch (requirements.md #62 追補a). The self-check launch does
-    // without the plugin altogether: it neither restores nor saves (要件#72 契約8).
+    // Only the first window of a launch (`main`) is restored and saved
+    // (requirements.md #12 追補b 契約1): labels are handed out afresh every
+    // launch, so for any later window "where the window with this label sat
+    // last time" was some other window (#569). Entries an earlier launch left
+    // on disk under other labels are never restored, so the plugin's exit-time
+    // save overwriting them is harmless (#570). A tab is never `main`; it stays
+    // in the label set as well (requirements.md #62 追補a). The self-check
+    // launch does without the plugin altogether: it neither restores nor saves
+    // (要件#72 契約8).
     let builder = if plan.window_state {
         builder.plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_filter(move |label| !tab_labels_for_filter.contains(label))
+                .with_filter(move |label| {
+                    window::placement::tracks_window_state(label)
+                        && !tab_labels_for_filter.contains(label)
+                })
                 .build(),
         )
     } else {
@@ -197,6 +207,18 @@ pub(crate) fn run_app(
                 // history picker and the empty state (要件#38 追補f).
                 if *focused {
                     menu::sync_print_item(window.app_handle(), window.label());
+                    // The frontmost document window is where a later CLI call
+                    // goes (要件#12 追補a 契約4). A print window is never
+                    // recorded.
+                    if !print::is_print_window(window.label()) {
+                        if let Some(state) = window.app_handle().try_state::<AppState>() {
+                            let wm = state.window_manager.clone();
+                            let label = window.label().to_string();
+                            tauri::async_runtime::spawn(async move {
+                                wm.lock().await.set_active(&label);
+                            });
+                        }
+                    }
                 }
             }
             // A closed window's folder-search results are dropped (要件#55 追補a).
@@ -208,6 +230,49 @@ pub(crate) fn run_app(
                 if let Some(print) = window.app_handle().try_state::<PrintAvailability>() {
                     print.forget(window.label());
                 }
+                // ...and so is its WindowManager entry (要件#12 追補a 契約1): this
+                // per-window event is where the unregister lives, since
+                // `tauri://destroyed` only reaches the window's own listeners.
+                // With no window left at all — document or print — the app
+                // exits (契約2・要件#38 追補m 契約2).
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    let wm = state.window_manager.clone();
+                    let app_handle = window.app_handle().clone();
+                    let label = window.label().to_string();
+                    tauri::async_runtime::spawn(async move {
+                        let document_windows = {
+                            let mut manager = wm.lock().await;
+                            if print::is_print_window(&label) {
+                                // A print window was never registered; what it
+                                // borrowed is the owner record that let it load
+                                // its document's ssh images (要件#27 追補b 契約2).
+                                manager.remove_print_owner(&label);
+                            } else {
+                                manager.unregister_window(&label);
+                            }
+                            manager.window_count()
+                        };
+                        // The destroyed window may still be listed while it goes
+                        // away, so it is left out of the count.
+                        let print_windows = app_handle
+                            .webview_windows()
+                            .keys()
+                            .filter(|other| {
+                                other.as_str() != label.as_str() && print::is_print_window(other)
+                            })
+                            .count();
+                        tracing::debug!(
+                            "Window '{}' destroyed, {} document / {} print window(s) remaining",
+                            label,
+                            document_windows,
+                            print_windows
+                        );
+                        if should_exit_after_destroy(document_windows, print_windows) {
+                            tracing::info!("All windows closed — exiting");
+                            app_handle.exit(0);
+                        }
+                    });
+                }
             }
         })
         .register_asynchronous_uri_scheme_protocol(
@@ -215,8 +280,12 @@ pub(crate) fn run_app(
             move |ctx, req, responder| {
                 let state = ctx.app_handle().state::<AppState>();
                 let state_ref = state.inner().clone();
+                // The webview that asked — for a frame inside it too (the HTML
+                // viewer's srcdoc frame): an ssh asset is served only from a
+                // host this window has open (要件#27 追補b 契約1・2).
+                let label = ctx.webview_label().to_string();
                 tauri::async_runtime::spawn(async move {
-                    let response = handle_asset(&state_ref, req).await;
+                    let response = handle_asset_for_window(&state_ref, &label, req).await;
                     responder.respond(response);
                 });
             },
@@ -240,6 +309,7 @@ pub(crate) fn run_app(
         open_binary_document,
         save_document,
         set_root,
+        switch_root_confirmed,
         new_window,
         new_tab,
         set_tab_title,
@@ -261,6 +331,7 @@ pub(crate) fn run_app(
         get_build_info,
         list_history,
         list_recent_files,
+        record_displayed_file,
         clear_recent_files,
         get_video_frame_index,
         extract_waveform_audio,
@@ -278,6 +349,7 @@ pub(crate) fn run_app(
         open_binary_document,
         save_document,
         set_root,
+        switch_root_confirmed,
         new_window,
         new_tab,
         set_tab_title,
@@ -299,6 +371,7 @@ pub(crate) fn run_app(
         get_build_info,
         list_history,
         list_recent_files,
+        record_displayed_file,
         clear_recent_files,
         get_video_frame_index,
         extract_waveform_audio,
@@ -529,6 +602,10 @@ pub(crate) fn run_app(
             // channel, and every failure inside it is a log line only.
             if plan.update_check {
                 update_check::spawn_poller(app.handle().clone());
+                // A window opened after the check missed its broadcast; it asks
+                // once its listener is in place and gets the remembered
+                // release (要件#14 追補b).
+                update_check::listen_banner_ready(app.handle());
             }
 
             // --- SpaceMouse (要件#24 / #25) ---
@@ -538,8 +615,12 @@ pub(crate) fn run_app(
             // framework when 3DxWare is installed (it seizes the device, so
             // raw HID reads nothing), otherwise the raw HID reader. No device
             // (the common case) is not an error. The handle is kept in
-            // managed state so dropping it on shutdown stops the reader
-            // thread / unregisters the SDK client.
+            // managed state, but nothing drops it at quit: the process ends in
+            // `std::process::exit` (closing the last window, `app.exit`) or in
+            // Cocoa's own `exit()` (Command + Q), so managed state is never
+            // released.
+            // The `.run` callback below stops it explicitly on
+            // `RunEvent::Exit` (要件#25 追補c).
             //
             // A `webdriver` build never starts an input source (backlog 190 /
             // 要件#25 追補b): the app under test would register with 3DxWare as
@@ -605,32 +686,6 @@ pub(crate) fn run_app(
                 let _ = &wm_for_events;
             });
 
-            // Hook into window destroy events to unregister and potentially exit.
-            let wm_for_destroy = app.state::<AppState>().window_manager.clone();
-            let app_handle_for_destroy = app.handle().clone();
-            app.listen("tauri://destroyed", move |event| {
-                let wm = wm_for_destroy.clone();
-                let app_handle = app_handle_for_destroy.clone();
-                // Extract window label from the event payload if possible.
-                // The event payload for window destruction contains the label.
-                if let Some(label) = extract_window_label_from_event(&event) {
-                    tauri::async_runtime::spawn(async move {
-                        let mut manager = wm.lock().await;
-                        manager.unregister_window(&label);
-                        tracing::debug!(
-                            "Window '{}' destroyed, {} remaining",
-                            label,
-                            manager.window_count()
-                        );
-                        // Exit the application when all windows are closed.
-                        if manager.window_count() == 0 {
-                            tracing::info!("All windows closed — exiting");
-                            app_handle.exit(0);
-                        }
-                    });
-                }
-            });
-
             Ok(())
         })
         .build(context);
@@ -654,6 +709,19 @@ pub(crate) fn run_app(
         built
             .expect("error while running tauri application")
             .run(|app_handle, event| {
+                // Every ordinary quit (Command + Q, the menu, closing the last
+                // window, the Dock, logging out) ends here, and the process
+                // then exits (`std::process::exit`, or Cocoa's `exit()` after
+                // Command + Q) without dropping managed state —
+                // so the SpaceMouse source is stopped explicitly, or the
+                // 3DxWare registration outlives the process (要件#25 追補c).
+                // This runs on the main thread, the one that registered.
+                if let tauri::RunEvent::Exit = event {
+                    if let Some(spacemouse) = app_handle.try_state::<spacemouse::SpaceMouseHandle>()
+                    {
+                        spacemouse.shutdown();
+                    }
+                }
                 // Finder's Open With, a drop on the Dock icon, `open -a`
                 // (要件#68). Before `setup` the files are kept for the initial
                 // window; after it each one opens in a new window.
@@ -694,12 +762,4 @@ fn open_in_new_windows(app: &tauri::AppHandle, uris: Vec<String>) {
 struct IpcResources {
     _lock: FileLock,
     _server: IpcServer,
-}
-
-/// Attempt to extract a window label from a Tauri event.
-fn extract_window_label_from_event(event: &tauri::Event) -> Option<String> {
-    // Tauri 2.x event payloads for window events contain the window label
-    // as a JSON string in the payload.
-    let payload = event.payload();
-    serde_json::from_str::<String>(payload).ok()
 }

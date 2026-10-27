@@ -286,10 +286,16 @@ function mergeExpanded(existing: string[], added: string[]): string[] {
 /**
  * 一覧の中で「ツリーの並び順で最初に来る開けるファイル」(挙動表 2・追補b (n))。
  * サブフォルダには降りない —— 降りると「どこまで潜るか」の規則が要る。
+ *
+ * リンク切れ(`link.broken`)の行もディレクトリ・`binary` と同列に飛ばす(要件#70 追補c)。
+ * 選ぶと `open` が生の I/O エラーになるため。リンクでも切れていない行(ssh の
+ * `broken:false` を含む)は普通のファイルと同じく選ぶ。リンク切れしか無ければ
+ * 「開けるファイルが無い」と同じ扱い(展開と選択だけ・メッセージは出さない)。
  */
 function firstOpenableFile(entries: GoToEntry[], deps: GoToDeps): GoToEntry | null {
 	for (const entry of entries) {
 		if (entry.kind === 'dir') continue;
+		if (entry.link?.broken === true) continue;
 		if (deps.detectFileType(entry.name) === 'binary') continue;
 		return entry;
 	}

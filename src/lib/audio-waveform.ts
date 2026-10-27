@@ -17,7 +17,8 @@
  * 2. **縮退の理由は事前判定で決める**(契約⑤)。音声トラックなしと非対応コンテナは
  *    `decodeAudioData` が同一の例外(`EncodingError`)を投げて区別できない(実測)ので、
  *    例外の中身は覗かない ―― 理由は「音声トラックの有無」と「抽出コマンドの応答」から
- *    先に決め、decode の失敗はまとめて `decode-failed` にする
+ *    先に決め、decode の失敗はまとめて `decode-failed` にする(webm だけは失敗したときに
+ *    Tracks を読み、音声のトラックが無いと分かれば `no-audio`=要件#41 追補j)
  * 3. **どの段でも throw しない**(契約⑤ fail-open)。波形が出ないことと再生できないことは
  *    別で、帯だけが理由を出して再生は止めない(要件#37 契約⑦と同じ家風)
  *
@@ -102,11 +103,13 @@ export type WaveformDecode = (bytes: ArrayBuffer) => Promise<WaveformAudioBuffer
  *
  * Rust コマンドの応答を配線側でこの形へ写す。`no-audio` と `unsupported-codec` が
  * 分かれているのが要点 ―― この2つは decode の例外からは区別できず、**抽出の側でしか
- * 判らない**(契約⑤)。
+ * 判らない**(契約⑤)。`too-large` は表が上限を超えた音声トラック(要件#41 追補i:
+ * 長尺の PCM mov を「音声トラックなし」と言わない)。
  */
 export type WaveformExtraction =
 	| { state: 'ok'; bytes: ArrayBuffer }
 	| { state: 'no-audio' }
+	| { state: 'too-large' }
 	| { state: 'unsupported-codec' }
 	| { state: 'unreadable' };
 
@@ -615,6 +618,7 @@ async function invokeWaveformBytes(
 	} catch (err) {
 		const reason = String(err ?? '');
 		if (reason.includes('no-audio')) return { state: 'no-audio' };
+		if (reason.includes('too-large')) return { state: 'too-large' };
 		if (reason.includes('unsupported-codec')) return { state: 'unsupported-codec' };
 		return { state: 'unreadable' };
 	}
@@ -709,6 +713,206 @@ function readWavAnalysis(bytes: ArrayBuffer, buckets: number): WaveformResult {
 }
 
 // ---------------------------------------------------------------------------
+// webm の Tracks の読み取り(要件#41 追補j)
+// ---------------------------------------------------------------------------
+
+/** EBML の要素 ID(マーカー付きのまま=ファイルに並ぶ形の数値)。 */
+const EBML_ID_HEADER = 0x1a45dfa3;
+const EBML_ID_SEGMENT = 0x18538067;
+const EBML_ID_TRACKS = 0x1654ae6b;
+const EBML_ID_TRACK_ENTRY = 0xae;
+const EBML_ID_TRACK_TYPE = 0x83;
+const EBML_ID_CLUSTER = 0x1f43b675;
+
+/** Matroska の TrackType の値。 */
+const TRACK_TYPE_VIDEO = 1;
+const TRACK_TYPE_AUDIO = 2;
+
+/**
+ * decode の前に写しておく本文の先頭の長さ(1MiB・要件#41 追補j 契約5・起案時判断 (f))。
+ *
+ * `decodeAudioData` は仕様上、渡したバイト列を切り離す(detach)ので、decode が失敗した
+ * 後に本文を読むと中身が無いことがある。Tracks はふつう先頭の数 KB にあるので、
+ * これだけ写しておけば足りる(写しより後ろにあれば分からない=`decode-failed`)。
+ */
+const WEBM_TRACKS_PROBE_BYTES = 1024 * 1024;
+
+/**
+ * 本文の先頭(最大 `WEBM_TRACKS_PROBE_BYTES`)の写し。先頭が EBML の印(`1A 45 DF A3`)で
+ * なければ写さずに null(起案時判断 (c)(f))。throw しない(契約⑤ fail-open)。
+ */
+function ebmlHeadCopy(bytes: ArrayBuffer): ArrayBuffer | null {
+	try {
+		if (bytes.byteLength < 4) return null;
+		const mark = new Uint8Array(bytes, 0, 4);
+		if (mark[0] !== 0x1a || mark[1] !== 0x45 || mark[2] !== 0xdf || mark[3] !== 0xa3) return null;
+		return bytes.slice(0, Math.min(bytes.byteLength, WEBM_TRACKS_PROBE_BYTES));
+	} catch {
+		return null;
+	}
+}
+
+/** webm の TrackEntry を種類ごとに数えた結果。 */
+export type WebmTrackKinds = { audio: number; video: number; other: number };
+
+/**
+ * 要素の頭(ID とサイズ)。`size` が null なのはサイズ未知(値のビットが全部 1)。
+ * `start` は本体の先頭の位置。
+ */
+type EbmlHeader = { id: number; size: number | null; start: number };
+
+/**
+ * `at` から要素の頭を読む。読めない(ID・サイズの VINT の幅が不正・途中で切れた)なら null。
+ *
+ * ID はマーカーを付けたまま数値にする(幅 1〜4)。サイズは幅 1〜8 で、値のビットが全部 1 の
+ * ものは「未知」。8 バイト幅の値は 2^53 を超えて丸まりうるが、そこまで大きい申告は
+ * どのみち本文に収まらないので、収まるかどうかの判定は変わらない。
+ */
+function readEbmlHeader(bytes: Uint8Array, at: number, end: number): EbmlHeader | null {
+	if (at >= end) return null;
+	const idFirst = bytes[at];
+	const idWidth = Math.clz32(idFirst) - 23;
+	if (idFirst === 0 || idWidth > 4 || at + idWidth > end) return null;
+	let id = 0;
+	for (let i = 0; i < idWidth; i++) id = id * 256 + bytes[at + i];
+
+	const sizeAt = at + idWidth;
+	if (sizeAt >= end) return null;
+	const sizeFirst = bytes[sizeAt];
+	if (sizeFirst === 0) return null;
+	const sizeWidth = Math.clz32(sizeFirst) - 23;
+	if (sizeAt + sizeWidth > end) return null;
+	const mask = 0xff >> sizeWidth;
+	let size = sizeFirst & mask;
+	let unknown = size === mask;
+	for (let i = 1; i < sizeWidth; i++) {
+		const b = bytes[sizeAt + i];
+		size = size * 256 + b;
+		if (b !== 0xff) unknown = false;
+	}
+	return { id, size: unknown ? null : size, start: sizeAt + sizeWidth };
+}
+
+/**
+ * 本体が `end` までに収まる要素の終わりの位置。サイズ未知・はみ出しは null(壊れている)。
+ * 申告サイズは位置の計算にしか使わない(配列を作らない)。
+ */
+function ebmlElementEnd(header: EbmlHeader, end: number): number | null {
+	if (header.size === null) return null;
+	const elementEnd = header.start + header.size;
+	return elementEnd <= end ? elementEnd : null;
+}
+
+/** TrackEntry の中の TrackType の値。持たなければ null・壊れていれば undefined。 */
+function readTrackType(bytes: Uint8Array, start: number, end: number): number | null | undefined {
+	let at = start;
+	while (at < end) {
+		const header = readEbmlHeader(bytes, at, end);
+		if (!header) return undefined;
+		const elementEnd = ebmlElementEnd(header, end);
+		if (elementEnd === null) return undefined;
+		if (header.id === EBML_ID_TRACK_TYPE) {
+			// 符号なし整数(big-endian)。8 バイトを超える整数は EBML に無い。
+			if (elementEnd - header.start > 8) return undefined;
+			let value = 0;
+			for (let i = header.start; i < elementEnd; i++) value = value * 256 + bytes[i];
+			return value;
+		}
+		at = elementEnd;
+	}
+	return null;
+}
+
+/** Tracks の本体の TrackEntry を数える。壊れている・TrackEntry が 0 なら null。 */
+function countTrackEntries(bytes: Uint8Array, start: number, end: number): WebmTrackKinds | null {
+	const kinds: WebmTrackKinds = { audio: 0, video: 0, other: 0 };
+	let at = start;
+	while (at < end) {
+		const header = readEbmlHeader(bytes, at, end);
+		if (!header) return null;
+		const elementEnd = ebmlElementEnd(header, end);
+		if (elementEnd === null) return null;
+		if (header.id === EBML_ID_TRACK_ENTRY) {
+			const type = readTrackType(bytes, header.start, elementEnd);
+			if (type === undefined) return null;
+			// TrackType を持たない TrackEntry は音声と言えないので「その他」に数える
+			// (起案時判断 (d)。Matroska では必須で既定値が無い)。
+			if (type === TRACK_TYPE_AUDIO) kinds.audio += 1;
+			else if (type === TRACK_TYPE_VIDEO) kinds.video += 1;
+			else kinds.other += 1;
+		}
+		at = elementEnd;
+	}
+	return kinds.audio + kinds.video + kinds.other > 0 ? kinds : null;
+}
+
+/** Segment の本体から Tracks を探して数える。Cluster が先に来たら探すのをやめる。 */
+function tracksInSegment(bytes: Uint8Array, start: number, end: number): WebmTrackKinds | null {
+	let at = start;
+	while (at < end) {
+		const header = readEbmlHeader(bytes, at, end);
+		if (!header) return null;
+		// Tracks より前に Cluster が来たら、その先は探さない(起案時判断 (b))。
+		// サイズ未知の Cluster は終わりが分からず、読み進めると本文の全量を舐めることになる。
+		if (header.id === EBML_ID_CLUSTER) return null;
+		const elementEnd = ebmlElementEnd(header, end);
+		if (elementEnd === null) return null;
+		if (header.id === EBML_ID_TRACKS) return countTrackEntries(bytes, header.start, elementEnd);
+		at = elementEnd;
+	}
+	return null;
+}
+
+/**
+ * webm(Matroska/EBML)の TrackEntry を種類ごとに数える(要件#41 追補j 契約1・2)。
+ *
+ * WebKit は音声の無い webm の復号を拒否し、その例外は復号の失敗と区別できないので、
+ * decode が失敗したときに素材そのものの申告(Tracks)を読んで音声の有無を確かめる。
+ * 読むのは必要な分だけ(EBML ヘッダ → Segment → Tracks → TrackEntry → TrackType)。
+ *
+ * - EBML でない・Tracks が見つからない・壊れている・TrackEntry が 0 なら null(=分からない)
+ * - サイズ未知の Segment は本文の終わりまでを中身として順に読む(MediaRecorder の形)。
+ *   申告が本文を超える Segment も手元にある分を読む(先頭だけの写しを渡せるように)
+ * - `Uint8Array` は byteOffset 付きの view のまま読む(`bytes.buffer` を素で読まない)
+ * - **throw しない**(契約⑤ fail-open)。申告サイズは位置の計算にしか使わず、それを
+ *   信じて配列を作らない。detach された `ArrayBuffer`(`decodeAudioData` が手放した後)
+ *   のように view を作れない入力も null
+ */
+export function webmTrackKinds(bytes: ArrayBuffer | Uint8Array): WebmTrackKinds | null {
+	try {
+		const view = ArrayBuffer.isView(bytes)
+			? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+			: new Uint8Array(bytes);
+		const end = view.length;
+
+		const ebml = readEbmlHeader(view, 0, end);
+		if (!ebml || ebml.id !== EBML_ID_HEADER) return null;
+		let at = ebmlElementEnd(ebml, end);
+		if (at === null) return null;
+
+		// EBML ヘッダの後の最初の Segment を読む(手前の Void などは飛ばす)。
+		while (at < end) {
+			const header = readEbmlHeader(view, at, end);
+			if (!header) return null;
+			if (header.id === EBML_ID_SEGMENT) {
+				// Segment の申告が手元の本文を超えるときも、手元にある分を読む ―― 渡されるのは
+				// decode の前に写した先頭(最大 `WEBM_TRACKS_PROBE_BYTES`)で、ふつうの webm の
+				// Segment はその何倍もある(要件#41 追補j 契約5)。Tracks そのものは収まって
+				// いなければ壊れている扱いのまま。
+				const segmentEnd = header.size === null ? end : Math.min(header.start + header.size, end);
+				return tracksInSegment(view, header.start, segmentEnd);
+			}
+			const elementEnd = ebmlElementEnd(header, end);
+			if (elementEnd === null) return null;
+			at = elementEnd;
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 解析の統合(契約①③④⑤)
 // ---------------------------------------------------------------------------
 
@@ -721,6 +925,9 @@ function readWavAnalysis(bytes: ArrayBuffer, buckets: number): WaveformResult {
  * 音声トラックなしと非対応コンテナは `decodeAudioData` が同一の `EncodingError` を
  * 投げて区別できない(2026-09-01 実測)。**例外の中身から理由を推定しない** ――
  * 理由は事前判定(`hasAudioTrack` と抽出コマンドの応答)だけが決める(契約⑤)。
+ * ただし fetch 経路(webm)で decode が失敗したときだけは、素材の Tracks の申告
+ * (`webmTrackKinds`)で音声の有無を確かめ、音声が無いと分かれば `no-audio` にする
+ * (要件#41 追補j)。これも例外の中身ではなく素材の中身で決める。
  *
  * 上限も経路で当たる場所が違う(要件#45 契約①)。extract 経路(mp4/mov)は抽出後の音声
  * バイト列に当たる ―― 無圧縮 PCM でも実質届かないが、Rust から渡された長さを信じない
@@ -783,10 +990,22 @@ export async function analyzeWaveform(
 		bytes = source.bytes;
 	}
 
+	// fetch 経路で本文が EBML なら、decode に渡す前に先頭を写しておく(要件#41 追補j 契約5)。
+	// decode が本文を切り離しても、失敗したときにこの写しから Tracks を読める。decode には
+	// 元の本文をそのまま渡す。
+	const ebmlHead = plan.route === 'fetch' ? ebmlHeadCopy(bytes) : null;
+
 	let decoded: WaveformAudioBuffer;
 	try {
 		decoded = await input.decode(bytes);
 	} catch {
+		// fetch 経路(webm)は、音声が無いことと復号の失敗が同じ例外になる。失敗したときだけ
+		// Tracks を読み、TrackEntry があってどれも音声でないと分かれば「音声なし」
+		// (要件#41 追補j 契約1)。`hasAudioTrack` の申告によらず Tracks を優先する(起案時判断 (e))。
+		if (ebmlHead) {
+			const kinds = webmTrackKinds(ebmlHead);
+			if (kinds !== null && kinds.audio === 0) return { state: 'no-audio' };
+		}
 		return { state: 'decode-failed' };
 	}
 

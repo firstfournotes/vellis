@@ -12,7 +12,8 @@
 	 *   高さは離した時点で保存する
 	 * - 一覧は Rust の `list_recent_files`(今の root 配下・新しい順・最大 10 件)。読むのは
 	 *   開いた状態で描かれたとき・開いたとき・開いている間に root / 今の文書が変わったとき・
-	 *   開くのに失敗したとき・Clear の後。閉じている間は読まない
+	 *   開くのに失敗したとき・Clear の後・ページの `refresh()`(表示できた画像などの記録の後
+	 *   =追補f)。閉じている間は読まない
 	 * - 行のクリック=この窓で開く(未保存確認 → `openForDisplay` → `setDocument` →
 	 *   `onOpened`)。Command + クリック=新しいタブ・Shift + クリック=新しい窓(ツリーと
 	 *   同じ線引き・未保存確認なし)。区画は開いたまま
@@ -20,7 +21,7 @@
 	 *   ツリーと同じ倍率を当てる(見出し行には当てない)
 	 * - 文言は英語(要件#51)
 	 */
-	import { tick, untrack } from 'svelte';
+	import { onDestroy, tick, untrack } from 'svelte';
 	import { invoke } from '$lib/ipc';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { newTabFailedMessage, openNewTab, planNewTab } from '$lib/new-tab';
@@ -52,7 +53,8 @@
 		currentUri,
 		paneHeight,
 		explorerZoom = DEFAULT_ZOOM,
-		onOpened
+		onOpened,
+		onDragChange
 	}: {
 		/** 今の窓の root(末尾 `/` 無し)。一覧はこの配下だけ。 */
 		rootUri: string;
@@ -64,6 +66,12 @@
 		explorerZoom?: number;
 		/** この窓で文書を開いた**後**に呼ぶ(ページがツリーのその行を見せる)。 */
 		onOpened: (uri: string) => void;
+		/**
+		 * 高さのドラッグの始まり(`true`)と終わり(`false`)を知らせる(追補g)。ページは
+		 * これで窓全体のカーソルを固定する(ポインタが区画の外へ出ても `ns-resize` のまま)。
+		 * 押しただけ・クリック・閉じているときのドラッグでは呼ばない。省略時は何もしない。
+		 */
+		onDragChange?: (dragging: boolean) => void;
 	} = $props();
 
 	let expanded = $state(loadSectionExpanded());
@@ -152,6 +160,16 @@
 		sectionEl?.querySelector<HTMLButtonElement>('.recent-files-row')?.focus();
 	}
 
+	/**
+	 * 一覧を読み直す合図(追補f 契約5)。画像・PDF・動画・音声・3D は、ビューアが表示できた
+	 * あとに記録されるので、今の文書が変わった時点の読み直しではまだ載っていない。ページが
+	 * 記録の後にこれを呼ぶ。開いているときだけ読む(閉じていれば開いたときに読む=契約10)。
+	 */
+	export function refresh(): void {
+		if (!expanded) return;
+		reloadNonce += 1;
+	}
+
 	// --- 見出し行とつかみ所: 上下ドラッグで高さ(契約6・追補c) ------------------------
 	//
 	// 押す → 動かす → 離すの処理は見出し行とつかみ所(区画の上端の境目)で共有する。
@@ -165,6 +183,12 @@
 	let dragging = $state(false);
 	/** 直前の押しがドラッグだった=続いて届く click を開閉に使わない。 */
 	let suppressClick = false;
+
+	// ドラッグの最中に区画ごと消えた(検索パネルを出した・root が変わった)ときは離す・取り消すが
+	// 届かないので、ここで終わりを知らせる(ページの窓全体のカーソルが残らないように=追補g)。
+	onDestroy(() => {
+		if (dragging) onDragChange?.(false);
+	});
 
 	function isOnClear(target: EventTarget | null): boolean {
 		return !!clearEl && target instanceof Node && clearEl.contains(target);
@@ -185,7 +209,10 @@
 		press.moved = true;
 		// 閉じているときのドラッグは何もしない(開閉もしない=クリックとは扱わない)。
 		if (!expanded) return;
-		dragging = true;
+		if (!dragging) {
+			dragging = true;
+			onDragChange?.(true);
+		}
 		preferredHeight = dragSectionHeight(press.startHeight, press.startY, event.clientY, paneHeight);
 	}
 
@@ -201,6 +228,7 @@
 		if (el.hasPointerCapture?.(current.pointerId)) el.releasePointerCapture(current.pointerId);
 		if (dragging) {
 			dragging = false;
+			onDragChange?.(false);
 			// 保存は離した時点だけ(移動中に毎回書かない=要件#9 の幅と同じ)。
 			saveSectionHeight(preferredHeight);
 		}

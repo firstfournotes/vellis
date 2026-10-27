@@ -1136,20 +1136,24 @@ fn no_function_takes_an_sftp_session_by_arc() {
     );
 }
 
-/// f7. 契約 5: `POLL_INTERVAL` で待つ周回の中で、毎周 入れ物から取り出し(`.run(` / `.get(`)、
-///     `poll_step(` で判定する。
+/// f7. 契約 5: ポーリングの周回(`poll_loop` の本文の唯一の `loop`)の中で、毎周 入れ物から
+///     取り出し(`.run(` / `.get(`)、`poll_step(` で判定する。
+///     (追補c・2026-10-19 の要件側更新: 周回は `next_poll_delay` の値で待ち `POLL_INTERVAL` の字面が
+///     `loop` 内に残らなくなるので、周回の特定を「`POLL_INTERVAL` を含む `loop`」から
+///     「`poll_loop` の唯一の `loop`」に替えた。判定の中身は不変)
 #[test]
 fn poll_loop_reacquires_the_connection_every_round_and_uses_poll_step() {
     let code = ssh_code();
-    let loops: Vec<&str> = code
+    let (_, poll_loop_body) = function_parts(&code, "poll_loop");
+    let poll_loop_start = poll_loop_body.as_ptr() as usize - code.as_ptr() as usize;
+    let poll_loops: Vec<&str> = poll_loop_body
         .match_indices("loop {")
-        .map(|(i, _)| balanced(&code, i, '{', '}'))
+        .map(|(i, _)| balanced(&code, poll_loop_start + i, '{', '}'))
         .collect();
-    let poll_loops: Vec<&&str> = loops.iter().filter(|b| b.contains("POLL_INTERVAL")).collect();
     assert_eq!(
         poll_loops.len(),
         1,
-        "exactly one polling loop waits on POLL_INTERVAL: found {}",
+        "exactly one polling loop inside `poll_loop`: found {}",
         poll_loops.len()
     );
     let body = poll_loops[0];

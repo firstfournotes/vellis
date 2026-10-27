@@ -24,6 +24,47 @@ pub fn is_translocated(path: &Path) -> bool {
     path.to_string_lossy().contains("/AppTranslocation/")
 }
 
+/// Error returned when the app runs from a read-only volume (e.g. the DMG).
+const READ_ONLY_VOLUME_ERROR: &str = "Vellis is running from a read-only volume (such as the disk image), so the vellis command was not installed.\nMove Vellis.app to the Applications folder, then launch it from there and try again.";
+
+/// `true` when `path` lies on a read-only mount (`MNT_RDONLY`), such as a
+/// mounted disk image. `false` when `statfs` fails (e.g. the path is missing).
+#[cfg(target_os = "macos")]
+pub fn is_on_read_only_volume(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `c_path` is a valid NUL-terminated path and `stat` is a valid
+    // out-pointer for the whole call.
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: `statfs` returned 0, so it filled in `stat`.
+    let stat = unsafe { stat.assume_init() };
+    stat.f_flags & libc::MNT_RDONLY as u32 != 0
+}
+
+/// `true` when `path` lies on a read-only mount (`ST_RDONLY`, via POSIX
+/// `statvfs`). `false` when `statvfs` fails (e.g. the path is missing).
+#[cfg(not(target_os = "macos"))]
+pub fn is_on_read_only_volume(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `c_path` is a valid NUL-terminated path and `stat` is a valid
+    // out-pointer for the whole call.
+    if unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: `statvfs` returned 0, so it filled in `stat`.
+    let stat = unsafe { stat.assume_init() };
+    stat.f_flag & libc::ST_RDONLY != 0
+}
+
 /// Create a `vellis` symlink in `~/.local/bin` pointing at the currently
 /// running binary.
 pub fn install_cli() -> Result<InstallCliResult, String> {
@@ -36,7 +77,8 @@ pub fn install_cli() -> Result<InstallCliResult, String> {
 
 /// Create a `vellis` symlink in `home/.local/bin` pointing at `exe`, judging
 /// whether that directory is on `path_env`. Refuses (writing nothing) when
-/// `exe` is in an App Translocation location, since the link would break.
+/// `exe` is in an App Translocation location or on a read-only volume, since
+/// the link would break.
 pub fn install_cli_for(
     exe: &Path,
     home: &Path,
@@ -44,6 +86,9 @@ pub fn install_cli_for(
 ) -> Result<InstallCliResult, String> {
     if is_translocated(exe) {
         return Err(TRANSLOCATED_ERROR.to_string());
+    }
+    if is_on_read_only_volume(exe) {
+        return Err(READ_ONLY_VOLUME_ERROR.to_string());
     }
 
     let target_dir = home.join(".local").join("bin");

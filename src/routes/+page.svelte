@@ -29,7 +29,7 @@
 	import { marksStore } from '../stores/marks.svelte';
 	import { featureFlags } from '$lib/flags.svelte';
 	import { detectFileType, renderForDisplay, type FileType } from '$lib/file-type';
-	import { openForDisplay, openInitialDocument } from '$lib/open-document';
+	import { openCommandFor, openForDisplay, openInitialDocument } from '$lib/open-document';
 	import { imageSrcWithVersion } from '$lib/image-watch';
 	import {
 		DEFAULT_PANE_WIDTH,
@@ -69,13 +69,20 @@
 	import { openInNewWindow, openInNewWindowFailedMessage } from '$lib/open-in-new-window';
 	import { newTabFailedMessage, registerNewTabListener } from '$lib/new-tab';
 	import type { NewWindowAction } from '$lib/context-menu';
-	import { MENU_EDIT_EVENT } from '$lib/document-edit';
+	import { MENU_EDIT_EVENT, shouldSaveOnCommand } from '$lib/document-edit';
 	import { MENU_FIND_EVENT } from '$lib/find-in-document';
 	import { MENU_FIND_IN_FOLDER_EVENT, shouldShowFindInFolder } from '$lib/find-in-folder';
 	import { MENU_GO_TO_EVENT, revealPath } from '$lib/go-to-path';
-	import { MENU_RECENT_FILES_EVENT, ancestorDirs, shouldShowRecentFiles } from '$lib/recent-files';
+	import {
+		MENU_RECENT_FILES_EVENT,
+		ancestorDirs,
+		recordDisplayedFile,
+		shouldRecordDisplayedOnce,
+		shouldShowRecentFiles
+	} from '$lib/recent-files';
 	import { SETTINGS_CHANGED_EVENT, reloadTree } from '$lib/settings';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
+	import { registerRootSwitchRequestListener, switchRootConfirmed } from '$lib/root-switch-request';
 	import { handleCloseRequested } from '$lib/close-window';
 	import { MENU_SAVE_EVENT, saveDocument } from '$lib/save-document';
 	import { DEFAULT_ZOOM, isZoomTarget, loadZoom } from '$lib/zoom';
@@ -150,6 +157,10 @@
 	// `$lib/pane-resize` の純関数が唯一の持ち場。ここは「いつ呼ぶか」だけを持つ。
 	// 初期値は既定幅 — onMount で保存値に差し替わる。
 	let explorerWidth = $state(DEFAULT_PANE_WIDTH);
+	// 利用者が選んだ幅(起動時に読んだ保存値・ドラッグで選んだ幅=追補a)。表示中の幅
+	// `explorerWidth` は、これを今の窓の幅で収めたもの —— 窓を縮めれば上限で詰め、
+	// 広げ直せばここへ戻る。描画には使わないので `$state` にしない。
+	let preferredExplorerWidth = DEFAULT_PANE_WIDTH;
 	let resizingPane = $state(false);
 	// 仕切りの位置は Explorer の左端(= .app-body の左端)からの距離で決まる。
 	let appBody = $state<HTMLDivElement | null>(null);
@@ -174,6 +185,8 @@
 		resizingPane = false;
 		const handle = event.currentTarget as HTMLElement;
 		if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+		// ドラッグで決まった幅が、以後の窓のリサイズで戻る先になる(追補a)。
+		preferredExplorerWidth = explorerWidth;
 		// 保存はドラッグ確定時のみ。移動中に毎回書くと localStorage への
 		// 書き込みがドラッグ回数ぶん走るうえ、途中経過が保存値になる。
 		savePaneWidth(explorerWidth);
@@ -183,12 +196,16 @@
 	// 起動ごと(= 新規ウインドウごと)にこの onMount が走るので、再起動にも
 	// 新規ウインドウにも同じ保存値が効く。
 	onMount(() => {
-		explorerWidth = loadPaneWidth(window.innerWidth);
+		// 選んだ幅は保存値そのもの(窓の幅では縮めず、下限だけ当てる=追補a 契約 1-2)。
+		// 縮めて読むと、狭い窓で起動したときに広げても保存した幅へ戻らない。
+		preferredExplorerWidth = loadPaneWidth(Number.POSITIVE_INFINITY);
 		const handleWindowResize = () => {
-			// ウインドウが縮んだときは上限50%に収め直す。保存はしない —
-			// 保存値はユーザーが選んだ幅であって、ウインドウ都合の縮小ではない。
-			explorerWidth = clampPaneWidth(explorerWidth, window.innerWidth);
+			// 選んだ幅から上限50%に収め直す(縮めて広げれば選んだ幅へ戻る=Issue #381)。
+			// 保存はしない — 保存値はユーザーが選んだ幅であって、ウインドウ都合の縮小ではない。
+			explorerWidth = clampPaneWidth(preferredExplorerWidth, window.innerWidth);
 		};
+		// 表示中の幅は、選んだ幅を今の窓の幅で収めたもの(リサイズと同じ式)。
+		handleWindowResize();
 		window.addEventListener('resize', handleWindowResize);
 		return () => window.removeEventListener('resize', handleWindowResize);
 	});
@@ -525,22 +542,34 @@
 		if (revealed === null && !openedWindow) return;
 		closeGoTo();
 		if (revealed === null) return;
-		// 展開が DOM に反映されてから運ぶ(行はまだ生えていない)。
+		// 追補e: 検索パネル(要件#55)を出している間は Explorer の DOM が無いので、閉じて
+		// Explorer に戻してから運ぶ(閉じ方は Close ボタンと同じ・Go メニューの Recent Files と
+		// 同じ形)。跳べなかった・新しい窓だけのときは上で返っているので、パネルはそのまま。
+		if (findInFolderOpen) findInFolderOpen = false;
+		// 展開(とパネルを閉じたこと)が DOM に反映されてから運ぶ(行はまだ生えていない)。
 		await tick();
 		scrollTreeItemIntoView(revealed);
 	}
 
 	// --- 最近開いたファイル(要件#64) ----------------------------------------
-	// 記録は Rust の `open_in_window`(開く経路はすべてそこを通る)、区画(開閉・高さ・
+	// 記録はテキストの文書なら Rust の `open_in_window`(開く経路はすべてそこを通る)、区画(開閉・高さ・
 	// 一覧・クリック)は `RecentFiles.svelte`、開閉と高さの保存は `$lib/recent-files-section`。
 	// ここが持つのは「区画をどこに積むか」(Explorer の下・検索パネルの間は隠す)と、
-	// Command + Shift + R の受け口と、区画から開いた後にツリーのその行を見せる口だけ。
+	// Command + Shift + R の受け口と、区画から開いた後にツリーのその行を見せる口と、
+	// 画像・PDF・動画・音声・3D をビューアが表示できた時点で記録を頼む口(追補f)。
 
 	/** 区画の実体(Go メニューから「開いて先頭の行へフォーカス」を頼む相手)。 */
 	let recentFilesSection = $state<ReturnType<typeof RecentFiles> | undefined>(undefined);
 
 	/** 左ペイン(Explorer と区画を縦に積む器)の高さ。区画の高さの上限の材料。 */
 	let explorerPaneHeight = $state(0);
+
+	/**
+	 * 区画の高さをドラッグしている最中か(追補g)。区画の外(ツリー)へポインタが出ても
+	 * リサイズのカーソルのままにするため、`.app` に付けて窓全体に当てる(要件#9 の
+	 * `resizingPane` と同じ形)。
+	 */
+	let resizingRecentFiles = $state(false);
 
 	/** 区画を出すか(root があり・履歴選択画面でなく・検索パネルを出していない)。 */
 	let showRecentFiles = $derived(
@@ -559,6 +588,46 @@
 			await tick();
 		}
 		await recentFilesSection?.reveal();
+	}
+
+	/**
+	 * 追補f 契約4: この文書を開いてから、表示できた記録を既に頼んだ URI(無ければ null)。
+	 * 今の文書の URI が変わったら null に戻す(開くたびに高々 1 回)。外部変更による
+	 * 取り直し(版の更新)や再描画では URI が変わらないので、もう一度は頼まない。
+	 * 描画には使わないので `$state` にしない。
+	 */
+	let displayedRecordedUri: string | null = null;
+	/** 今の文書の URI。派生にして、同じ URI の文書の差し替えでは上の控えを戻さない。 */
+	let displayedDocUri = $derived(windowState.currentDocument?.uri ?? null);
+	$effect(() => {
+		void displayedDocUri;
+		displayedRecordedUri = null;
+	});
+
+	/**
+	 * ビューアが文書を表示できた(追補f 契約1・3〜5)。今の文書のまま、まだ頼んでいなければ
+	 * Rust に記録を頼み(呼んだ窓のセッションで Rust がもう一度確かめる)、終わったら区画に
+	 * 読み直しを合図する(今の文書が変わった時点の読み直しでは、まだ載っていないため)。
+	 */
+	async function handleDisplayed(uri: string) {
+		if (
+			!shouldRecordDisplayedOnce(displayedRecordedUri, uri, windowState.currentDocument?.uri ?? null)
+		) {
+			return;
+		}
+		displayedRecordedUri = uri;
+		await recordDisplayedFile(uri);
+		recentFilesSection?.refresh();
+	}
+
+	/**
+	 * ビューアに渡す `onDisplayed`(追補f 契約3)。表示する文書の URI をここで掴む(呼ばれた
+	 * 時点の今の文書と比べるため)。テキストの経路で開く文書(SVG)は、開いた時点で Rust の
+	 * `open_in_window` が記録しているので渡さない(契約1・7・起案時判断 (a))。
+	 */
+	function onDisplayedFor(uri: string): (() => void) | undefined {
+		if (openCommandFor(uri) !== 'open_binary_document') return undefined;
+		return () => void handleDisplayed(uri);
 	}
 
 	/**
@@ -669,12 +738,19 @@
 	// 何を保存するか(編集中か・バッファの中身)を知っているのはこの窓
 	// (Open… / Print… / ズームと同じ分担)。自動保存は無い(契約⑤)。
 	//
-	// 保存するのは編集中で、かつ変更があるときだけ。閲覧中の ⌘S は何もしない —
-	// 同じ内容を書き戻せば mtime だけが動き、監視・スナップショット・drift 検知が
-	// 空振りする。
+	// 保存するかは `shouldSaveOnCommand` が決める(追補i): 編集中で、かつ変更がある
+	// か、外部で削除された印(追補g)が立っているとき。印があれば dirty でなくても
+	// 同じ uri に書き直す(帯の `Save` と同じ経路・成功すれば印が消える)。閲覧中の
+	// ⌘S と、未変更かつ印の無い編集中の ⌘S は何もしない — 同じ内容を書き戻せば
+	// mtime だけが動き、監視・スナップショット・drift 検知が空振りする。
 	async function saveCurrentEdits() {
 		const doc = windowState.currentDocument;
-		if (!doc || windowState.editMode !== 'edit' || !windowState.dirty) return;
+		const save = shouldSaveOnCommand({
+			mode: windowState.editMode,
+			dirty: windowState.dirty,
+			externalRemoved: windowState.externalRemoved
+		});
+		if (!doc || !save) return;
 		const buffer = windowState.editBuffer;
 		if (buffer === null) return;
 		try {
@@ -873,6 +949,10 @@
 		url: string;
 	};
 
+	// 要件#14 追補b: `update_available` の購読を登録し終えたことを Rust に知らせる event
+	// (payload は窓の label)。綴りは Rust の `UPDATE_BANNER_READY_EVENT` と同じ。
+	const UPDATE_BANNER_READY_EVENT = 'update_banner_ready';
+
 	/**
 	 * Adopt a `set_root` result as the current root and leave the picker.
 	 * Shared by the OS folder dialog and the history list so both land in
@@ -952,6 +1032,28 @@
 			}
 		}).then((off) => {
 			// 登録が終わる前に破棄されていたら、届いた解除関数をその場で使う。
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
+	// 要件#48 追補m: CLI の `vellis -r` からの root の切り替え。backend は判定だけ済ませて
+	// 「切り替えの依頼」を送ってくるので、画面からの切り替えと同じく編集の始末を聞いてから
+	// 切り替えを頼む(`$lib/root-switch-request`)。切り替えの結果は下の `root_changed` の
+	// 購読が今までどおり画面へ移す。購読の解除があるので await を挟まない専用の onMount。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void registerRootSwitchRequestListener({
+			confirmDiscard: confirmDiscardEdits,
+			switchRoot: switchRootConfirmed,
+			// 要件#71 契約3: 開けなかったら知らせて、root はそのまま(Explorer の ↑ と同じ)。
+			onError: (err) => alert(openFolderFailedMessage(err))
+		}).then((off) => {
 			if (disposed) off();
 			else unlisten = off;
 		});
@@ -1075,6 +1177,7 @@
 			initWindow: () => invoke<InitWindowResponse>('init_window')
 		});
 		// 要件#71 追補a(1): 最初の文書が開けなかったときの文言(alert は購読の登録のあとに出す)。
+		// reload の復元で文書を開き直せなかったときもここに控える(要件#10 追補a)。
 		// コールバックの中で代入するので、型を null に絞らせない。
 		let startupOpenFailure = null as string | null;
 
@@ -1105,9 +1208,16 @@
 			// 要件#10: reload 前のスナップショットがあれば、起動時引数より優先して復元する
 			// (`$lib/reload-state`)。init_window は version などのために常に呼ぶので、
 			// 復元時は root の list が1回重複するだけ(docs/reload-state.md §4)。
+			// 追補a(Issue #382): 文書を開き直せなかったら、起動時の最初の文書と同じく文言を
+			// 控えるだけにし、購読をすべて登録したあと(onMount の末尾)で知らせる。復元の経路では
+			// openInitialDocument を呼ばないので、同じ変数を使っても知らせは 1 回きり。
 			const snapshot = loadSnapshot();
 			const restored = snapshot
-				? await restoreSnapshot<RootPayload, DocumentPayload>(snapshot)
+				? await restoreSnapshot<RootPayload, DocumentPayload>(snapshot, {
+						onOpenFailed: (message) => {
+							startupOpenFailure = message;
+						}
+					})
 				: null;
 
 			if (snapshot && restored?.ok) {
@@ -1159,7 +1269,8 @@
 		// ここから先の状態変更をスナップショットに残す。
 		startupSettled = true;
 
-		// Root change event -- only fired from external IPC (vellis -r).
+		// Root change event -- only fired from external IPC (vellis -r), once this
+		// window has confirmed the switch (要件#48 追補m — `registerRootSwitchRequestListener`).
 		// Explorer's set_root uses command return value instead (no event).
 		await listen<RootPayload>('root_changed', (e) => {
 			windowState.applyRoot(e.payload.root_uri, e.payload.entries, e.payload.document_retained);
@@ -1190,11 +1301,11 @@
 					: { uri: e.payload.uri, version: 1 };
 		});
 
-		// File removed event(ラスタ画像も同じ経路で表示が閉じる=要件#22 ②)
+		// File removed event(ラスタ画像も同じ経路で表示が閉じる=要件#22 ②)。
+		// 要件#48 追補g: 閉じるかどうかは `applyFileRemoved` が決める。表示中の文書で
+		// dirty なら閉じずに帯で知らせ、そうでなければ従来どおり閉じる。
 		await listen<FileRemovedPayload>('file_removed', (e) => {
-			if (e.payload.uri === windowState.currentDocument?.uri) {
-				windowState.clearDocument();
-			}
+			windowState.applyFileRemoved(e.payload.uri);
 		});
 
 		// Directory listing change event (for Explorer refresh, issue #18).
@@ -1222,8 +1333,16 @@
 			updateBanner = e.payload;
 		});
 
+		// 要件#14 追補b: event は貯まらないので、確かめた後に開いた窓には上の全窓への emit が
+		// 届いていない。購読を登録し終えたここで Rust に知らせ、覚えている新版があればこの窓
+		// だけへ送り直してもらう(listen より前に知らせると、答えが届いても受け手が無い)。
+		// 全窓への emit と両方受けても、バナーは payload を入れ直すだけで 1 枚のまま。
+		const bannerWindow = getCurrentWindow();
+		await bannerWindow.emit(UPDATE_BANNER_READY_EVENT, bannerWindow.label);
+
 		// 要件#71 追補a(1)(backlog 276): 起動時に開けなかったことは、購読をすべて登録して
 		// 起動の完了を立てたあとに知らせる(文言は契約5 の `Could not open the file: …`)。
+		// reload の復元で文書を開き直せなかったときも同じ 1 か所で知らせる(要件#10 追補a)。
 		if (startupOpenFailure !== null) alert(startupOpenFailure);
 	});
 
@@ -1340,7 +1459,11 @@
 	});
 </script>
 
-<div class="app" class:resizing-pane={resizingPane}>
+<div
+	class="app"
+	class:resizing-pane={resizingPane}
+	class:resizing-recent-files={resizingRecentFiles}
+>
 	{#if updateBanner}
 		<!-- 要件#14: 本体の上に1行。履歴選択画面のときも同じ位置に出る。 -->
 		<UpdateBanner
@@ -1362,10 +1485,17 @@
 				<!--
 					要件#55 契約①: 検索パネルは Explorer と入れ替わる(Close で戻る)。幅は
 					Explorer と同じ `explorerWidth`(要件#9)を薄い枠で当て、仕切りもそのまま効く。
+					要件#63 追補a: 器を Explorer の領域にし(目印はパネルの中ではなくここ)、結果の
+					一覧にツリーと同じ倍率(`explorerZoomLevel`=値は 1 つ)を渡す。
 				-->
-				<div class="find-in-folder-pane" style="width: {explorerWidth}px">
+				<div
+					class="find-in-folder-pane"
+					style="width: {explorerWidth}px"
+					data-zoom-region="explorer"
+				>
 					<FindInFolder
 						rootUri={windowState.root}
+						resultsZoom={explorerZoomLevel}
 						onOpen={handleFolderResultOpened}
 						onClose={() => (findInFolderOpen = false)}
 					/>
@@ -1399,6 +1529,7 @@
 							paneHeight={explorerPaneHeight}
 							explorerZoom={explorerZoomLevel}
 							onOpened={(uri) => void handleRecentFileOpened(uri)}
+							onDragChange={(dragging) => (resizingRecentFiles = dragging)}
 						/>
 					{/if}
 				</div>
@@ -1455,6 +1586,7 @@
 									binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
 								)}
 								source={windowState.currentDocument.content}
+								onDisplayed={onDisplayedFor(windowState.currentDocument.uri)}
 							/>
 							<!-- modelSrc がある=3D モデル(要件#23)。imageSrc と同じ形の分岐で、
 							     版数も同じ `binary_file_changed` の機構に乗る -->
@@ -1470,6 +1602,7 @@
 										windowState.renderedModelSrc,
 										binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
 									)}
+									onDisplayed={onDisplayedFor(windowState.currentDocument.uri)}
 								/>
 							{/await}
 							<!-- videoSrc がある=動画(要件#28)。imageSrc と同じ形の分岐で、版数も
@@ -1500,6 +1633,7 @@
 											: undefined}
 										onPositionChange={showProvenance ? handleVideoPosition : undefined}
 										onDurationChange={handleVideoDuration}
+										onDisplayed={onDisplayedFor(videoDisplay.uri)}
 									/>
 								</div>
 								<!--
@@ -1528,6 +1662,7 @@
 									windowState.renderedAudioSrc,
 									binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
 								)}
+								onDisplayed={onDisplayedFor(windowState.currentDocument.uri)}
 							/>
 							<!-- pdfSrc がある=PDF(要件#29)。videoSrc と同じ形の分岐で、版数も
 							     同じ `binary_file_changed` の機構に乗る。プレースホルダになる
@@ -1539,6 +1674,7 @@
 									windowState.renderedPdfSrc,
 									binaryVersion.uri === windowState.currentDocument.uri ? binaryVersion.version : 0
 								)}
+								onDisplayed={onDisplayedFor(windowState.currentDocument.uri)}
 							/>
 						{:else}
 							<Viewer
@@ -1688,6 +1824,17 @@
 	/* ドラッグ中はポインタがどこにあってもカーソルと選択状態を固定する。 */
 	.app.resizing-pane {
 		cursor: col-resize;
+		user-select: none;
+	}
+
+	/*
+	 * 追補g: Recent Files の高さのドラッグ中も同じく窓全体で固定する。ツリーの行などは
+	 * 自分の `cursor: pointer` を持つ(継承より強い)ので、子孫(子コンポーネントの要素も)
+	 * にも当てる。
+	 */
+	.app.resizing-recent-files,
+	.app.resizing-recent-files :global(*) {
+		cursor: ns-resize;
 		user-select: none;
 	}
 </style>

@@ -7,7 +7,7 @@ use tauri::{Emitter, Manager, Window};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::annotation::SnapshotManager;
-use crate::fs::local::ensure_within_root;
+use crate::fs::local::{ensure_within_root, LocalProvider};
 use crate::fs::uri::Uri;
 use crate::recent_files;
 use crate::session::document::{DocumentPayload, DocumentSession};
@@ -59,9 +59,11 @@ pub async fn open_binary_document(
 ///    revert (契約⑤). A failure here aborts the save: the safety net is the
 ///    reason FR-02 (viewer-only) could be withdrawn at all, so a save without
 ///    one is not a save this command is willing to perform.
-/// 4. **Write** — `FileProvider::write_text`, tmp+rename, bytes verbatim,
-///    to the path step 2 resolved — a symlink's target, never the link
-///    itself (追補d).
+/// 4. **Write** — `LocalProvider::write_text_within_root`, tmp+rename,
+///    bytes verbatim, to the path step 2 resolved — a symlink's target, never
+///    the link itself (追補d) — with the root step 2 judged against, so the
+///    provider checks the target against it once more just before the rename
+///    (追補j(2)).
 ///
 /// The write makes the file watcher fire `file_changed` right back at the
 /// window that saved. The frontend recognises its own bytes by hash and drops
@@ -134,14 +136,14 @@ pub async fn save_document(
     // Write to the path the root check resolved, not the one the window
     // opened (追補d(3)): for a symlink that is its target, so the check and
     // the write judge the same file and a link re-pointed in between cannot
-    // send the bytes outside the root.
+    // send the bytes outside the root. The write also gets the root that
+    // check used: just before its rename, the provider makes sure the target
+    // has not become a link and is still under that root (追補j(2)). The
+    // root-aware write is `LocalProvider`'s own (the `FileProvider` fn set is
+    // fixed, AC-55-18); both scheme gates above leave only `file://` here.
     let write_uri = parsed_uri.with_path(&resolved);
-    let provider = state
-        .fs_registry
-        .resolve(&write_uri)
-        .map_err(|e| e.to_string())?;
-    provider
-        .write_text(&write_uri.raw, &content)
+    LocalProvider::new()
+        .write_text_within_root(&write_uri.raw, &content, &root_uri.path)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -215,21 +217,37 @@ async fn open_in_window(
             // 要件#64 契約8: 「見つからない」で開けなかったファイルは Recent Files から
             // 除く(権限・ssh の切断など一時的かもしれない失敗では除かない)。
             //
-            // 開いたときのエラーの種類では判定しない: 開くのは監視の登録が先で、ローカルの
-            // 消えたファイルは notify の失敗(`FsError::Io`)として返り、`NotFound` に
-            // ならない。そこで失敗したときだけ同じ URI をそのプロバイダで 1 回 stat し、
-            // その失敗が「見つからない」かで決める(ローカルも ssh も同じ経路)。
-            // best-effort=除去も stat の失敗もログして飲み、元のエラーをそのまま返す。
+            // 開いたときのエラーの種類では判定しない: 開くのは監視の登録が先で、返るエラーは
+            // どの段(監視の登録・読み取り)で落ちたかやプロバイダで形が変わる(ローカルの
+            // 消えたファイルは、要件#71 追補d から監視の登録の `FsError::NotFound` として
+            // 返る)。そこで失敗したときだけ同じ URI をそのプロバイダで 1 回 stat し、その
+            // 失敗が「見つからない」かで決める(ローカルも ssh も同じ経路)。
+            //
+            // 要件#64 追補e: ssh の stat の `NotFound` は、macOS の sftp-server が返す
+            // 一時的な汎用の `Failure` の写しでもありうる(`sftp_to_fs`)。そこで ssh のときは
+            // 親フォルダを一覧し、一覧が取れて名前が無いときだけ除く(ローカルは stat だけ)。
+            // best-effort=除去も stat・一覧の失敗もログして飲み、元のエラーをそのまま返す。
             match state.fs_registry.resolve(&parsed_uri) {
-                Ok(provider) => match provider.stat(&parsed_uri).await {
-                    Ok(_) => {}
-                    Err(stat_err) if recent_files::should_forget_on_open_error(&stat_err) => {
+                Ok(provider) => {
+                    let stat = provider.stat(&parsed_uri).await;
+                    let parent_listing = if recent_files::needs_parent_listing(&parsed_uri, &stat) {
+                        match parsed_uri.parent() {
+                            Some(parent) => Some(provider.list(&parent).await),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if recent_files::should_forget_on_open_error_with_listing(
+                        &parsed_uri,
+                        &stat,
+                        parent_listing.as_ref(),
+                    ) {
                         recent_files::forget_file(&app_handle, &uri);
-                    }
-                    Err(stat_err) => {
+                    } else if let Err(stat_err) = &stat {
                         tracing::debug!("recent files: kept '{}' (stat failed: {})", uri, stat_err);
                     }
-                },
+                }
                 Err(resolve_err) => {
                     tracing::debug!("recent files: kept '{}' ({})", uri, resolve_err);
                 }
@@ -250,7 +268,14 @@ async fn open_in_window(
     // 要件#64 契約1・2: 開けたファイルを Recent Files に記録する。開く経路(ツリー・
     // Go to・検索結果・リンク・起動時引数・新しいタブ/窓)はすべてここに集まるので、
     // 記録はこの 1 か所だけ。best-effort=記録の失敗は文書を開くのを妨げない。
-    recent_files::record_file(&app_handle, &uri);
+    //
+    // 要件#64 追補f 契約1: ここで記録するのはテキストの経路だけ。バイナリの経路の成功は
+    // 「監視を張れた」でしかなく、大きすぎ・壊れている・権限なしはビューアが表示を試して
+    // 初めて分かる。そこでバイナリは、ビューアが最初に表示できた時点でフロントが
+    // `record_displayed_file` で記録を頼む。
+    if !binary {
+        recent_files::record_file(&app_handle, &uri);
+    }
 
     Ok(payload)
 }

@@ -36,6 +36,102 @@ impl LocalProvider {
     pub fn new() -> Self {
         Self
     }
+
+    /// `write_text` for a save that has judged its target against `root`
+    /// (要件#48 追補j(2)): the same tmp+rename, and just before the rename the
+    /// target is checked again — still not a symlink, still under `root`
+    /// (`verify_write_target`). `save_document` passes the root it handed to
+    /// `ensure_within_root`, so both checks judge against the same folder.
+    ///
+    /// An inherent method rather than a trait one: the `FileProvider` fn set
+    /// stays as it is (AC-55-18), and only the local provider writes.
+    pub async fn write_text_within_root(
+        &self,
+        uri: &str,
+        content: &str,
+        root: &std::path::Path,
+    ) -> Result<(), FsError> {
+        self.write_text_within_root_with(uri, content, Some(root), || {})
+            .await
+    }
+
+    /// The whole save, with a seam for the tests (要件#48 追補j(2)).
+    ///
+    /// `before_rename` runs once, after the temp file is fully written (bytes,
+    /// the original's metadata, fsync) and before the re-check and the rename —
+    /// the window a link swapped in by someone else would use. The app passes
+    /// a closure that does nothing: `write_text(uri, c)` is
+    /// `write_text_within_root_with(uri, c, None, || {})`, and
+    /// `write_text_within_root(uri, c, root)` is the same with `Some(root)`.
+    ///
+    /// `root` is `None` for `write_text`, whose callers check containment
+    /// themselves (追補a); the symlink re-check applies either way.
+    pub async fn write_text_within_root_with<F>(
+        &self,
+        uri: &str,
+        content: &str,
+        root: Option<&std::path::Path>,
+        before_rename: F,
+    ) -> Result<(), FsError>
+    where
+        F: FnOnce() + Send,
+    {
+        let parsed = Uri::parse(uri).map_err(|e| FsError::PermissionDenied(e.to_string()))?;
+        if parsed.scheme != "file" {
+            return Err(FsError::UnsupportedScheme(parsed.scheme.clone()));
+        }
+
+        // `..` is refused before anything is opened: a path that walks up is
+        // never something the user pointed at, and resolving it here would
+        // silently write somewhere else (snapshot.rs `resolve_source` refuses
+        // the same shape for the same reason). It is judged on the path as
+        // given; a link's own target may well contain `..` (`../y/b.md`).
+        if parsed
+            .path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(FsError::PermissionDenied(format!(
+                "path contains a parent-directory component: {}",
+                parsed.path.display()
+            )));
+        }
+
+        let target = resolve_write_target(parsed.path).await?;
+
+        // Judge the resolved target once before anything is created next to
+        // it, so a target outside `root` gets no temp file there either. The
+        // same check runs again just before the rename (追補j(2)).
+        verify_write_target(&target, root)?;
+
+        let parent = target.parent().ok_or_else(|| {
+            FsError::PermissionDenied(format!("{} has no parent directory", target.display()))
+        })?;
+        let file_name = target.file_name().ok_or_else(|| {
+            FsError::PermissionDenied(format!("{} has no file name", target.display()))
+        })?;
+
+        // A name ending in `.vellis-tmp`, so a crash between create and rename
+        // does not leave something the explorer would list (the built-in
+        // exclusion hides it whatever the settings say, 要件#65 契約2).
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(file_name);
+        tmp_name.push(".vellis-tmp");
+        let tmp_path = parent.join(tmp_name);
+
+        // A refused create leaves nothing of ours behind: whatever sits at the
+        // name was put there by someone else, and is not ours to remove.
+        let file = create_tmp(&tmp_path).await?;
+        if let Err(e) =
+            write_then_rename(file, &tmp_path, &target, content, root, before_rename).await
+        {
+            // Best-effort cleanup: a failed write must not leave the temp file
+            // behind next to the document.
+            discard_tmp(&tmp_path).await;
+            return Err(e);
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -258,11 +354,11 @@ impl FileProvider for LocalProvider {
             },
             notify::Config::default(),
         )
-        .map_err(|e| FsError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| notify_to_fs(e, &watch_path))?;
 
         watcher
             .watch(&watch_path, RecursiveMode::NonRecursive)
-            .map_err(|e| FsError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| notify_to_fs(e, &watch_path))?;
 
         let id = WATCH_ID.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(id, path = %watch_path.display(), "started local watch");
@@ -299,55 +395,20 @@ impl FileProvider for LocalProvider {
     /// the link's target. A hard link's other names still keep the old
     /// contents, as before: the rename gives the document a new inode.
     ///
+    /// Links planted by someone who can write the same folder do not steer
+    /// the save (追補j): the temp file is created fresh, never opened through
+    /// a link at its name (1); the target is checked again just before the
+    /// rename and refused if it has become a link (2); and the cleanup of a
+    /// failed save clears flags and ACL on the temp file's own name, never on
+    /// what a link there points at (3).
+    ///
     /// The only other refusal here is a path carrying `..`. Root containment
     /// is checked one layer up, by `save_document`, because a `LocalProvider`
-    /// holds no root of its own (追補a).
+    /// holds no root of its own (追補a); `save_document` hands that root back
+    /// through `write_text_within_root` for the re-check (追補j(2)).
     async fn write_text(&self, uri: &str, content: &str) -> Result<(), FsError> {
-        let parsed = Uri::parse(uri).map_err(|e| FsError::PermissionDenied(e.to_string()))?;
-        if parsed.scheme != "file" {
-            return Err(FsError::UnsupportedScheme(parsed.scheme.clone()));
-        }
-
-        // `..` is refused before anything is opened: a path that walks up is
-        // never something the user pointed at, and resolving it here would
-        // silently write somewhere else (snapshot.rs `resolve_source` refuses
-        // the same shape for the same reason). It is judged on the path as
-        // given; a link's own target may well contain `..` (`../y/b.md`).
-        if parsed
-            .path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(FsError::PermissionDenied(format!(
-                "path contains a parent-directory component: {}",
-                parsed.path.display()
-            )));
-        }
-
-        let target = resolve_write_target(parsed.path).await?;
-
-        let parent = target.parent().ok_or_else(|| {
-            FsError::PermissionDenied(format!("{} has no parent directory", target.display()))
-        })?;
-        let file_name = target.file_name().ok_or_else(|| {
-            FsError::PermissionDenied(format!("{} has no file name", target.display()))
-        })?;
-
-        // A name ending in `.vellis-tmp`, so a crash between create and rename
-        // does not leave something the explorer would list (the built-in
-        // exclusion hides it whatever the settings say, 要件#65 契約2).
-        let mut tmp_name = std::ffi::OsString::from(".");
-        tmp_name.push(file_name);
-        tmp_name.push(".vellis-tmp");
-        let tmp_path = parent.join(tmp_name);
-
-        if let Err(e) = write_then_rename(&tmp_path, &target, content).await {
-            // Best-effort cleanup: a failed write must not leave the temp file
-            // behind next to the document.
-            discard_tmp(&tmp_path).await;
-            return Err(e);
-        }
-        Ok(())
+        self.write_text_within_root_with(uri, content, None, || {})
+            .await
     }
 }
 
@@ -359,36 +420,67 @@ impl FileProvider for LocalProvider {
 /// ACL would then make the temp file itself undeletable. Clear the temp file's
 /// flags and ACL and try once more rather than leave it next to the document
 /// (追補f(1)). Only the temp file is touched, never the original.
+///
+/// Nothing here follows a symlink (追補j(3)): if the temp file's name has been
+/// swapped for a link to the document by the time this runs, `chflags(2)` and
+/// `acl_set_file(3)` would unlock the *document* — Finder's lock and its
+/// `deny delete` gone — while the link itself stayed. `lchflags(2)` and
+/// `acl_set_link_np(3)` act on the link, and `unlink` never follows, so the
+/// name is cleared and removed whatever it has become.
+///
+/// If the last removal fails as well, the temp file stays next to the document;
+/// say so once in the log, with its path and the OS error, so a `.vellis-tmp`
+/// someone finds later can be traced (追補l(1)). The save's own result is not
+/// touched (追補l(3)).
 async fn discard_tmp(tmp_path: &std::path::Path) {
-    if tokio::fs::remove_file(tmp_path).await.is_ok() {
+    let Err(error) = tokio::fs::remove_file(tmp_path).await else {
         return;
-    }
+    };
     #[cfg(target_os = "macos")]
-    {
+    let error = {
         use std::os::unix::ffi::OsStrExt;
-        if let Ok(c_path) = std::ffi::CString::new(tmp_path.as_os_str().as_bytes()) {
-            // Flags first: `uchg` refuses the ACL change as well. Each step is
-            // best effort; whichever of the two the temp file carries, the
-            // removal below gets its chance.
-            // SAFETY: `c_path` is a valid NUL-terminated path for the whole call.
-            unsafe { libc::chflags(c_path.as_ptr(), 0) };
-            clear_acl(&c_path);
-            let _ = tokio::fs::remove_file(tmp_path).await;
+        // `libc` 0.2.185 (the version locked) binds `lchflags` for the other
+        // BSDs only; it lives in libSystem all the same (no new dependency).
+        extern "C" {
+            fn lchflags(path: *const std::ffi::c_char, flags: std::ffi::c_uint) -> std::ffi::c_int;
         }
-    }
+        match std::ffi::CString::new(tmp_path.as_os_str().as_bytes()) {
+            Ok(c_path) => {
+                // Flags first: `uchg` refuses the ACL change as well. Each step is
+                // best effort; whichever of the two the temp file carries, the
+                // removal below gets its chance.
+                // SAFETY: `c_path` is a valid NUL-terminated path for the whole call.
+                unsafe { lchflags(c_path.as_ptr(), 0) };
+                clear_acl(&c_path);
+                match tokio::fs::remove_file(tmp_path).await {
+                    Ok(()) => return,
+                    Err(e) => e,
+                }
+            }
+            // A path with a NUL byte cannot reach the C calls; the first
+            // removal was the last one.
+            Err(_) => error,
+        }
+    };
+    tracing::warn!(
+        path = %tmp_path.display(),
+        error = %error,
+        "save: could not remove the temp file left by a failed save; it stays next to the document"
+    );
 }
 
-/// Replace the extended ACL of the file at `path` with an empty one — what
-/// `chmod -N` does. The `libc` crate has no `acl_*` bindings, so the three
-/// calls are declared here; they live in libSystem, which every macOS binary
-/// links already (no new dependency).
+/// Replace the extended ACL at `path` with an empty one — what `chmod -h -N`
+/// does: a symlink at `path` has its own ACL cleared, never its target's
+/// (追補j(3)). The `libc` crate has no `acl_*` bindings, so the three calls
+/// are declared here; they live in libSystem, which every macOS binary links
+/// already (no new dependency).
 #[cfg(target_os = "macos")]
 fn clear_acl(path: &std::ffi::CStr) {
     type AclT = *mut std::ffi::c_void;
     const ACL_TYPE_EXTENDED: std::ffi::c_uint = 0x0000_0100;
     extern "C" {
         fn acl_init(count: std::ffi::c_int) -> AclT;
-        fn acl_set_file(
+        fn acl_set_link_np(
             path_p: *const std::ffi::c_char,
             acl_type: std::ffi::c_uint,
             acl: AclT,
@@ -396,14 +488,14 @@ fn clear_acl(path: &std::ffi::CStr) {
         fn acl_free(obj_p: *mut std::ffi::c_void) -> std::ffi::c_int;
     }
     // SAFETY: `acl_init` returns an owned ACL or null; a non-null one is used
-    // for one `acl_set_file` with a valid NUL-terminated path and then freed
-    // exactly once.
+    // for one `acl_set_link_np` with a valid NUL-terminated path and then
+    // freed exactly once.
     unsafe {
         let acl = acl_init(0);
         if acl.is_null() {
             return;
         }
-        acl_set_file(path.as_ptr(), ACL_TYPE_EXTENDED, acl);
+        acl_set_link_np(path.as_ptr(), ACL_TYPE_EXTENDED, acl);
         acl_free(acl);
     }
 }
@@ -431,16 +523,69 @@ async fn resolve_write_target(path: std::path::PathBuf) -> Result<std::path::Pat
     }
 }
 
-/// Write `content` to `tmp_path`, give it `target`'s metadata, fsync it, then
-/// rename it onto `target`.
-async fn write_then_rename(
+/// Create the save's temp file at `tmp_path`, never through what is already
+/// there (要件#48 追補j(1)).
+///
+/// `create_new` is `O_CREAT | O_EXCL`, which refuses an existing name — a
+/// symlink included, dangling or not — rather than opening whatever it points
+/// at. `File::create` used to follow such a link, write the document's new
+/// contents into its target, and let the rename put the link in the
+/// document's place.
+///
+/// A regular file at the name is the leftover of a save that died between
+/// create and rename (追補j(1), 2026-10-19 訂正): it is unlinked — `unlink`
+/// removes the name, never what a link points at — and the create is tried
+/// once more; if something has taken the name again by then, the save fails.
+/// Anything else at the name, a link above all, fails the save and is left
+/// where it is: Vellis never makes a link there, so it is not ours to remove.
+async fn create_tmp(tmp_path: &std::path::Path) -> Result<tokio::fs::File, FsError> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    match options.open(tmp_path).await {
+        Ok(file) => return Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(io_to_fs(e)),
+    }
+    match tokio::fs::symlink_metadata(tmp_path).await {
+        Ok(meta) if meta.file_type().is_file() => match tokio::fs::remove_file(tmp_path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_to_fs(e)),
+        },
+        Ok(meta) => {
+            let what = if meta.file_type().is_symlink() {
+                "a symbolic link"
+            } else {
+                "something other than a regular file"
+            };
+            return Err(FsError::PermissionDenied(format!(
+                "{} (the save's temp file name) is already taken by {what}; refusing to write through it",
+                tmp_path.display()
+            )));
+        }
+        // Gone in between: the name is free again.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_to_fs(e)),
+    }
+    options.open(tmp_path).await.map_err(io_to_fs)
+}
+
+/// Write `content` to the freshly created temp `file` at `tmp_path`, give it
+/// `target`'s metadata, fsync it, re-check `target`, then rename the temp file
+/// onto it.
+async fn write_then_rename<F>(
+    mut file: tokio::fs::File,
     tmp_path: &std::path::Path,
     target: &std::path::Path,
     content: &str,
-) -> Result<(), FsError> {
+    root: Option<&std::path::Path>,
+    before_rename: F,
+) -> Result<(), FsError>
+where
+    F: FnOnce() + Send,
+{
     use tokio::io::AsyncWriteExt;
 
-    let mut file = tokio::fs::File::create(tmp_path).await.map_err(io_to_fs)?;
     file.write_all(content.as_bytes()).await.map_err(io_to_fs)?;
     // Surface the write's own error here: `into_std` waits for an in-flight
     // write but would drop its error.
@@ -464,7 +609,55 @@ async fn write_then_rename(
     .map_err(|e| FsError::Io(std::io::Error::other(e.to_string())))?
     .map_err(io_to_fs)?;
 
-    tokio::fs::rename(tmp_path, target).await.map_err(io_to_fs)?;
+    before_rename();
+
+    // Re-check the target just before the rename (追補j(2)): `rename` never
+    // follows its destination, so a link swapped in at `target` since it was
+    // judged would simply be replaced — or, with a root, a target moved out
+    // of it would be written all the same. The check and the rename share
+    // one blocking hop to keep the window between them small; it narrows the
+    // window, it cannot close it (that would mean giving up tmp+rename).
+    let (tmp, target, root) = (
+        tmp_path.to_path_buf(),
+        target.to_path_buf(),
+        root.map(std::path::Path::to_path_buf),
+    );
+    tokio::task::spawn_blocking(move || {
+        verify_write_target(&target, root.as_deref())?;
+        std::fs::rename(&tmp, &target).map_err(io_to_fs)
+    })
+    .await
+    .map_err(|e| FsError::Io(std::io::Error::other(e.to_string())))?
+}
+
+/// Check the write target once more before the save replaces it (要件#48
+/// 追補j(2)). Read-only: nothing is created or removed.
+///
+/// `target` is the path `resolve_write_target` settled on — a plain file, a
+/// path that does not exist yet (a first save), or a link's canonical target —
+/// so a symlink at `target` (looked at with `symlink_metadata`, not followed)
+/// means it was swapped in after the decision, and it is refused wherever it
+/// points, root or not, dangling or not. With a `root`, `target` must also
+/// still be under it, by the same canonicalising judgement as
+/// [`ensure_within_root`], which `save_document` made against the same root.
+pub fn verify_write_target(
+    target: &std::path::Path,
+    root: Option<&std::path::Path>,
+) -> Result<(), FsError> {
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(FsError::PermissionDenied(format!(
+                "{} is a symbolic link now; the save checked a plain file there and will not replace the link",
+                target.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_to_fs(e)),
+    }
+    if let Some(root) = root {
+        ensure_within_root(root, target)?;
+    }
     Ok(())
 }
 
@@ -631,6 +824,21 @@ fn io_to_fs(e: std::io::Error) -> FsError {
         std::io::ErrorKind::NotFound => FsError::NotFound(e.to_string()),
         std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(e.to_string()),
         _ => FsError::Io(e),
+    }
+}
+
+/// Convert a `notify` failure from `watch` to `FsError` (要件#71 追補d 契約1).
+///
+/// A path that is not there becomes `NotFound` naming the path we tried to
+/// watch, so a missing file reads `not found: /…/zz.md` instead of notify's
+/// own `No path was found. about [...]` wrapped as `I/O error`. An I/O
+/// failure goes through `io_to_fs` like the other local operations; any
+/// other kind stays `FsError::Io` as before.
+fn notify_to_fs(e: notify::Error, watch_path: &std::path::Path) -> FsError {
+    match e.kind {
+        notify::ErrorKind::PathNotFound => FsError::NotFound(watch_path.display().to_string()),
+        notify::ErrorKind::Io(io) => io_to_fs(io),
+        _ => FsError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)),
     }
 }
 

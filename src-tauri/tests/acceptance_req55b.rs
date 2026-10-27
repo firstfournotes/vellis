@@ -348,7 +348,8 @@ const SSH_ROOT: &str = "ssh://alice@host.example.com:2222/data";
 const QUERY: &str = "alpha";
 
 fn hit(path: &str, line: u32, ordinal: u32, text: &str) -> SearchHit {
-    SearchHit { path: path.to_string(), line, text: text.to_string(), ordinal }
+    // 要件側更新 2026-10-08(要件#66 契約12): `matched: Option<String>` を +1(.* OFF では None)。
+    SearchHit { path: path.to_string(), line, text: text.to_string(), ordinal, matched: None }
 }
 
 fn policy() -> BatchPolicy {

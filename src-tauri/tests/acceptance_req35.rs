@@ -22,8 +22,8 @@
 //! // src-tauri/src/menu.rs(cli_install.rs 側の実装+ menu からの再 export でも可)
 //! use crate::cli_install::InstallCliResult;
 //!
-//! /// 成功ダイアログの本文。target_dir_on_path で PATH 追記手順の有無が分かれる
-//! /// (構成は従来の日本語文と同じ=パス2行+案内)。
+//! /// 成功ダイアログの本文。追補b(2026-10-08・backlog 318)の契約3 により target_dir_on_path を
+//! /// 見ず、常に1通り(パス2行+断定しない案内+ ~/.zshrc への追記例)。
 //! pub fn install_cli_success_body(result: &InstallCliResult) -> String;
 //!
 //! /// 失敗ダイアログの本文。install_cli() の Err(String) をそのまま挟む。
@@ -37,6 +37,9 @@
 //! 英語文言は要件に推奨がないため本テストで確定する(下の期待値が正)。
 //! gate で由谷が文言 NG とした場合は要件側で文言を確定してから acceptance を
 //! 更新する(契約①の脱出口=要件#24 と同じ運用・事前承認済み)。
+//! 成功ダイアログの本文2件は追補b(docs/requirements/req-35.md「追補b」契約3・backlog 318)で
+//! 要件側から改めた(PATH を判定しない1通りの本文=2026-10-08 由谷承認)。さらに追補d の
+//! 改訂 d-2(2026-10-25 由谷「字下げをやめる」・Issue #720)で 3 行の行頭の空白 2 つを除いた。
 //!
 //! ## 人間ゲート(acceptance/acceptance.md)
 //! - 実機のメニューバー表示・CLI インストールダイアログの見た目と文言の妥当性・
@@ -72,25 +75,27 @@ fn sample_result(target_dir_on_path: bool) -> InstallCliResult {
 // 契約③ — CLI インストール結果ダイアログ本文の英語化(値固定)
 // ---------------------------------------------------------------------------
 
-/// PATH 上へのインストール成功: パス2行+新しいシェルで使える旨(英語・値固定)。
+/// 成功ダイアログの本文(英語・値固定)。追補b 契約3(2026-10-08 由谷承認)で
+/// `target_dir_on_path` に依らず1通りになった=パス2行+断定しない案内+ ~/.zshrc への
+/// 追記例(追記例の export 行は従来どおり)。
+/// 要件35 追補d 改訂 d-2(2026-10-25 由谷「字下げをやめる」・Issue #720)で、target・→ source・
+/// `export PATH=…` の 3 行の行頭の空白 2 つを除いた(macOS 27 の NSAlert が行頭の空白を消すため。
+/// 行の並び・空行・文言はそのまま)。
+const SUCCESS_BODY: &str = "Installed:\n/Users/x/.local/bin/vellis\n→ /Applications/Vellis.app/Contents/MacOS/vellis\n\nOpen a new terminal window and run `vellis`.\nIf the command is not found, add the following to your ~/.zshrc or similar:\n\nexport PATH=\"$HOME/.local/bin:$PATH\"";
+
+/// PATH 上へのインストール成功: 追補b 契約3 の本文(要件側更新・2026-10-08)。
 #[test]
 fn success_body_on_path_is_english_and_fixed() {
     let body = install_cli_success_body(&sample_result(true));
-    assert_eq!(
-        body,
-        "Installed:\n  /Users/x/.local/bin/vellis\n  → /Applications/Vellis.app/Contents/MacOS/vellis\n\nThe `vellis` command is now available in new shells."
-    );
+    assert_eq!(body, SUCCESS_BODY);
 }
 
-/// PATH 外へのインストール成功: パス2行+ PATH 警告+ ~/.zshrc への追記例
-/// (英語・値固定。追記例の export 行は従来どおり)。
+/// PATH 外へのインストール成功: 追補b 契約3 により PATH 上と同じ本文(要件側更新・
+/// 2026-10-08。メニューは PATH を判定しないので `is not on your PATH` は出さない)。
 #[test]
 fn success_body_off_path_warns_in_english() {
     let body = install_cli_success_body(&sample_result(false));
-    assert_eq!(
-        body,
-        "Installed:\n  /Users/x/.local/bin/vellis\n  → /Applications/Vellis.app/Contents/MacOS/vellis\n\n⚠ /Users/x/.local/bin is not on your PATH.\nAdd the following to your ~/.zshrc or similar:\n\n  export PATH=\"$HOME/.local/bin:$PATH\""
-    );
+    assert_eq!(body, SUCCESS_BODY);
 }
 
 /// 失敗ダイアログ: 英語の定型文+エラー内容の素通し(値固定)。

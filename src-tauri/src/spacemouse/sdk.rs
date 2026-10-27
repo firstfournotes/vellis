@@ -85,7 +85,7 @@ mod ffi {
     use std::ffi::{c_char, c_int, c_uint, c_void, CString};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, Once, OnceLock};
 
     use tauri::{AppHandle, Runtime};
 
@@ -153,6 +153,38 @@ mod ffi {
         client_control: ConnexionClientControlFn,
     }
 
+    /// 登録した後の [`SdkClient`] が呼ぶ framework の関数(有効化・無効化と解除)。
+    /// 本物は dlsym で引いた関数群(`Api`)がこれを実装し、受け入れテストは
+    /// 呼び出しを記録するだけの偽物を差し込む(3DxWare に登録せずに解除の
+    /// 順序と回数を確かめるため)。`SetConnexionHandlers` /
+    /// `RegisterConnexionClient` は登録時([`try_start`])にしか使わないので含めない。
+    pub trait ConnexionApi: Send + Sync {
+        /// `ConnexionClientControl(clientID, message, param, NULL)`。0 = 成功。
+        fn client_control(&self, client_id: u16, message: u32, param: i32) -> i16;
+        /// `UnregisterConnexionClient(clientID)`。
+        fn unregister(&self, client_id: u16);
+        /// `CleanupConnexionHandlers()`。
+        fn cleanup(&self);
+    }
+
+    impl ConnexionApi for Api {
+        fn client_control(&self, client_id: u16, message: u32, param: i32) -> i16 {
+            // SAFETY: Headers どおりのシグネチャ。result は使わないので null。
+            unsafe { (self.client_control)(client_id, message, param, std::ptr::null_mut()) }
+        }
+
+        fn unregister(&self, client_id: u16) {
+            // SAFETY: 登録時に得た client_id を渡す。
+            unsafe { (self.unregister)(client_id) }
+        }
+
+        fn cleanup(&self) {
+            // SAFETY: 引数なし。framework はハンドラを置いたスレッドで探すので、
+            // 呼び出し側は登録したスレッド(メインスレッド)から呼ぶ。
+            unsafe { (self.cleanup)() }
+        }
+    }
+
     /// コールバックは context 引数を取らない(`ConnexionMessageHandlerProc` は
     /// productID / messageType / messageArgument の 3 引数だけ)ので、
     /// 送り先はプロセスに 1 つの静的スロットで受け渡す。プロセスあたり
@@ -197,14 +229,19 @@ mod ffi {
         tracing::info!("SpaceMouse: SDK reports device removed (product {product_id:#06x})");
     }
 
-    /// 生きている SDK クライアント。Drop で登録解除+ハンドラ撤去まで行う
-    /// (managed state に置いてあるのでアプリ終了時に走る)。
+    /// 生きている SDK クライアント。[`SdkClient::shutdown`] で無効化・登録解除・
+    /// ハンドラ撤去まで行う(一度きり。Drop も同じ関数を呼ぶ)。
+    ///
+    /// アプリの終了では Drop は走らない — Tauri のイベントループは
+    /// `std::process::exit` で終わり、managed state に置いたこの値は解放
+    /// されない。だから `lib.rs` が `RunEvent::Exit` で明示的に止める
+    /// (要件#25 追補c)。
     ///
     /// manual signature のクライアントは「前面に来た/去った」をこちらが
     /// ドライバへ伝える約束なので、ウィンドウのフォーカスに追従させる
     /// ([`SdkClient::set_window_focus`])。
     pub struct SdkClient {
-        api: Api,
+        api: Box<dyn ConnexionApi>,
         client_id: u16,
         /// いまフォーカスを持っているウィンドウのラベル。1つでも入っていれば
         /// アプリは前面にいる。ウィンドウ間を移るときの (false, true) の
@@ -212,9 +249,41 @@ mod ffi {
         focused_windows: Mutex<HashSet<String>>,
         /// ドライバへ伝えてある現在の状態。同じ値を二度送らないための番人。
         active: AtomicBool,
+        /// 解除を一度きりにする番人(終了事象と Drop のどちらが先でも二重に外さない)。
+        shutdown_once: Once,
     }
 
     impl SdkClient {
+        /// 登録+有効化済み(= [`try_start`] が返すときと同じ状態)のクライアントを、
+        /// 与えた関数表で組み立てる。framework には触らない(受け入れテストは
+        /// ここから偽の関数表を差し込む)。
+        pub fn from_registered(api: Box<dyn ConnexionApi>, client_id: u16) -> SdkClient {
+            SdkClient {
+                api,
+                client_id,
+                focused_windows: Mutex::new(HashSet::new()),
+                active: AtomicBool::new(true),
+                shutdown_once: Once::new(),
+            }
+        }
+
+        /// 入力源を止める。初回だけ、有効なら無効化 → 登録解除 → ハンドラ撤去。
+        /// 2 回目以降は何もしない。
+        ///
+        /// `CleanupConnexionHandlers` はハンドラを置いたスレッドからしか効かない
+        /// ので、登録したメインスレッドから呼ぶ(`RunEvent::Exit` のコールバックは
+        /// メインスレッドで来る)。
+        pub fn shutdown(&self) {
+            self.shutdown_once.call_once(|| {
+                // 有効化した分を戻してから外す(ドライバ側に「前面から去った」と
+                // 伝えるのと同じ意味。これで他アプリの SpaceMouse が復帰する)。
+                self.set_active(false);
+                self.api.unregister(self.client_id);
+                self.api.cleanup();
+                tracing::info!("SpaceMouse: SDK client deactivated and unregistered");
+            });
+        }
+
         /// ウィンドウのフォーカス変化を反映する。どれか1つでもフォーカスを
         /// 持っていれば有効、全部失っていれば無効。
         pub fn set_window_focus(&self, label: &str, focused: bool) {
@@ -234,7 +303,11 @@ mod ffi {
         }
 
         /// ドライバへ有効/無効を伝える。状態が変わったときだけ呼ぶ。
+        /// 解除を済ませた後は何も送らない(外したクライアント ID へ触らない)。
         fn set_active(&self, active: bool) {
+            if self.shutdown_once.is_completed() {
+                return;
+            }
             if self.active.swap(active, Ordering::SeqCst) == active {
                 return;
             }
@@ -243,9 +316,7 @@ mod ffi {
             } else {
                 CTL_DEACTIVATE_CLIENT
             };
-            // SAFETY: 登録済みの client_id。result は使わないので null。
-            let status =
-                unsafe { (self.api.client_control)(self.client_id, message, 0, std::ptr::null_mut()) };
+            let status = self.api.client_control(self.client_id, message, 0);
             if status != 0 {
                 tracing::warn!(
                     "SpaceMouse: client control failed (active={active}, status {status})"
@@ -258,14 +329,8 @@ mod ffi {
 
     impl Drop for SdkClient {
         fn drop(&mut self) {
-            // 有効化した分を戻してから外す(ドライバ側に「前面から去った」と
-            // 伝えるのと同じ意味。これで他アプリの SpaceMouse が復帰する)。
-            self.set_active(false);
-            unsafe {
-                (self.api.unregister)(self.client_id);
-                (self.api.cleanup)();
-            }
-            tracing::info!("SpaceMouse: SDK client deactivated and unregistered");
+            // 終了事象で止め済みなら何もしない。
+            self.shutdown();
         }
     }
 
@@ -383,17 +448,12 @@ mod ffi {
         }
 
         tracing::info!("SpaceMouse: SDK client registered and activated (id {client_id})");
-        Some(SdkClient {
-            api,
-            client_id,
-            focused_windows: Mutex::new(HashSet::new()),
-            active: AtomicBool::new(true),
-        })
+        Some(SdkClient::from_registered(Box::new(api), client_id))
     }
 }
 
 #[cfg(target_os = "macos")]
-pub use ffi::{try_start, SdkClient};
+pub use ffi::{try_start, ConnexionApi, SdkClient};
 
 // ---------------------------------------------------------------------------
 // macOS 以外: framework は存在しないので常に raw HID へ落ちる
@@ -407,6 +467,7 @@ pub struct SdkClient;
 #[cfg(not(target_os = "macos"))]
 impl SdkClient {
     pub fn set_window_focus(&self, _label: &str, _focused: bool) {}
+    pub fn shutdown(&self) {}
 }
 
 #[cfg(not(target_os = "macos"))]

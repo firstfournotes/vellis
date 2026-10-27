@@ -61,6 +61,17 @@ export const WAVEFORM_MAX_RETAINED_SAMPLES = (256 * 1024 * 1024) / 4;
  */
 export const WAVEFORM_COARSE_STEP = 512;
 
+/**
+ * シークバーの外形の端から、端に置いたつまみの中心までの距離(CSS px・要件#41 追補g 契約2)。
+ *
+ * ネイティブの `<input type="range">` は、つまみ全体がトラックに収まるようにつまみの中心を
+ * 両端から半幅ずつ内側で動かす。波形の横軸をこの可動域に合わせないと、両端でつまみと
+ * 波形が半幅ぶんずれる(backlog 236)。値は 2026-10-09 の実機の実測(macOS の標準の
+ * つまみ)で、つまみの大きさが変わったら測り直す。両ビューアはここから読み、CSS にも
+ * ビューアにも数値を書かない。
+ */
+export const SEEK_THUMB_INSET_PX = 12;
+
 /** `deltaMode: 1`(行単位)1行あたりのピクセル相当(契約④)。 */
 export const WAVEFORM_WHEEL_LINE_PIXELS = 16;
 
@@ -397,6 +408,32 @@ export function waveformWindowIndicator(
 		left: (start / durationSeconds) * barWidth,
 		width: (windowSeconds / durationSeconds) * barWidth,
 	};
+}
+
+/**
+ * 窓指標をつまみの可動域に乗せたもの(要件#41 追補g 契約4)。
+ *
+ * つまみの中心は外形の両端から `inset` ずつ内側を動くので、全尺を写す区間は
+ * `barWidth − 2 × inset`。そこへ `waveformWindowIndicator` で窓を写し、左端を `inset`
+ * ぶん送る ―― 再生位置が窓の両端にあるとき、つまみの中心と枠の両端が重なる。
+ * 区間が無い(0 以下・非有限)なら `null`(指標を出さない=fail-open)。`inset = 0` では
+ * `waveformWindowIndicator` と一致する。
+ */
+export function seekThumbWindowIndicator(
+	windowStart: number,
+	windowSeconds: number,
+	durationSeconds: number,
+	barWidth: number,
+	inset: number = SEEK_THUMB_INSET_PX,
+): { left: number; width: number } | null {
+	const indicator = waveformWindowIndicator(
+		windowStart,
+		windowSeconds,
+		durationSeconds,
+		barWidth - 2 * inset,
+	);
+	if (!indicator) return null;
+	return { left: indicator.left + inset, width: indicator.width };
 }
 
 // ---------------------------------------------------------------------------

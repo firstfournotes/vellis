@@ -1,10 +1,12 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { openPath } from '@tauri-apps/plugin-opener';
 	import { planOpenPdfExternally, pdfViewMode } from '$lib/pdf-viewing';
 
 	let {
 		uri,
 		src,
+		onDisplayed,
 	}: {
 		/** 表示中のファイルの絶対 URI(file: / ssh:)。表示形態の判定と表示名に使う。 */
 		uri: string;
@@ -13,6 +15,12 @@
 		 * 変更のたび版数が付く=要件#22 の機構)。プレースホルダのときは使わない。
 		 */
 		src: string;
+		/**
+		 * 先頭の検査が通って表示に入れた(`load` が `ready`)ときと、ssh のプレースホルダを
+		 * 出したときに呼ぶ(要件#64 追補f 契約3・改訂 f-2)。壊れた PDF・検査中では呼ばない。
+		 * 1 回開くごとに 1 回へ絞るのはページの側。
+		 */
+		onDisplayed?: () => void;
 	} = $props();
 
 	/**
@@ -39,11 +47,22 @@
 
 		let cancelled = false;
 		void readableAsPdf(target).then((ok) => {
-			if (!cancelled) load = ok ? 'ready' : 'error';
+			if (cancelled) return;
+			load = ok ? 'ready' : 'error';
+			if (ok) onDisplayed?.();
 		});
 		return () => {
 			cancelled = true;
 		};
+	});
+
+	// 設計どおりのプレースホルダ(ssh)も、出した時点で「表示できた」に入れる(要件#64 追補f
+	// 改訂 f-2)。追うのは uri だけ=その URI で作られた・URI が変わった時点で呼ぶ。`load` は
+	// 読まないので、壊れた PDF(エラーの表示)や検査中の枝とは混ざらない。callback は追わない
+	// ―― 呼んだ先(ページ)の状態まで、この effect の依存に入れないため。
+	$effect(() => {
+		void uri;
+		if (mode === 'remote') untrack(() => onDisplayed?.());
 	});
 
 	/** `%PDF-`。壊れた PDF・消えたファイルをここで見分ける。 */

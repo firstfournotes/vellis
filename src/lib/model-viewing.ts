@@ -52,6 +52,15 @@ export interface ParsedModel {
 }
 
 /**
+ * 壊れた PLY を読めなかったときの利用者向けの1文(要件#58 追補b・英語=要件#51)。
+ *
+ * `PLYLoader.parse` の内部例外(WebKit の「Out of bounds access」など `DataView` の
+ * RangeError)をそのまま `.model-message` に出さないため、PLY の分岐で投げられた
+ * 例外はこの文の `Error` に置き換える(元の例外は `cause` に残す)。
+ */
+export const PLY_UNREADABLE_MESSAGE = 'The PLY file is damaged and could not be read';
+
+/**
  * STL / OBJ の既定マテリアル。STL は色を持たない形式なので、こちらで与えるしかない
  * (3MF はファイル側の色・マテリアルをローダーが組み立てるので触らない)。
  * 無彩色・弱い金属感で、面の向きが陰影で分かる程度の粗さにしてある。
@@ -166,10 +175,18 @@ const OBJ_KEYWORDS = new Set([
  * ぶんを表示する」なので、先頭トークンがローダーの知るキーワードでない行を
  * ここで捨てる。コメント(`#`)と空行はローダー側の扱いに任せてそのまま通す。
  *
+ * 同じ理由で、頂点の番号が壊れた面(`f 1 2 x`・`f 1 2 0`・範囲外・まだ出ていない
+ * 頂点を指す)も行ごと捨てる(追補a)。OBJLoader はその番号を `parseInt` して
+ * `vertices[...]` を引くので、NaN や undefined の頂点が取り込まれる。多角形の
+ * 一部だけが壊れていても、残りで作った形は元の面ではないので面ごと落とす。
+ * 面が1つも残らなければ `normalizeObj` の縮退で既存の失敗経路へ進む。
+ *
  * 行の正規化(CRLF と `\` の行継続)は OBJLoader と同じ順序で先に済ませる —
- * 継続行の後半を単独の未知行と誤判定しないため。
+ * 継続行の後半を単独の未知行と誤判定しないため。`filter` は行を先頭から順に
+ * 見るので、`v` 行の数はその行より前のぶんだけが数えられている。
  */
 function sanitizeObjSource(text: string): string {
+	let vertexCount = 0;
 	return text
 		.replace(/\r\n/g, '\n')
 		.replace(/\\\n/g, '')
@@ -177,9 +194,31 @@ function sanitizeObjSource(text: string): string {
 		.filter((line) => {
 			const trimmed = line.trimStart();
 			if (trimmed.length === 0 || trimmed.startsWith('#')) return true;
-			return OBJ_KEYWORDS.has(trimmed.split(/\s+/, 1)[0]);
+			const tokens = trimmed.split(/\s+/);
+			const keyword = tokens[0];
+			if (!OBJ_KEYWORDS.has(keyword)) return false;
+			if (keyword === 'v') vertexCount += 1;
+			if (keyword !== 'f') return true;
+			return tokens
+				.slice(1)
+				.every((ref) => ref.length === 0 || isValidFaceVertexRef(ref, vertexCount));
 		})
 		.join('\n');
+}
+
+/**
+ * 面の頂点の参照(`v`・`v/vt`・`v//vn`・`v/vt/vn`)の先頭の `v` が有効な番号か
+ * (要件#57 追補a)。
+ *
+ * 有効= 符号つきの整数で 0 でなく、それまでの `v` 行の数 N に対して 1〜N か
+ * −1〜−N。`vt`・`vn` の番号は見ない(描画は `v` だけで決まり、OBJLoader も
+ * 足りない `vt`・`vn` を無視する)。
+ */
+function isValidFaceVertexRef(ref: string, vertexCount: number): boolean {
+	const head = ref.split('/', 1)[0];
+	if (!/^[+-]?\d+$/.test(head)) return false;
+	const index = Math.abs(Number(head));
+	return index >= 1 && index <= vertexCount;
 }
 
 /**
@@ -282,6 +321,7 @@ function boundsOf(object: Object3D): ParsedModel['bounds'] {
  *
  * 同期パーサ(STLLoader / ThreeMFLoader / OBJLoader / PLYLoader の `parse`)を Promise の
  * 中で呼ぶので、壊れたファイル(ZIP でない 3MF 等)の例外はそのまま reject になる。
+ * PLY だけは `PLY_UNREADABLE_MESSAGE` に置き換えて reject する(要件#58 追補b)。
  * 決定的: 同じバイト列からは必ず同じ `kind` / `pointCount` / `triangleCount` / `bounds` が出る。
  */
 export async function parseModel(nameOrUri: string, buffer: ArrayBuffer): Promise<ParsedModel> {
@@ -310,7 +350,14 @@ export async function parseModel(nameOrUri: string, buffer: ArrayBuffer): Promis
 			// PLYLoader はヘッダの `format` を見て ascii / binary_little_endian /
 			// binary_big_endian を自動判別する(要件#58 ②)。返るのは BufferGeometry
 			// なので、メッシュか点群かを決めて包むのはこちらの持ち場。
-			const wrapped = wrapPlyGeometry(new PLYLoader().parse(sameRealmBuffer(buffer)));
+			// parse と包む段が投げた例外は利用者向けの1文に置き換える(追補b)。頂点0は
+			// どちらも投げずに `boundsOf` の「no drawable geometry」へ進むので try の外。
+			let wrapped: ReturnType<typeof wrapPlyGeometry>;
+			try {
+				wrapped = wrapPlyGeometry(new PLYLoader().parse(sameRealmBuffer(buffer)));
+			} catch (cause) {
+				throw new Error(PLY_UNREADABLE_MESSAGE, { cause });
+			}
 			object = wrapped.object;
 			kind = wrapped.kind;
 			break;

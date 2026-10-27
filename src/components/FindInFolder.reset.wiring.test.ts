@@ -13,7 +13,11 @@
  *   (= 順序の逆転を防ぐ: reset が検索の後に届いて走り出した世代を消さない)
  * - reset が reject しても黙って続行: 検索は投げる・状態表示に失敗を出さない
  * - 開き直し(unmount → 再 mount)のたびに reset を呼び直し、その窓の最初の検索(世代 1)は
- *   reset の後に来る。打鍵を重ねても reset は 1 マウントにつき 1 回
+ *   reset の後に来る。打鍵を重ねても reset は 1 マウントにつき 1 回(マウント時)。
+ *   要件#55 追補g で改訂(2026-10-19): 外したとき(onDestroy)にも reset が飛ぶ(g-2)ので、開き直しの
+ *   筋書きの reset は計 3 回(マウント時・外したとき・開き直し)。開き直したパネルの reset は外したときの
+ *   reset の完了の後(g-2 の補足)、その検索は開き直したパネルの reset の完了の後に来る。afterEach は
+ *   `cleanup()` の unmount で飛んだ reset を resolve してから消す(残すと次のケースのパネルが待ち続ける)
  * - e-3 不変: 世代は 1 から・invoke の引数名はそのまま
  *
  * ## 配線に求める契約(implementer はこれに従う)
@@ -145,6 +149,9 @@ beforeEach(() => {
 
 afterEach(() => {
 	cleanup();
+	// 要件#55 追補g で改訂(2026-10-19): cleanup の unmount でも reset が飛ぶ(g-2)。残った deferred を
+	// 終わらせ、次のケースのパネルが「前のパネルの閉じた reset」を待ち続けないようにする(g-2 の補足)。
+	for (const d of resets) d.resolve(null);
 	vi.clearAllMocks();
 });
 
@@ -251,7 +258,10 @@ describe('要件#55 追補e・AC-55-43: パネルを開いたら search_in_folde
 		expect(resetCalls().length).toBe(1);
 	});
 
-	it('開き直し(unmount → mount)のたびに reset を呼び直し、2 回目の窓の世代 1 の検索は 2 回目の reset の後に来る', async () => {
+	// 要件#55 追補g で改訂(2026-10-19): 外したとき(onDestroy)にも reset を呼ぶ(g-2)ので、開き直しの
+	// 筋書きの reset は計 3 回(マウント時・外したとき・開き直し)。開き直したパネルの reset は外したときの
+	// reset の完了の後に投げられ(g-2 の補足)、その検索は開き直したパネルの reset の完了の後に来る。
+	it('開き直し(unmount → mount)のたびに reset を呼び直す: 外したときの reset → 開き直しの reset → 2 回目の窓の世代 1 の検索、の順(reset は計 3 回)', async () => {
 		// 1 回目: 3 回以上検索して閉じる(backlog 216 の再現手順)。
 		const first = mountPanel();
 		await waitFor(() => expect(resetCalls().length).toBe(1));
@@ -263,24 +273,34 @@ describe('要件#55 追補e・AC-55-43: パネルを開いたら search_in_folde
 		await waitFor(() => expect(searchCalls().length).toBe(3), { timeout: 1500 });
 		expect(lastSearchArgs().generation).toBe(3);
 		first.unmount();
+		await settle();
+		// g-2: 外したときの reset(resets[1])。
+		expect(resetCalls().length, 'closing the panel resets (追補g g-2)').toBe(2);
 		const callsBeforeReopen = calls().length;
 
-		// 2 回目: 開き直す。
+		// 2 回目: 開き直す。外したときの reset が pending の間は、自分の reset も検索も投げない(g-2 の補足)。
 		mountPanel();
-		await waitFor(() => expect(resetCalls().length).toBe(2));
 		await typeQuery('alpha');
+		await sleep(QUIET_MS);
+		expect(resetCalls().length, 'the reopened panel waits for the closing reset before its own').toBe(2);
+		expect(searchCalls().length).toBe(3);
+
+		// 外したときの reset が済む → 開き直したパネルの reset(resets[2])。検索はまだ(自分の reset を待つ)。
+		await finishReset(1);
+		await waitFor(() => expect(resetCalls().length).toBe(3));
 		await sleep(QUIET_MS);
 		expect(searchCalls().length, 'the reopened panel waits for its own reset').toBe(3);
 
-		await finishReset(1);
+		await finishReset(2);
 		await waitFor(() => expect(searchCalls().length).toBe(4), { timeout: 1500 });
 
 		const reopened = lastSearchArgs();
 		expect(reopened.query).toBe('alpha');
 		expect(reopened.generation, 'SearchSession restarts at 1 per panel (AC-55-13)').toBe(1);
 
+		// 開き直し以降の並び: 開き直したパネルの reset(1 回だけ)→ 検索。
 		const afterReopen = calls().slice(callsBeforeReopen).map((c) => c[0]);
-		expect(afterReopen.indexOf(RESET)).toBeGreaterThanOrEqual(0);
+		expect(afterReopen.filter((name) => name === RESET).length).toBe(1);
 		expect(afterReopen.indexOf(SEARCH)).toBeGreaterThan(afterReopen.indexOf(RESET));
 	});
 

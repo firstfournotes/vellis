@@ -23,12 +23,13 @@
 	} from '$lib/audio-waveform';
 	import { clampWaveformHeight, dragWaveformHeight } from '$lib/waveform-resize';
 	import {
+		SEEK_THUMB_INSET_PX,
 		followWaveformWindow,
 		normalizeWheelDelta,
 		scrollWaveformWindow,
+		seekThumbWindowIndicator,
 		waveformLaneDrawWidth,
 		waveformMinWindowSeconds,
-		waveformWindowIndicator,
 		waveformWindowSeconds,
 		waveformZoomHeadX,
 		wheelZoomFactor,
@@ -41,6 +42,7 @@
 	let {
 		uri,
 		src,
+		onDisplayed,
 	}: {
 		/** 表示中のファイルの絶対 URI(file: / ssh:)。再生可否の判定と表示名に使う。 */
 		uri: string;
@@ -49,12 +51,24 @@
 		 * 変更のたび版数が付く=要件#22 の機構)。プレースホルダのときは使わない。
 		 */
 		src: string;
+		/**
+		 * 音声を表示できた(`<audio>` の `loadedmetadata`)ときと、ssh のプレースホルダを出した
+		 * ときに呼ぶ(要件#64 追補f 契約3・改訂 f-2)。読み込みの失敗(エラーの表示)では
+		 * 呼ばない。1 回開くごとに 1 回へ絞るのはページの側。
+		 */
+		onDisplayed?: () => void;
 	} = $props();
 
 	/** ←/→ の秒送り(契約⑩)。音声にフレームは無いのでコマ送りを秒送りへ置き換える。 */
 	const COARSE_STEP_SECONDS = 5;
 	/** Shift 併用の細かい秒送り(契約⑩)。 */
 	const FINE_STEP_SECONDS = 1;
+	/**
+	 * 横軸の器の左右の位置(px・要件#41 追補g 契約2)。器は帯の枠線の内側に置くので、
+	 * つまみの中心までの距離から枠線(1px)のぶんを引く ―― 枠線の太さを変えるときは
+	 * この 1 も変える。
+	 */
+	const WAVEFORM_AXIS_INSET_PX = SEEK_THUMB_INSET_PX - 1;
 
 	let fileName = $derived(uri.slice(uri.lastIndexOf('/') + 1));
 	let mode = $derived(audioViewMode(uri));
@@ -88,7 +102,10 @@
 	 * (解析の起動条件に自分が入ると回り続ける)。
 	 */
 	let analyzedSrc: string | null = null;
-	/** 帯の実幅(px)。シークバーと同じ幅の器に置くので、これが横軸の長さになる。 */
+	/**
+	 * 横軸の器の実幅(px・要件#41 追補g 契約3)。帯はシークバーと同じ幅で、器はその両端を
+	 * つまみの可動域ぶん内側へ寄せたもの ―― これが横軸の長さになる。
+	 */
 	let waveformWidth = $state(0);
 	/** シークバーの器の実幅(px)。窓指標の left/width をここへ写す。 */
 	let seekWidth = $state(0);
@@ -120,6 +137,17 @@
 
 	/** いま帯が映している窓の実尺(秒・要件#47 契約②)。倍率 1 なら全尺そのもの。 */
 	let waveformSeconds = $derived(waveformWindowSeconds(waveformZoom, barDuration));
+	/**
+	 * いま帯に描くレーンの包絡(`windowLanes`)。解析中と縮退のときは null =帯を消す。
+	 * 依存は波形の結果・倍率・窓の始まり・窓の秒数だけ(要件#50 追補f)―― 描画の effect の
+	 * 中で計算すると、帯の高さや幅が変わるたびに保持している標本を全部舐め直し、2 時間級の
+	 * 素材を拡大して高さをドラッグするとカクつく。
+	 */
+	let waveformLanes = $derived(
+		waveform?.state === 'ready'
+			? windowLanes(waveform, waveformZoom, waveformWindowStart, waveformSeconds)
+			: null,
+	);
 	/** この素材で許される窓の下限(秒)。生標本を捨てた素材では粗レベルの刻みが底になる。 */
 	let waveformMinWindow = $derived(
 		waveformMinWindowSeconds(
@@ -131,9 +159,12 @@
 	let waveformHeadX = $derived(
 		waveformZoomHeadX(barPosition, waveformWindowStart, waveformSeconds, waveformWidth),
 	);
-	/** シークバーへ重ねる窓指標(要件#47 契約③)。倍率 1 では null =出さない。 */
+	/**
+	 * シークバーへ重ねる窓指標(要件#47 契約③)。倍率 1 では null =出さない。
+	 * 枠はつまみの可動域に乗せる(要件#41 追補g 契約4)。
+	 */
 	let waveformIndicator = $derived(
-		waveformWindowIndicator(waveformWindowStart, waveformSeconds, barDuration, seekWidth),
+		seekThumbWindowIndicator(waveformWindowStart, waveformSeconds, barDuration, seekWidth),
 	);
 	/** 帯に出す文言(解析中・縮退の理由)。null のときだけ波形そのものを出す(契約⑫)。 */
 	let waveformNote = $derived(audioWaveformNote(waveform, waveformAnalyzing));
@@ -167,6 +198,16 @@
 		analyzedSrc = null;
 		waveformZoom = 1;
 		waveformWindowStart = 0;
+	});
+
+	// 設計どおりのプレースホルダ(ssh)も、出した時点で「表示できた」に入れる(要件#64 追補f
+	// 改訂 f-2)。追うのは uri だけ=その URI で作られた・URI が変わった時点で呼ぶ(同じ
+	// インスタンスが使い回されるので、URI の変化でまた呼ぶ)。`loadFailed` は読まないので、
+	// 読み込みの失敗(エラーの表示)の枝とは混ざらない。callback は追わない ―― 呼んだ先
+	// (ページ)の状態まで、この effect の依存に入れないため。
+	$effect(() => {
+		void uri;
+		if (mode === 'remote') untrack(() => onDisplayed?.());
 	});
 
 	/**
@@ -246,10 +287,11 @@
 	 * 帯の描画(契約⑥⑦)。波形・幅・高さ・倍率・窓が変わったときだけ描き直す ――
 	 * 再生ヘッドは別の要素なので、毎フレーム canvas を描き直す必要がない。
 	 *
-	 * 高さと倍率と窓は**この effect の本体で読んで引数で渡す**。`drawWaveform` の中で
+	 * 高さと倍率は**この effect の本体で読んで引数で渡す**。`drawWaveform` の中で
 	 * モジュールスコープの値を読む形にすると Svelte の依存追跡から漏れ、変えても
 	 * canvas が古いまま残る。解析尺と横軸の尺(要件#47 追補b)も同じ理由でここで読む
-	 * ―― 等倍の山の割り付け幅がこの2つで決まる。
+	 * ―― 等倍の山の割り付け幅がこの2つで決まる。窓の包絡は `waveformLanes` を読む
+	 * (集め直しは倍率と窓が変わったときだけ=高さのドラッグでは走らない・要件#50 追補f)。
 	 */
 	$effect(() => {
 		const canvas = waveformCanvas;
@@ -257,18 +299,15 @@
 		const width = waveformWidth;
 		const height = waveformHeight;
 		const zoom = waveformZoom;
-		const start = waveformWindowStart;
-		const seconds = waveformSeconds;
 		const axisSeconds = barDuration;
 		if (!canvas || width <= 0) return;
-		// 解析中と縮退のときは消す ―― 前のファイルの波形が残ったまま「解析中」と
-		// 出ていたら、どちらの音を見ているのか判らない。
 		const ready = result?.state === 'ready' ? result : null;
-		const lanes = ready ? windowLanes(ready, zoom, start, seconds) : null;
 		// 等倍のレーンは解析したバッファ全体(末尾の詰め物込み)を割ったものなので、
 		// 山だけを解析尺/横軸の尺で伸縮した幅に割り付けて時刻に合わせる(追補b)。
 		const laneWidth = waveformLaneDrawWidth(zoom, width, ready?.durationSeconds, axisSeconds);
-		drawWaveform(canvas, lanes, width, height, laneWidth);
+		// 解析中と縮退のときは `waveformLanes` が null =消す ―― 前のファイルの波形が
+		// 残ったまま「解析中」と出ていたら、どちらの音を見ているのか判らない。
+		drawWaveform(canvas, waveformLanes, width, height, laneWidth);
 	});
 
 	// 保存値の復元と、ウインドウ高の変化への追従(契約⑪)。clamp をモジュールの
@@ -394,15 +433,18 @@
 	 * - **Option+ホイール** = 倍率(アンカーはポインタの x ―― 摘まんだところが動かない)
 	 * - **ctrl+ホイール** = 何もしない(`preventDefault` もせず macOS の画面拡大に譲る)
 	 * - **Shift+ホイール / 横成分** = 窓の横送り
+	 *
+	 * アンカーの x は帯ではなく canvas(=横軸)の左端から測る(要件#41 追補g 契約3)。
 	 */
-	function onWaveformWheel(event: WheelEvent & { currentTarget: HTMLElement }): void {
+	function onWaveformWheel(event: WheelEvent): void {
 		if (barDuration <= 0) return;
 		if (event.ctrlKey) return;
 
 		if (event.altKey) {
 			event.preventDefault();
+			if (!waveformCanvas) return;
 			const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
-			const bounds = event.currentTarget.getBoundingClientRect();
+			const bounds = waveformCanvas.getBoundingClientRect();
 			applyWaveformZoom(waveformZoom * wheelZoomFactor(delta), event.clientX - bounds.left);
 			return;
 		}
@@ -439,12 +481,17 @@
 	 * 波形クリックでシーク(契約⑧)。窓と倍率を通して x を時刻へ直し、`currentTime` へ
 	 * 直行する ―― **フレーム索引(要件#37)の吸着は通さない**。音声にフレームという
 	 * 単位は存在せず、吸着先が無いものへ寄せる意味がない。
+	 *
+	 * 受け口は帯全体で、x と幅は canvas(=横軸)の rect から取る(要件#41 追補g 契約5・6)。
+	 * 左右の余白で押すと x が横軸の外に出て、`windowXToTime` の clamp が窓の端へ寄せる
+	 * (等倍なら先頭/末尾)。
 	 */
-	function onWaveformClick(event: MouseEvent & { currentTarget: HTMLCanvasElement }): void {
+	function onWaveformClick(event: MouseEvent): void {
 		const el = audio;
-		if (!el || barDuration <= 0) return;
+		const canvas = waveformCanvas;
+		if (!el || !canvas || barDuration <= 0) return;
 
-		const bounds = event.currentTarget.getBoundingClientRect();
+		const bounds = canvas.getBoundingClientRect();
 		const next = windowXToTime(
 			event.clientX - bounds.left,
 			bounds.width,
@@ -638,28 +685,49 @@
 					帯の上のホイールで拡大縮小と横送り(契約⑦)。キーボード操作は設けない
 					―― ⌘+/− は要件#36 のビューアズームと衝突する。代わりの手は下の3ボタン。
 
-					`wheel` はここでしか受けないので、a11y 検査の「対話要素でない要素の
-					イベント」だけ黙らせる(クリックでシークする経路は canvas 側が持つ)。
+					`wheel` と `click` はここで受ける(帯は role の無い `<div>` なので、a11y 検査の
+					「対話要素でない要素のイベント」は出ない)。帯そのものがクリックでシークできる面で、左右の
+					余白で押しても近い端へ跳ぶ(要件#41 追補g 契約5)。クリックの受け口を
+					canvas から帯へ広げたぶん「role が無い」「キー操作が無い」は咎められるが、
+					キーでのシークはシークバーと ←/→ が持つので、帯にキーの受け口は足さない(この2つだけ黙らせる)。
 				-->
-				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<div
 					class="audio-waveform"
 					style="height: {waveformHeight}px"
-					bind:clientWidth={waveformWidth}
 					onwheel={onWaveformWheel}
+					onclick={onWaveformClick}
 				>
 					<!--
-						`bind:this` は描画 effect の生命線 ―― これが無いと canvas は永遠に
-						undefined で、解析は成功しているのに帯だけが無地になる(2026-09-01 の
-						動画側の実機不具合)。AudioViewer.wiring.test.ts が `getContext('2d')` の
-						呼び出しでこの結線を見張っている。
+						横軸の器(要件#41 追補g 契約6・7)。帯の両端をつまみの可動域ぶん内側へ
+						寄せ、canvas と再生ヘッドをシークバーのつまみの中心と同じ横軸に乗せる。
+						幅はここで測る(`waveformWidth` =横軸の長さ)。
 					-->
-					<canvas
-						class="waveform-canvas"
-						bind:this={waveformCanvas}
-						aria-label="Audio waveform (click to seek)"
-						onclick={onWaveformClick}
-					></canvas>
+					<div
+						class="waveform-axis"
+						style="left: {WAVEFORM_AXIS_INSET_PX}px; right: {WAVEFORM_AXIS_INSET_PX}px"
+						bind:clientWidth={waveformWidth}
+					>
+						<!--
+							`bind:this` は描画 effect の生命線 ―― これが無いと canvas は永遠に
+							undefined で、解析は成功しているのに帯だけが無地になる(2026-09-01 の
+							動画側の実機不具合)。AudioViewer.wiring.test.ts が `getContext('2d')` の
+							呼び出しでこの結線を見張っている。
+						-->
+						<canvas
+							class="waveform-canvas"
+							bind:this={waveformCanvas}
+							aria-label="Audio waveform (click to seek)"
+						></canvas>
+						<!--
+							再生ヘッドは窓の中に居るときだけ(契約⑦)。窓の外を端へ clamp して
+							描くと、居ない場所にヘッドが立つ。文言が出ている間は出さない。
+						-->
+						{#if !waveformNote && waveformHeadX !== null}
+							<div class="waveform-head" style="transform: translateX({waveformHeadX}px)"></div>
+						{/if}
+					</div>
 					{#if waveformNote}
 						<span class="waveform-note">{waveformNote}</span>
 					{:else}
@@ -671,13 +739,6 @@
 						{#each waveformLaneLabels as label (label.text)}
 							<span class="waveform-lane-label" style="top: {label.y}px">{label.text}</span>
 						{/each}
-						<!--
-							再生ヘッドは窓の中に居るときだけ(契約⑦)。窓の外を端へ clamp して
-							描くと、居ない場所にヘッドが立つ。
-						-->
-						{#if waveformHeadX !== null}
-							<div class="waveform-head" style="transform: translateX({waveformHeadX}px)"></div>
-						{/if}
 					{/if}
 				</div>
 			{/if}
@@ -701,6 +762,7 @@
 					onseeked={() => (position = audio?.currentTime ?? 0)}
 					onvolumechange={() => (audioMuted = audio?.muted ?? false)}
 					ondurationchange={() => (mediaDuration = audio?.duration)}
+					onloadedmetadata={() => onDisplayed?.()}
 					onerror={() => (loadFailed = true)}
 				></audio>
 			{/key}
@@ -898,20 +960,35 @@
 		border-radius: 4px;
 		background-color: var(--color-bg-secondary);
 		color: var(--color-text-secondary);
+		cursor: pointer; /* 左右の余白もクリックでシークできる(要件#41 追補g 契約6) */
+	}
+
+	/*
+	 * 横軸の器(要件#41 追補g 契約6)。左右の位置は inline style が持つ(値は
+	 * `SEEK_THUMB_INSET_PX` から出す=ここに数値を書かない)。`overflow` で切らない ――
+	 * 尺ちょうどの再生ヘッドは器の右端のすぐ外の 1px に立つ(切るのは帯の側)。
+	 */
+	.waveform-axis {
+		position: absolute;
+		top: 0;
+		bottom: 0;
 	}
 
 	.waveform-canvas {
 		display: block;
 		width: 100%;
 		height: 100%;
-		cursor: pointer;
 	}
 
-	/* 再生ヘッド。左端を基準に translateX だけで動かす(再描画を伴わない)。 */
+	/*
+	 * 再生ヘッド。左端を基準に translateX だけで動かす(再描画を伴わない)。
+	 * 器の外に置く L/R ラベルより後ろへ潜らないよう、重なり順を1段上げる。
+	 */
 	.waveform-head {
 		position: absolute;
 		top: 0;
 		left: 0;
+		z-index: 1;
 		width: 1px;
 		height: 100%;
 		background-color: var(--color-text-primary);

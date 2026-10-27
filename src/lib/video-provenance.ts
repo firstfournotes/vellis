@@ -188,8 +188,11 @@ export type SegmentCard = {
 	sources: SourceCard[];
 };
 
-/** 鮮度の警告(§4.7)。順は [名前, 尺] で固定。 */
-export type ProvenanceWarning = 'video-name-mismatch' | 'duration-mismatch';
+/**
+ * マップの警告。順は [名前, 尺, オーバーレイ] で固定。名前と尺は鮮度の警告(§4.7)、
+ * オーバーレイは幅 0・負で一度も表示されないものがあることの警告(要件#40 追補a)。
+ */
+export type ProvenanceWarning = 'video-name-mismatch' | 'duration-mismatch' | 'overlay-empty-range';
 
 // ---------------------------------------------------------------------------
 // 定数
@@ -616,12 +619,29 @@ export function sourceTimeAt(
  * 素材時刻がフレーム境界の正確な倍数のとき(NTSC の 100.1 秒 = 3000 フレーム目ちょうど)、
  * 浮動小数のまま掛け算すると途中の丸めで境界のわずかに手前に落ち、番号が1つ小さくなる。
  *
+ * 境目の手前は 1 刻みだけ許す(追補10・backlog 232)。フレーム n の境目 `n × den / num` 秒を
+ * 刻みに丸めた値を r_n とし、刻み k が `k ≥ r_n − 1` なら n 以上とみなす。素材時刻は
+ * `from.sec`(切り捨て側)と `start.sec`(切り上げ側)の丸めが重なって境目より最大 1 刻み手前に
+ * 落ちうるため。「k に 1 刻み足してから切り捨てる」では、境目が切り捨て側に丸まった r_n − 1
+ * (端数 1/3 など)を拾えないので、丸めた境目そのものと整数で比べる。
+ *
+ * 答えは「k + 1 までの切り捨て」(真の境目が k + 1 以下 → r_n も k + 1 以下)か、その次の
+ * フレーム(真の境目が k + 1 を半刻み未満だけ越え、丸めると k + 1 になる)のどちらか。
+ * 整数の積 `(k + 1) × num` が倍精度の整数の範囲(2^53)に収まる長さまでは厳密
+ * (59.94 fps で約 41 時間。許容を入れる前の `k × num` と同じ範囲)。
+ *
  * VFR の素材(`fps` が null)はフレーム番号が定義できないので null =出さない。
  */
 export function sourceFrameAt(fps: Rational | null, inputSec: number): number | null {
 	if (!fps) return null;
 	const ticks = Math.round(inputSec * SECOND_SCALE);
-	return Math.floor((ticks * fps.num) / (fps.den * SECOND_SCALE));
+	const ticksDen = fps.den * SECOND_SCALE;
+	// 真の境目が k + 1 刻み以下のフレームのうち最大のもの(r_n ≤ k + 1 は必ず成り立つ)。
+	const floored = Math.floor(((ticks + 1) * fps.num) / ticksDen);
+	// 次のフレームの真の境目が k + 1 を越える量(× num)。半刻み未満なら丸めて r_n = k + 1。
+	const next = floored + 1;
+	const overshoot = next * ticksDen - (ticks + 1) * fps.num;
+	return 2 * overshoot < fps.num ? next : floored;
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +846,9 @@ function uriFileName(uri: string): string {
  *
  * 実尺が判らない(索引も `<video>` の申告も無い)ときは尺を判定しない ―― 判らないことを
  * 「ずれている」と言い換えない。
+ *
+ * 3 つ目は幅 0・負のオーバーレイの警告(要件#40 追補a)。区間は入口で不整合を弾くが、
+ * オーバーレイは弾かずに帯で知らせるだけ(表示しないのは今までどおり)。
  */
 export function provenanceWarnings(
 	map: ProvenanceMap,
@@ -839,6 +862,12 @@ export function provenanceWarnings(
 		Math.abs(map.duration.sec - actualDurationSec) > DURATION_TOLERANCE_SECONDS
 	) {
 		warnings.push('duration-mismatch');
+	}
+	// 要件#40 追補a: 終了の秒 ≤ 開始の秒のオーバーレイは `overlaysAt` の半開区間に入る時刻が
+	// 無く、黙って一度も表示されない。いくつあっても 1 件。秒が読めない(NaN)ものは比較が
+	// false になり対象外(起案時判断 (b))。frame は見ない
+	if (map.overlays.some((overlay) => overlay.end.sec <= overlay.start.sec)) {
+		warnings.push('overlay-empty-range');
 	}
 	return warnings;
 }

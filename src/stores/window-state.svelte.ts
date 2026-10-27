@@ -31,6 +31,14 @@ export type DocumentPayload = {
 	modified: number | null;
 };
 
+/**
+ * `file_removed` 1件の扱い(要件#48 追補g)。
+ * - `keep`: 表示中の文書で dirty → 文書・バッファ・モードを保ち、印を立てる
+ * - `close`: 表示中の文書で dirty でない → 従来どおり閉じる
+ * - `ignore`: 表示中の文書ではない(文書が無いときも)
+ */
+export type FileRemovedDecision = 'keep' | 'close' | 'ignore';
+
 export type Entry = {
 	uri: string;
 	name: string;
@@ -123,6 +131,14 @@ class WindowState {
 	 */
 	externalChange = $state<{ content: string; modified: number | null } | null>(null);
 
+	/**
+	 * 編集中(dirty)の文書のファイルが外部で削除された印(要件#48 追補g)。
+	 * 立っている間は Viewer が帯で知らせる。消えるのは保存の成功(`markSaved`)・
+	 * 同じ文書の `file_changed`・文書や root の切替(`resetEditState`)・保存せずに
+	 * 編集を終えたとき(`endEdit` が文書ごと閉じる)。
+	 */
+	externalRemoved = $state(false);
+
 	/** 編集バッファが保存済み content と違うか(契約④)。閲覧中は常に false。 */
 	dirty = $derived(
 		this.editBuffer !== null &&
@@ -151,6 +167,7 @@ class WindowState {
 		this.editBuffer = null;
 		this.lastSavedHash = null;
 		this.externalChange = null;
+		this.externalRemoved = false;
 	}
 
 	/**
@@ -174,8 +191,18 @@ class WindowState {
 		this.editBuffer = content;
 	}
 
-	/** 閲覧へ戻る(Esc / Done)。バッファと衝突表示は捨てる。 */
+	/**
+	 * 閲覧へ戻る(Esc / Done)。バッファと衝突表示は捨てる。
+	 *
+	 * 要件#48 追補g: 外部で削除された印が立ったまま編集を終える=保存せずに終える
+	 * (保存が成功していれば `markSaved` が印を消している)。守るものが無くなるので
+	 * 閲覧へ戻らず文書を閉じる。
+	 */
 	endEdit(): void {
+		if (this.externalRemoved) {
+			this.clearDocument();
+			return;
+		}
 		this.editMode = 'view';
 		this.editBuffer = null;
 		this.externalChange = null;
@@ -195,6 +222,8 @@ class WindowState {
 		}
 		this.lastSavedHash = contentHash(content);
 		this.externalChange = null;
+		// 要件#48 追補g: 同じパスに書き直したので、削除の印も用済み。
+		this.externalRemoved = false;
 	}
 
 	/**
@@ -203,23 +232,51 @@ class WindowState {
 	 *
 	 * - `ignore-echo`: 何もしない。自分が書いた内容がそのまま返ってきただけ
 	 * - `external-conflict`: 文書は動かさず、外部版を脇に置く(画面はバナーを出す)
-	 * - `apply`: 従来どおり差し替える。編集中(未変更)なら失うものが無いので
-	 *   バッファも外部版へ揃える — 揃えないと、触ってもいないのに dirty になる
+	 * - `apply`: 従来どおり差し替える。編集中(未変更、または編集と同じ中身)なら
+	 *   失うものが無いのでバッファも外部版へ揃える — 揃えないと、触ってもいないのに
+	 *   dirty になる。脇に置いた外部版があれば畳む(要件#48 追補h 契約3=帯は出ない)
 	 */
 	applyFileChanged(payload: DocumentPayload): FileChangedDecision {
+		// 要件#48 追補g: 削除の印が立った文書の `file_changed` =作り直された。印を
+		// 下ろし、以後は契約⑥ のとおり(編集と違えば外部変更の帯)。
+		if (this.currentDocument?.uri === payload.uri) this.externalRemoved = false;
 		const decision = decideFileChanged({
 			incomingContent: payload.content,
 			lastSavedHash: this.lastSavedHash,
 			mode: this.editMode,
 			dirty: this.dirty,
+			editBuffer: this.editBuffer,
 		});
 		if (decision === 'external-conflict') {
 			this.externalChange = { content: payload.content, modified: payload.modified };
 		} else if (decision === 'apply') {
 			this.currentDocument = payload;
 			if (this.editMode === 'edit') this.editBuffer = payload.content;
+			this.externalChange = null;
 		}
 		return decision;
+	}
+
+	/**
+	 * `file_removed` 1件を扱う(要件#48 追補g)。返り値は呼び出し側の記録・試験用。
+	 *
+	 * 表示中の文書が dirty なら閉じない — 削除して作り直す書き方のツールが書き換えた
+	 * だけでも、未保存の編集が黙って消えるため。文書・バッファ・モードを保って印を
+	 * 立てる(Viewer が帯で知らせ、保存すれば同じパスに書き直す)。dirty でなければ
+	 * 従来どおり閉じる(編集中でも未変更なら閉じる。画像などのバイナリは dirty に
+	 * ならないので常にこちら=要件#22 ②)。
+	 */
+	applyFileRemoved(uri: string): FileRemovedDecision {
+		if (this.currentDocument?.uri !== uri) return 'ignore';
+		if (this.dirty) {
+			this.externalRemoved = true;
+			// 要件#48 追補h 契約1: 脇に置いた外部版はもう無いので、外部変更の帯
+			// (Reload)を畳む。削除の帯と同時に出さない。
+			this.externalChange = null;
+			return 'keep';
+		}
+		this.clearDocument();
+		return 'close';
 	}
 
 	/** 衝突表示の「読み直す」(契約⑥)。外部版を採用し、編集中の変更は捨てる。 */
