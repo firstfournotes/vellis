@@ -9,22 +9,16 @@
  * の import 先で、`@tauri-apps/plugin-dialog` を巻き込みたくないため(IPC を
  * モックした純関数テストの経路にダイアログの実体を持ち込まない)。
  *
- * 3択を `ask`(2択)2枚で表しているのは依存を増やさないため(契約⑦)。
- * 1枚目で「進むか / やめるか」、進むと決めた後の2枚目で「保存するか / 捨てるか」
- * を聞く — macOS の Save / Don't Save / Cancel と選べる結果は同じで、順序だけが
- * 「やめる」を先に置いた形になる。見え方は人間ゲート(acceptance/acceptance.md)。
+ * 3択は `message` の `buttons: { yes, no, cancel }` で1枚に出す(追補o)— `ask` と
+ * 同じ IPC なので依存も capability も増えない。macOS では yes(Save)が Return の
+ * 既定になる。見え方は人間ゲート(acceptance/acceptance.md)。
  */
-import { ask } from '@tauri-apps/plugin-dialog';
+import { message } from '@tauri-apps/plugin-dialog';
 import { saveDocument } from '$lib/save-document';
 import { windowState } from '../stores/window-state.svelte';
 
 export const UNSAVED_TITLE = 'Unsaved Changes';
 
-/** 1枚目 — 進んでよいか(いいえ=操作そのものを取りやめる)。 */
-export const UNSAVED_PROCEED_MESSAGE =
-	'Your edits have not been saved yet. Do you want to continue?';
-
-/** 2枚目 — 進むと決めた後、保存してから進むか捨てて進むか。 */
 export const UNSAVED_SAVE_MESSAGE = 'Do you want to save your changes before continuing?';
 
 export type UnsavedChoice = 'save' | 'discard' | 'cancel';
@@ -33,28 +27,24 @@ export type UnsavedChoice = 'save' | 'discard' | 'cancel';
  * 保存していない変更の扱いを聞く。dirty でなければ何も聞かずに `discard`
  * (=失うものが無いのでそのまま進む)を返す。
  *
- * ダイアログ(`ask`)そのものが失敗したら(1枚目でも2枚目でも)`cancel` を返す
- * (要件#48 追補k)— 聞けなかったものを「進んでよい」とは取らず、編集を残して
- * 操作を取りやめる。失敗は `console.error` にだけ残す(出せない状況で別の
- * ダイアログを重ねない)。
+ * 戻り値は押されたボタンの文言。`Save` / `Don't Save` 以外(Cancel・Esc・想定外の
+ * 値)はすべて `cancel` — 分からない答えを「進んでよい」とは取らない。
+ *
+ * ダイアログ(`message`)そのものが失敗したら `cancel` を返す(要件#48 追補k)—
+ * 聞けなかったものを「進んでよい」とは取らず、編集を残して操作を取りやめる。
+ * 失敗は `console.error` にだけ残す(出せない状況で別のダイアログを重ねない)。
  */
 export async function askUnsavedChoice(dirty: boolean): Promise<UnsavedChoice> {
 	if (!dirty) return 'discard';
 	try {
-		const proceed = await ask(UNSAVED_PROCEED_MESSAGE, {
+		const answer = await message(UNSAVED_SAVE_MESSAGE, {
 			title: UNSAVED_TITLE,
 			kind: 'warning',
-			okLabel: 'Continue',
-			cancelLabel: 'Cancel',
+			buttons: { yes: 'Save', no: "Don't Save", cancel: 'Cancel' },
 		});
-		if (!proceed) return 'cancel';
-		const save = await ask(UNSAVED_SAVE_MESSAGE, {
-			title: UNSAVED_TITLE,
-			kind: 'warning',
-			okLabel: 'Save',
-			cancelLabel: "Don't Save",
-		});
-		return save ? 'save' : 'discard';
+		if (answer === 'Save') return 'save';
+		if (answer === "Don't Save") return 'discard';
+		return 'cancel';
 	} catch (err) {
 		console.error('Unsaved Changes dialog failed; keeping the edits', err);
 		return 'cancel';

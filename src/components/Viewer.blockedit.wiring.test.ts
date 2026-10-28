@@ -100,19 +100,21 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 	openUrl: vi.fn(async () => undefined),
 	openPath: vi.fn(async () => undefined),
 }));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn() }));
+// 要件#48 追補o(2026-10-28・由谷承認の書き換え): 確認は `ask` 2 枚から `message` 1 枚の
+// 3 択(Save / Don't Save / Cancel)へ。確認の部分(モック・答え・回数)だけを直した。
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn() }));
 vi.mock('$lib/mermaid-mounter', () => ({
 	mountMermaid: vi.fn(async () => undefined),
 }));
 
 import { invoke } from '$lib/ipc';
-import { ask } from '@tauri-apps/plugin-dialog';
+import { message } from '@tauri-apps/plugin-dialog';
 import { saveDocument } from '$lib/save-document';
 import { confirmDiscardEdits } from '$lib/edit-guard';
 
 const invokeMock = vi.mocked(invoke);
-/** 追補a(5)の「編集を終える」/ ⌘E は dirty なら `ask` 2枚(続ける→破棄する)を通る。 */
-const askMock = vi.mocked(ask);
+/** 追補a(5)の「編集を終える」/ ⌘E は dirty なら `message` 1 枚(Save / Don't Save / Cancel)を通る。 */
+const messageMock = vi.mocked(message);
 
 // ---------------------------------------------------------------------------
 // フィクスチャ
@@ -939,15 +941,14 @@ beforeAll(async () => {
 });
 
 /**
- * 「編集を終える」の破棄。dirty なので edit-guard の `ask` が2枚出る
- * (1枚目=続ける・2枚目=破棄する)。保存は走らず `endEdit()` で閲覧へ戻る。
+ * 「編集を終える」の破棄。dirty なので edit-guard の `message` が 1 枚出る
+ * (Save / Don't Save / Cancel → Don't Save)。保存は走らず `endEdit()` で閲覧へ戻る。
  */
 async function finishEditDiscarding() {
-	askMock.mockResolvedValueOnce(true);
-	askMock.mockResolvedValueOnce(false);
+	messageMock.mockResolvedValueOnce("Don't Save");
 	await fireEvent.click(screen.getByTestId('edit-done'));
 	await settle();
-	expect(askMock).toHaveBeenCalledTimes(2);
+	expect(messageMock).toHaveBeenCalledTimes(1);
 	expect(invokeMock).not.toHaveBeenCalledWith('save_document', expect.anything());
 }
 
@@ -955,15 +956,14 @@ async function finishEditDiscarding() {
  * ⌘E(Edit メニュー)。実体は +page.svelte の `toggleEditMode` で、メニュー
  * イベントはこのテストから鳴らせない。Viewer からは windowState の遷移としてしか
  * 見えないので、その遷移をそのまま写す: 閲覧なら `beginEdit()`・編集中で dirty なら
- * `confirmDiscardEdits()`(edit-guard の `ask` 2枚)・非 dirty なら `endEdit()`。
- * 破棄のときは `ask` に続ける→破棄すると答える。
+ * `confirmDiscardEdits()`(edit-guard の `message` 1 枚)・非 dirty なら `endEdit()`。
+ * 破棄のときは `message` に Don't Save と答える。
  */
 async function commandE() {
 	if (windowState.editMode !== 'edit') {
 		windowState.beginEdit();
 	} else if (windowState.dirty) {
-		askMock.mockResolvedValueOnce(true);
-		askMock.mockResolvedValueOnce(false);
+		messageMock.mockResolvedValueOnce("Don't Save");
 		await confirmDiscardEdits();
 	} else {
 		windowState.endEdit();
@@ -1045,7 +1045,7 @@ describe('Viewer — 閲覧へ戻ったら確定済み差し替えの記録も�
 		await editAndCommit(container, p1, P1_LONGER);
 
 		await commandE();
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(windowState.editMode).toBe('view');
 		expect(windowState.editBuffer).toBeNull();
 
@@ -1381,11 +1381,11 @@ function expectBodyShows(container: HTMLElement, html: string, paragraphTexts: s
 	expect((body(container).textContent ?? '').trim()).toBe(textOfHtml(html));
 }
 
-/** 「編集を終える」(非 dirty)。失うものが無いので `ask` は出ず、そのまま閲覧へ戻る。 */
+/** 「編集を終える」(非 dirty)。失うものが無いので確認(`message`)は出ず、そのまま閲覧へ戻る。 */
 async function finishEditClean() {
 	await fireEvent.click(screen.getByTestId('edit-done'));
 	await settle();
-	expect(askMock).not.toHaveBeenCalled();
+	expect(messageMock).not.toHaveBeenCalled();
 	expect(windowState.editMode).toBe('view');
 }
 
@@ -1407,7 +1407,7 @@ describe('Viewer — 未確定の編集は閲覧へ戻ると画面からも消�
 		expect(container.textContent).not.toContain(TYPED);
 	});
 
-	it('文字を打って確定しないまま「編集を終える」で閲覧へ戻る: 段落の表示が編集前の文字に戻る(ask は出ない)', async () => {
+	it('文字を打って確定しないまま「編集を終える」で閲覧へ戻る: 段落の表示が編集前の文字に戻る(確認は出ない)', async () => {
 		const { container } = mountDoc(SEQ_MD, renderedSeq);
 		await typeInto(paragraphs(container)[1], TYPED);
 		expect(windowState.dirty).toBe(false);
@@ -1506,7 +1506,7 @@ describe('Viewer — 破棄で閲覧へ戻ったら画面も原文に揃う(契�
 		await editAndCommit(container, paragraphs(container)[0], P1_LONGER);
 
 		await commandE();
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(windowState.editBuffer).toBeNull();
 
 		expectBodyShows(container, renderedSeq.html, [P1, P2, P3]);
@@ -1705,7 +1705,7 @@ describe('Viewer — 入れ子のブロックを内側→外側の順に掴ん�
 		expectOnlyEditable(container, li);
 
 		await commandE();
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(windowState.editMode).toBe('view');
 		expect(windowState.editBuffer).toBeNull();
 		expect(windowState.currentDocument?.content).toBe(LOOSE_MD);

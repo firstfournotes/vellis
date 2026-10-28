@@ -35,10 +35,12 @@
  *
  * ## スタブの設計(VideoViewer.wiring.test.ts の家風)
  * - $lib/ipc / @tauri-apps/plugin-opener: モジュールモック(Tauri 実体なし)
- * - @tauri-apps/plugin-dialog: `ask` をモック(追補c で Viewer が edit-guard を
+ * - @tauri-apps/plugin-dialog: `message` をモック(追補c で Viewer が edit-guard を
  *   通るため)。edit-guard 自体はモックしない — 関門の実体(`confirmDiscardEdits`)
- *   を通し、`ask` の呼び出し回数・順序・返り値で3択を再現する
- *   (menu-open.acceptance.test.ts の家風)
+ *   を通し、`message` の返り値(押したボタンの文言)で3択を再現する
+ *   (menu-open.acceptance.test.ts の家風)。要件#48 追補o(2026-10-28・由谷承認の
+ *   書き換え)で `ask` 2 枚から `message` 1 枚の 3 択へ。確認の部分だけを直し、確認の
+ *   後の期待値(編集中のまま・閲覧へ戻る・保存してから戻る)は変えていない
  * - mermaid: 本テストの html に `.vellis-mermaid` は無く、dynamic import は
  *   発火しない(mermaid-mounter の設計)
  */
@@ -56,13 +58,13 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 	openUrl: vi.fn(async () => undefined),
 	openPath: vi.fn(async () => undefined),
 }));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn() }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn() }));
 
-import { ask } from '@tauri-apps/plugin-dialog';
+import { message } from '@tauri-apps/plugin-dialog';
 import { invoke } from '$lib/ipc';
-import { UNSAVED_PROCEED_MESSAGE, UNSAVED_SAVE_MESSAGE } from '$lib/edit-guard';
+import { UNSAVED_SAVE_MESSAGE } from '$lib/edit-guard';
 
-const askMock = vi.mocked(ask);
+const messageMock = vi.mocked(message);
 const invokeMock = vi.mocked(invoke);
 
 // ---------------------------------------------------------------------------
@@ -449,7 +451,7 @@ describe('Viewer — dirty 時の Esc / Done は confirmDiscardEdits を通る(�
 	}
 
 	/**
-	 * Esc / Done ハンドラは ask → (ask) → (保存) → endEdit と await を連ねるため、
+	 * Esc / Done ハンドラは message → (保存) → endEdit と await を連ねるため、
 	 * fireEvent の解決だけでは途中までしか進まない。マイクロタスクを数周流して
 	 * 連鎖全体を確定させる。
 	 */
@@ -458,58 +460,56 @@ describe('Viewer — dirty 時の Esc / Done は confirmDiscardEdits を通る(�
 		await tick();
 	}
 
-	it('dirty で Esc → 1枚目キャンセルなら編集中のまま(バッファ・contenteditable 維持)', async () => {
+	it('dirty で Esc → Cancel なら編集中のまま(バッファ・contenteditable 維持)', async () => {
 		const { container, pre } = await renderDirty();
-		askMock.mockResolvedValueOnce(false); // 1枚目: キャンセル
+		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
 
 		await fireEvent.keyDown(pre, { key: 'Escape' });
 		await settle();
 
-		expect(askMock).toHaveBeenCalledTimes(1);
-		expect(askMock.mock.calls[0][0]).toBe(UNSAVED_PROCEED_MESSAGE);
+		expect(messageMock).toHaveBeenCalledTimes(1);
+		expect(messageMock.mock.calls[0][0]).toBe(UNSAVED_SAVE_MESSAGE);
 		expect(windowState.editMode).toBe('edit');
 		expect(windowState.editBuffer).toBe(EDITED);
 		expect(isEditable(getPre(container))).toBe(true);
 	});
 
-	it('dirty で Done クリック → 1枚目キャンセルなら編集中のまま', async () => {
+	it('dirty で Done クリック → Cancel なら編集中のまま', async () => {
 		const { container } = await renderDirty();
-		askMock.mockResolvedValueOnce(false); // 1枚目: キャンセル
+		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
 
 		await fireEvent.click(screen.getByTestId('edit-done'));
 		await settle();
 
-		expect(askMock).toHaveBeenCalledTimes(1);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(windowState.editMode).toBe('edit');
 		expect(windowState.editBuffer).toBe(EDITED);
 		expect(isEditable(getPre(container))).toBe(true);
 	});
 
-	it('dirty で Esc → 続ける→破棄するなら閲覧へ戻りバッファ破棄・保存は走らない', async () => {
+	it("dirty で Esc → Don't Save(破棄)なら閲覧へ戻りバッファ破棄・保存は走らない", async () => {
 		const { container, pre } = await renderDirty();
-		askMock.mockResolvedValueOnce(true); // 1枚目: 続ける
-		askMock.mockResolvedValueOnce(false); // 2枚目: 破棄する
+		messageMock.mockResolvedValueOnce("Don't Save"); // 1 枚の 3 択: 破棄する
 
 		await fireEvent.keyDown(pre, { key: 'Escape' });
 		await settle();
 
-		expect(askMock).toHaveBeenCalledTimes(2);
-		expect(askMock.mock.calls[1][0]).toBe(UNSAVED_SAVE_MESSAGE);
+		expect(messageMock).toHaveBeenCalledTimes(1);
+		expect(messageMock.mock.calls[0][0]).toBe(UNSAVED_SAVE_MESSAGE);
 		expect(windowState.editMode).toBe('view');
 		expect(windowState.editBuffer).toBe(null);
 		expect(isEditable(getPre(container))).toBe(false);
 		expect(invokeMock).not.toHaveBeenCalledWith('save_document', expect.anything());
 	});
 
-	it('dirty で Done → 続ける→保存するなら save_document が呼ばれてから閲覧へ戻る', async () => {
+	it('dirty で Done → Save(保存)なら save_document が呼ばれてから閲覧へ戻る', async () => {
 		await renderDirty();
-		askMock.mockResolvedValueOnce(true); // 1枚目: 続ける
-		askMock.mockResolvedValueOnce(true); // 2枚目: 保存する
+		messageMock.mockResolvedValueOnce('Save'); // 1 枚の 3 択: 保存する
 
 		await fireEvent.click(screen.getByTestId('edit-done'));
 		await settle();
 
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(invokeMock).toHaveBeenCalledWith('save_document', {
 			uri: TXT_URI,
 			content: EDITED,
@@ -538,6 +538,6 @@ describe('Viewer — dirty 時の Esc / Done は confirmDiscardEdits を通る(�
 		await settle();
 		expect(windowState.editMode).toBe('view');
 
-		expect(askMock).not.toHaveBeenCalled();
+		expect(messageMock).not.toHaveBeenCalled();
 	});
 });

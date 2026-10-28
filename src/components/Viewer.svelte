@@ -40,6 +40,7 @@
 	} from '../html/edit';
 	import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
 	import type { NodeMeta, SourceIndex, SourcePosition } from '../markdown/types';
+	import { isBlockType } from '../markdown/source-index';
 	import { buildAnchor, type BuiltAnchor } from '../markdown/selection';
 	import {
 		assembleCodeFence,
@@ -201,8 +202,315 @@
 		}
 		if (focusedEditor === el) return;
 		focusedEditor = el;
-		el.focus();
+		const caret = pendingSourceCaret;
+		pendingSourceCaret = null;
+		// 控えが無い(html の文書の「Source」=追補p 契約2(c))は今までどおり先頭。
+		if (!caret) {
+			el.focus();
+			return;
+		}
+		// 追補p 契約1・2・3: 新しい `<pre>` の focus はキャレットを 0 文字目に置き、
+		// スクロールも先頭へ戻す。スクロールは止め、選択は focus の後に置き直す。
+		el.focus({ preventScroll: true });
+		placeSelection(el, caret.start, caret.end);
+		settleSourceScroll(el, caret);
 	});
+
+	// --- 編集に入った直後のキャレット(要件#48 追補p) ---------------------
+	// 閲覧の DOM と編集の `<pre>` は入れ替わるので、どこに置くかは**入る前**に
+	// 原文の上の文字数へ直して控え、`<pre>` が出たところで置く。
+
+	/**
+	 * ソース編集の `<pre>` が出たら置く選択(原文の上の文字数)。null = 控えが無い。
+	 * `scrollTop` があればそのスクロールを保ち(text)、null ならキャレットの行を
+	 * 画面の上の方へ運ぶ(markdown=閲覧とソースは見た目が違うので保つものが無い)。
+	 * `$state` にしないのは、画面に出るものではないため。
+	 */
+	let pendingSourceCaret: { start: number; end: number; scrollTop: number | null } | null = null;
+
+	/**
+	 * 追補p 契約2: Command + E は Viewer の外(`windowState.beginEdit()`)から入るので、
+	 * 閲覧の DOM が `<pre>` に入れ替わる前(`$effect.pre` は DOM の更新より先に走る)に
+	 * 閲覧の選択とスクロールを控える。ダブルクリックは `handleDoubleClick` が先に
+	 * 控えているので上書きしない。
+	 */
+	$effect.pre(() => {
+		if (!sourceEditing) return;
+		untrack(() => {
+			if (pendingSourceCaret === null) pendingSourceCaret = sourceCaretPlan(null, null);
+		});
+	});
+
+	/**
+	 * ソース編集に入るときのキャレットを決める(追補p 契約1(a)(e)・2)。`point` と
+	 * `target` はダブルクリックの座標と要素で、Command + E ならどちらも null。
+	 * html の文書は閲覧が iframe で中身を読めないので追わない(契約2(c))。
+	 */
+	function sourceCaretPlan(
+		point: { x: number; y: number } | null,
+		target: Element | null,
+	): typeof pendingSourceCaret {
+		const body = bodyEl;
+		const scroller = viewerEl;
+		if (!body || !scroller) return null;
+		const kind = detectFileType(document.uri);
+		if (kind === 'text') return textCaretPlan(body, scroller.scrollTop, point);
+		if (kind === 'markdown') return markdownCaretPlan(body, target);
+		return null;
+	}
+
+	/**
+	 * text(契約1(a)・2): 閲覧の `<pre>` の上で決めた位置を、原文(編集の `<pre>`)の
+	 * 同じ文字へ写す。スクロールは入る前のまま保つ。
+	 */
+	function textCaretPlan(
+		body: HTMLElement,
+		scrollTop: number,
+		point: { x: number; y: number } | null,
+	): typeof pendingSourceCaret {
+		const view = body.querySelector<HTMLElement>('pre.vellis-plaintext');
+		const at = view ? viewTextSelection(view, point) : { start: 0, end: 0 };
+		const source = windowState.editBuffer ?? document.content;
+		return {
+			start: sourceOffsetOfView(source, at.start),
+			end: sourceOffsetOfView(source, at.end),
+			scrollTop,
+		};
+	}
+
+	/**
+	 * 閲覧の `<pre>` の上の文字数で、置く選択を決める。ダブルクリックの点 → 閲覧の
+	 * 選択(ダブルクリックなら始まりに潰す・Command + E なら範囲のまま)→ 見えている
+	 * 最初の行の先頭、の順に採る。
+	 */
+	function viewTextSelection(
+		view: HTMLElement,
+		point: { x: number; y: number } | null,
+	): { start: number; end: number } {
+		const at = point ? offsetAtPoint(view, point.x, point.y) : null;
+		if (at !== null) return { start: at, end: at };
+		const range = selectionStartingIn(view);
+		if (range) {
+			const start = textOffsetIn(view, range.startContainer, range.startOffset);
+			const end =
+				point || !view.contains(range.endContainer)
+					? start
+					: textOffsetIn(view, range.endContainer, range.endOffset);
+			return { start, end };
+		}
+		const line = firstVisibleLineStart(view) ?? 0;
+		return { start: line, end: line };
+	}
+
+	/**
+	 * 追補p 契約1(a): 閲覧の `<pre>` の文字数を、原文の同じ文字の文字数へ写す。
+	 * 閲覧は HTML の解析で `\r\n` が LF 1 文字になるので、手前の `\r\n` の数だけ足す
+	 * (単独の CR は閲覧でも 1 文字)。行末(改行の手前)は `\r` の手前に置く。
+	 */
+	function sourceOffsetOfView(source: string, viewOffset: number): number {
+		let offset = 0;
+		for (let seen = 0; seen < viewOffset && offset < source.length; seen++) {
+			offset += source.startsWith('\r\n', offset) ? 2 : 1;
+		}
+		return offset;
+	}
+
+	/**
+	 * markdown(契約1(e)・2): 閲覧の DOM と原文の文字の対応は追わず、索引に載る要素の
+	 * 原文の先頭に置く。ダブルクリックならその要素(または祖先)のいちばん内側、
+	 * Command + E なら選択の始まりを含むいちばん内側のブロック。どちらも無ければ
+	 * 見えている最初のブロック(2(b))。
+	 */
+	function markdownCaretPlan(body: HTMLElement, target: Element | null): typeof pendingSourceCaret {
+		const from = target ?? selectionStartingIn(body)?.startContainer ?? null;
+		const meta = (from && indexedMetaAt(body, from, target === null)) ?? firstVisibleBlockMeta(body);
+		const base = windowState.editBuffer ?? document.content;
+		const start = meta ? Math.min(currentPositionOf(meta).startOffset, base.length) : 0;
+		return { start, end: start, scrollTop: null };
+	}
+
+	/** `node`(またはその祖先)のうち、`body` の中で索引に載るいちばん内側の要素の meta。 */
+	function indexedMetaAt(body: HTMLElement, node: Node, blocksOnly: boolean): NodeMeta | null {
+		let el: Element | null = node instanceof Element ? node : node.parentElement;
+		while (el && el !== body && body.contains(el)) {
+			const meta = indexedMetaOf(el);
+			if (meta && (!blocksOnly || isBlockType(meta.type))) return meta;
+			el = el.parentElement;
+		}
+		return null;
+	}
+
+	function indexedMetaOf(el: Element): NodeMeta | null {
+		const id = el.getAttribute('data-vellis-node-id');
+		return (id === null ? undefined : index?.byId.get(id)) ?? null;
+	}
+
+	/**
+	 * 契約2(b) markdown: 画面に見えている最初のブロック。上へ流れて見えなくなった
+	 * ブロックを飛ばし、最初に見えているブロックの中に、見えているブロックがあれば
+	 * そちらへ降りる(長いリストなら見えている最初の項目)。
+	 */
+	function firstVisibleBlockMeta(body: HTMLElement): NodeMeta | null {
+		const band = visibleBand();
+		if (!band) return null;
+		let found: { el: Element; meta: NodeMeta } | null = null;
+		for (const el of body.querySelectorAll('[data-vellis-node-id]')) {
+			if (found && !found.el.contains(el)) break;
+			const meta = indexedMetaOf(el);
+			if (!meta || !isBlockType(meta.type)) continue;
+			if (el.getBoundingClientRect().bottom <= band.top + 1) continue;
+			found = { el, meta };
+		}
+		return found?.meta ?? null;
+	}
+
+	/**
+	 * 契約2(b) text: 画面に見えている最初の行の先頭。行の上端がツールバーの下端より
+	 * 下にある最初の行を、行の先頭の文字の矩形で二分探索する(折り返しても行の頭で
+	 * 測る)。矩形が取れない環境(JSDOM)では null。
+	 */
+	function firstVisibleLineStart(view: HTMLElement): number | null {
+		const band = visibleBand();
+		if (!band) return null;
+		const text = view.textContent ?? '';
+		const starts = [0];
+		for (let i = text.indexOf('\n'); i !== -1 && i + 1 < text.length; i = text.indexOf('\n', i + 1)) {
+			starts.push(i + 1);
+		}
+		let lo = 0;
+		let hi = starts.length - 1;
+		let best: number | null = null;
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1;
+			const start = starts[mid]!;
+			const rect = lineRectAt(view, start, text.length);
+			if (!rect) return null;
+			if (rect.top >= band.top - 1) {
+				best = start;
+				hi = mid - 1;
+			} else {
+				lo = mid + 1;
+			}
+		}
+		return best ?? starts[starts.length - 1]!;
+	}
+
+	/**
+	 * スクロール容器の中で、sticky の帯(ツールバー・開いていれば検索バー)に隠れずに
+	 * 見えている範囲(viewport 座標)。
+	 */
+	function visibleBand(): { top: number; bottom: number } | null {
+		const scroller = viewerEl;
+		if (!scroller) return null;
+		const box = scroller.getBoundingClientRect();
+		const findBar = scroller.querySelector<HTMLElement>('.find-bar--sticky');
+		const covered = (toolbarEl?.offsetHeight ?? 0) + (findBar?.offsetHeight ?? 0);
+		return { top: box.top + covered, bottom: box.top + scroller.clientHeight };
+	}
+
+	/**
+	 * 追補p 契約2(b)・3: キャレットを置いたあとのスクロール。text は入る前の
+	 * `scrollTop` に戻す(見えていた行を見えなくしない)。markdown は閲覧とソースで
+	 * 見た目が違うので、キャレットの行を見えている範囲の上の方へ運ぶ。
+	 */
+	function settleSourceScroll(editor: HTMLElement, caret: NonNullable<typeof pendingSourceCaret>) {
+		const scroller = viewerEl;
+		if (!scroller) return;
+		if (caret.scrollTop !== null) {
+			scroller.scrollTop = caret.scrollTop;
+			return;
+		}
+		const band = visibleBand();
+		const rect = lineRectAt(editor, caret.start, (editor.textContent ?? '').length);
+		if (!band || !rect) return;
+		const gap = 8;
+		scroller.scrollTop = Math.max(0, scroller.scrollTop + rect.top - band.top - gap);
+	}
+
+	/**
+	 * 追補p 契約1: 点 (x, y) の文字が `root` の中の何文字目か(`caretRangeFromPoint`)。
+	 * API が無い・null・`root` の外を返したら null。
+	 */
+	function offsetAtPoint(root: Element, x: number, y: number): number | null {
+		const doc = root.ownerDocument;
+		if (typeof doc.caretRangeFromPoint !== 'function') return null;
+		const range = doc.caretRangeFromPoint(x, y);
+		if (!range || !root.contains(range.startContainer)) return null;
+		return textOffsetIn(root, range.startContainer, range.startOffset);
+	}
+
+	/** (node, offset) が `root` の `textContent` の上で何文字目か。 */
+	function textOffsetIn(root: Node, node: Node, offset: number): number {
+		const probe = (root.ownerDocument ?? window.document).createRange();
+		probe.selectNodeContents(root);
+		probe.setEnd(node, offset);
+		return probe.toString().length;
+	}
+
+	/** 選択の始まりが `root` の中にあれば、その Range。 */
+	function selectionStartingIn(root: Element): Range | null {
+		const sel = root.ownerDocument.defaultView?.getSelection();
+		const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+		return range && root.contains(range.startContainer) ? range : null;
+	}
+
+	/**
+	 * `root` の `textContent` の上の文字数を (テキストノード, offset) へ。`preferNext` は
+	 * ノードの境目で次のノードの頭を採る(矩形を測る始点を前の行の末尾にしないため)。
+	 * テキストノードが無ければ `root` の頭。
+	 */
+	function textPoint(root: Node, offset: number, preferNext = false): [Node, number] {
+		const walker = (root.ownerDocument ?? window.document).createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		let seen = 0;
+		let last: Text | null = null;
+		while (walker.nextNode()) {
+			const t = walker.currentNode as Text;
+			last = t;
+			const end = seen + t.data.length;
+			if (preferNext ? offset < end : offset <= end) return [t, Math.max(0, offset - seen)];
+			seen = end;
+		}
+		return last ? [last, last.data.length] : [root, 0];
+	}
+
+	/**
+	 * `el` の中の文字数 [start, end] を選ぶ(潰れていればキャレット)。Shadow DOM の中
+	 * (HTML の編集面)では、取れればそのツリーの選択を使う(`insertSurfaceText` と同じ)。
+	 */
+	function placeSelection(el: HTMLElement, start: number, end: number) {
+		const root = el.getRootNode() as Partial<{ getSelection: () => Selection | null }>;
+		const sel = root.getSelection?.() ?? el.ownerDocument.defaultView?.getSelection() ?? null;
+		if (!sel) return;
+		const [a, aOffset] = textPoint(el, start);
+		if (start === end) {
+			sel.collapse(a, aOffset);
+			return;
+		}
+		const [b, bOffset] = textPoint(el, end);
+		sel.setBaseAndExtent(a, aOffset, b, bOffset);
+	}
+
+	/**
+	 * `root` の中の文字数 `offset` の行の矩形(viewport 座標)。その文字 1 つの Range で
+	 * 測る(潰れた Range は WebKit で矩形が空のことがある)。高さが無ければ潰れた
+	 * Range でも測ってみる。末尾は直前の文字で測る。測れなければ null。
+	 */
+	function lineRectAt(root: Node, offset: number, length: number): DOMRect | null {
+		const from = offset < length ? offset : Math.max(0, length - 1);
+		const to = Math.min(from + 1, length);
+		const range = (root.ownerDocument ?? window.document).createRange();
+		const [a, aOffset] = textPoint(root, from, true);
+		const [b, bOffset] = textPoint(root, to);
+		range.setStart(a, aOffset);
+		range.setEnd(b, bOffset);
+		if (typeof range.getBoundingClientRect !== 'function') return null;
+		const rect = range.getBoundingClientRect();
+		if (rect.height > 0) return rect;
+		if (typeof range.getClientRects !== 'function') return null;
+		range.collapse(true);
+		const caret = range.getClientRects()[0];
+		return caret && caret.height > 0 ? caret : null;
+	}
 
 	// --- ブロック編集(要件#49) ----------------------------------------
 	// 「レンダリング DOM ↔ 原文範囲」の往復は `../markdown/edit` の純関数が持つ。
@@ -339,6 +647,8 @@
 		committedEdits.clear();
 		blockEditMode = false;
 		blockEditFromView = false;
+		// 要件#48 追補p: 使われなかったキャレットの控えを次の編集へ持ち越さない。
+		pendingSourceCaret = null;
 		releaseBlockEdit();
 		// 追補d(1)(2): 掴みを捨てるのは画面も掴む前へ戻すことを含む。
 		restoreGrabbedBlocks();
@@ -414,22 +724,33 @@
 
 		const resolved = resolveEditTarget(target, index);
 		if (resolved.kind === 'source') {
+			// 要件#48 追補p 契約1(a)(e): 閲覧の DOM が `<pre>` に入れ替わる前に、
+			// キャレットの行き先を控える(入れなければ捨てる)。
+			pendingSourceCaret = sourceCaretPlan({ x: e.clientX, y: e.clientY }, target);
 			// 追補a(3): 誘導はモードの切り替えだけ。既に編集中なら `beginEdit()` を
 			// 呼ばない — バッファを `document.content` で初期化し直すと、確定済みの
 			// ブロック編集と dirty が消える。
 			blockEditMode = false;
-			if (!editing) windowState.beginEdit();
+			if (!editing && !windowState.beginEdit()) pendingSourceCaret = null;
 			return;
 		}
+		// 追補p 契約1(b)(c): ダブルクリックした文字の位置。ハイライトを外す・素テキストに
+		// 置き換える前に、ブロックの先頭からの文字数で採っておく。
+		const caret = offsetAtPoint(resolved.el, e.clientX, e.clientY);
 		if (resolved.kind === 'code') {
-			beginCodeEdit(resolved.el, resolved.meta);
+			beginCodeEdit(resolved.el, resolved.meta, caret);
 			return;
 		}
-		beginBlockEdit(resolved.el, resolved.meta);
+		beginBlockEdit(resolved.el, resolved.meta, caret);
 	}
 
-	/** そのブロックだけを contenteditable にする(コンテナ全体は不可=契約①)。 */
-	function beginBlockEdit(el: HTMLElement, meta: NodeMeta) {
+	/**
+	 * そのブロックだけを contenteditable にする(コンテナ全体は不可=契約①)。
+	 *
+	 * 要件#48 追補p 契約1(b): キャレットは `caret`(ブロックの先頭からの文字数)に
+	 * 潰して置く(ダブルクリックで選ばれた単語は選ばない)。null ならブロックの先頭。
+	 */
+	function beginBlockEdit(el: HTMLElement, meta: NodeMeta, caret: number | null) {
 		// 要件#54 契約④: 掴む前にハイライトを外す ―― 控える `innerHTML` に
 		// フォールバックの `<mark>` が混ざると、Esc の破棄でそれごと書き戻る。
 		dropFindHighlights();
@@ -444,7 +765,8 @@
 		rememberGrabbed(el, meta);
 		blockEdit = { el, meta, html: el.innerHTML };
 		el.setAttribute('contenteditable', 'true');
-		el.focus();
+		el.focus({ preventScroll: true });
+		placeSelection(el, caret ?? 0, caret ?? 0);
 	}
 
 	/**
@@ -458,8 +780,11 @@
 	 * フェンス3分割できないときは何もしない(ダブルクリックは空振り)。`resolveEditTarget`
 	 * が既に同じ判定をしているので普段は起きないが、原文が編集で壊れていれば起こりうる
 	 * ―― そこで編集に入ると開始/終了フェンス行を取り違えて原文を壊す。
+	 *
+	 * 要件#48 追補p 契約1(c): `caret` は Shiki の `<span>` を置き換える**前**に数えた、
+	 * 中身の先頭からの文字数。素テキストの同じ文字数に潰して置く。null なら先頭。
 	 */
-	function beginCodeEdit(el: HTMLElement, meta: NodeMeta) {
+	function beginCodeEdit(el: HTMLElement, meta: NodeMeta, caret: number | null) {
 		// 基準は編集中なら編集バッファ・閲覧中なら保存済み content(= `beginEdit()`
 		// がバッファへ複製するもの)。どちらでも同じ値になるので入る前に採ってよい。
 		// 要件#54 契約④: 掴む前にハイライトを外す(上の beginBlockEdit と同じ理由)。
@@ -494,7 +819,8 @@
 		// 編集不可なので中身だけ ―― 直したい場合はソース編集モードへ(契約③)。
 		el.textContent = parts.body;
 		el.setAttribute('contenteditable', 'true');
-		el.focus();
+		el.focus({ preventScroll: true });
+		placeSelection(el, caret ?? 0, caret ?? 0);
 	}
 
 	/**
@@ -507,6 +833,9 @@
 	 *
 	 * 選択が編集要素の外にある(取れない)ときは末尾へ足す ―― 入力を落とすよりは
 	 * 末尾に付く方が失うものが少ない。
+	 *
+	 * 要件#48 追補n: ソース編集の `insertSourceText` も、編集コマンドが使えない
+	 * ときはこれで差し込む。
 	 */
 	function insertPlainText(el: HTMLElement, text: string) {
 		const doc = el.ownerDocument;
@@ -871,8 +1200,13 @@
 		current.el.removeAttribute('contenteditable');
 	}
 
-	/** そのブロックだけを contenteditable にする(契約③)。 */
-	function beginHtmlBlockEdit(el: HTMLElement) {
+	/**
+	 * そのブロックだけを contenteditable にする(契約③)。
+	 *
+	 * 要件#48 追補p 契約1(d): キャレットは `caret`(ブロックの先頭からの文字数)に
+	 * 潰して置く。null(位置が取れない)ならブロックの先頭。
+	 */
+	function beginHtmlBlockEdit(el: HTMLElement, caret: number | null) {
 		if (htmlBlock?.el === el) return;
 		// 別のブロックへ移るときは先のブロックを確定してから(契約③)。普段は
 		// ダブルクリックに先立つ mousedown が済ませているが、経路を1つに閉じる。
@@ -883,7 +1217,8 @@
 		dropFindHighlights();
 		htmlBlock = { el, before: snapshotBlock(el), html: el.innerHTML };
 		el.setAttribute('contenteditable', 'true');
-		el.focus();
+		el.focus({ preventScroll: true });
+		placeSelection(el, caret ?? 0, caret ?? 0);
 	}
 
 	/**
@@ -962,7 +1297,9 @@
 			const block = resolveLeafBlock(target, root);
 			// 編集不可(hid が無い・コンテナ)ならダブルクリックは空振り(契約⑤)。
 			if (!block) return;
-			beginHtmlBlockEdit(block);
+			// 要件#48 追補p 契約1(d): 掴む前(ハイライトを外す前)に、点の文字数を採る。
+			const caret = e instanceof MouseEvent ? offsetAtPoint(block, e.clientX, e.clientY) : null;
+			beginHtmlBlockEdit(block, caret);
 		};
 
 		const onPointerDown = (e: MouseEvent) => {
@@ -1065,14 +1402,69 @@
 	}
 
 	/**
-	 * Esc で閲覧へ戻る(契約③)。編集中の文字入力は素通しする。
+	 * 要件#48 追補n 契約1〜4: ソース編集の `<pre>` のキャレット位置へ素テキストを
+	 * 入れ、編集バッファを `textContent` に揃える(契約3)。
+	 *
+	 * Return も貼り付けも既定任せにしないのは、WebKit が改行を `<div>` にして
+	 * `bufferFromPre`(`textContent`)から落とすため(Issue #765)。入れるのは WebKit
+	 * の編集コマンドで、取り消しの履歴(Command + Z)に乗る(契約4): 改行は
+	 * `insertLineBreak`(`<br>` ではなく `\n` の文字が入る)、行の中身は `insertText`。
+	 * `\n` を含む値を `insertText` に渡すと `<div>` になるので、行で割って交互に呼ぶ。
+	 * コマンドが無いか false を返す環境(JSDOM など)では、残りを要件#52 の
+	 * `insertPlainText` で直接差し込む。
+	 */
+	function insertSourceText(el: HTMLElement, text: string) {
+		const doc = el.ownerDocument;
+		const sel = doc.defaultView?.getSelection();
+		const inside =
+			!!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).commonAncestorContainer);
+		const pieces = text.split(/(\n)/).filter((p) => p.length > 0);
+		let done = 0;
+		if (inside && typeof doc.execCommand === 'function') {
+			for (; done < pieces.length; done++) {
+				const piece = pieces[done]!;
+				const ok =
+					piece === '\n'
+						? doc.execCommand('insertLineBreak')
+						: doc.execCommand('insertText', false, piece);
+				if (!ok) break;
+			}
+		}
+		const rest = pieces.slice(done).join('');
+		if (rest.length > 0) insertPlainText(el, rest);
+		windowState.updateBuffer(bufferFromPre(el));
+	}
+
+	/**
+	 * 追補n 契約2: 貼り付けは既定(WebKit は HTML を入れる)を止め、text/plain だけを
+	 * 改行(CRLF・CR・LF)を `\n` にそろえて入れる。text/plain が無いか空なら何も
+	 * 入れない(既定は止めたまま)。
+	 */
+	function handleEditPaste(e: ClipboardEvent) {
+		e.preventDefault();
+		const text = (e.clipboardData?.getData('text/plain') ?? '').replace(/\r\n?/g, '\n');
+		if (text.length > 0) insertSourceText(e.currentTarget as HTMLElement, text);
+	}
+
+	/**
+	 * Esc で閲覧へ戻る(契約③)。Return 以外の文字入力は素通しする。
 	 *
 	 * 追補c: 閲覧へ戻る=編集バッファを捨てる操作なので、⌘E トグルと同じ関門を
 	 * 通す。`confirmDiscardEdits` は非 dirty なら何も聞かずに畳み、dirty なら
 	 * 保存 / 破棄 / キャンセルを聞いて、保存なら成功後・破棄なら即・キャンセル
 	 * なら何もせず編集中のまま — こちらで戻り値を見て分岐するものは無い。
+	 *
+	 * 追補n 契約1: Return は既定(WebKit は `<div>` を足す)を止めて `\n` を 1 つ
+	 * 入れる(Shift・Option 付きも同じ)。IME の変換中(`isComposing`・変換を確定する
+	 * Return の `keyCode` 229)と Command / Control 付きは素通しする。
 	 */
 	function handleEditKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			if (e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey) return;
+			e.preventDefault();
+			insertSourceText(e.currentTarget as HTMLElement, '\n');
+			return;
+		}
 		if (e.key !== 'Escape') return;
 		// 要件#54 契約⑤・要件#60 契約⑦: バーが開いていればそちらが先に食う。
 		if (escBelongsToBar) return;
@@ -1878,7 +2270,8 @@
 				spellcheck="false"
 				bind:this={editorEl}
 				oninput={handleEditInput}
-				onkeydown={handleEditKeydown}></pre>
+				onkeydown={handleEditKeydown}
+				onpaste={handleEditPaste}></pre>
 		{:else}
 			<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 			{@html html}

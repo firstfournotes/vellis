@@ -578,3 +578,163 @@ export function report(file: string, entry: Record<string, unknown>): void {
 	fs.appendFileSync(path.join(SHOTS_DIR, file), `${JSON.stringify(entry)}\n`);
 	console.log(`[gate] ${JSON.stringify(entry)}`);
 }
+
+// --- Finder's "Move to Trash", without Finder -------------------------------
+
+/**
+ * AppleScriptObjC that calls `-[NSFileManager trashItemAtURL:resultingItemURL:error:]`
+ * — the same call Finder's "Move to Trash" makes (on one volume it is a rename
+ * into `~/.Trash`, which is what requirement #22 追補a / Issue #759 is about). No
+ * `tell application "Finder"`, so no Automation permission is asked for. The
+ * JavaScript (JXA) bridge crashes on this method's `NSURL **` out-parameter
+ * (osascript exits 139 on `res[0]`), hence AppleScript with `(reference)`.
+ *
+ * Prints the path the item ended up at (Finder renames on a name clash inside
+ * the Trash), or `ERR:<reason>`.
+ */
+const TRASH_ITEM_SCRIPT = [
+	'use framework "Foundation"',
+	'use scripting additions',
+	'on run argv',
+	"\tset fm to current application's NSFileManager's defaultManager()",
+	"\tset theURL to current application's NSURL's fileURLWithPath:(item 1 of argv)",
+	"\tset {ok, resultURL, err} to fm's trashItemAtURL:theURL resultingItemURL:(reference) |error|:(reference)",
+	"\tif ok then return (resultURL's |path|()) as text",
+	'\treturn "ERR:" & (err\'s localizedDescription() as text)',
+	'end run',
+];
+
+/**
+ * Move `target` (file or folder) to the Trash the way Finder does and return
+ * the path it now has inside the Trash. The caller owns the cleanup: the Trash
+ * is the real user's (`~/.Trash` of the process running wdio), so remove
+ * exactly what was put there (`fs.renameSync` out of the Trash and delete, or
+ * `fs.rmSync` on the returned path — both work by path; *listing* `~/.Trash`
+ * is refused by TCC for a plain process).
+ */
+export function trashItem(target: string): string {
+	const abs = path.resolve(target);
+	if (!fs.existsSync(abs)) throw new Error(`trashItem: ${abs} does not exist`);
+	const args = TRASH_ITEM_SCRIPT.flatMap((line) => ['-e', line]);
+	const out = execFileSync('osascript', [...args, abs], { encoding: 'utf8', timeout: 30_000 }).trim();
+	if (out.startsWith('ERR:') || out === '') throw new Error(`trashItem(${abs}) failed: ${out || '(no output)'}`);
+	return out;
+}
+
+/** The user's Trash folder for the process running the spec (wdio keeps the real HOME). */
+export function trashDir(): string {
+	return path.join(os.homedir(), '.Trash');
+}
+
+// --- Tauri events observed from the page -------------------------------------
+
+/** One event seen by the recorder installed by `installEventRecorder`. */
+export interface RecordedEvent {
+	seq: number;
+	event: string;
+	payload: unknown;
+	/** `Date.now()` in the page (same clock as the spec process). */
+	at: number;
+}
+
+interface EventRecord {
+	events: RecordedEvent[];
+	/** event name → listener id from `plugin:event|listen`. */
+	ids: Record<string, number>;
+}
+
+/**
+ * Listen to the named Tauri events from the page (the same
+ * `plugin:event|listen` the app's own `listen()` uses, target `Any`) and keep
+ * every delivery with its payload and time. The app's listeners are untouched;
+ * this is a second, read-only subscriber. Idempotent per event name.
+ */
+export async function installEventRecorder(events: string[]): Promise<void> {
+	const res = await browser.executeAsync<string, [string[]]>((names, done) => {
+		const w = window as unknown as {
+			__gateEvents?: EventRecord;
+			__TAURI_INTERNALS__: {
+				invoke: (cmd: string, args?: unknown) => Promise<unknown>;
+				transformCallback: (cb: (payload: unknown) => void, once?: boolean) => number;
+			};
+		};
+		const rec: EventRecord = w.__gateEvents ?? { events: [], ids: {} };
+		w.__gateEvents = rec;
+		const internals = w.__TAURI_INTERNALS__;
+		const pending = names
+			.filter((name) => !(name in rec.ids))
+			.map((name) => {
+				const handler = internals.transformCallback((e: unknown) => {
+					const ev = e as { event?: string; payload?: unknown };
+					rec.events.push({
+						seq: rec.events.length,
+						event: ev.event ?? name,
+						payload: ev.payload ?? null,
+						at: Date.now(),
+					});
+				});
+				return internals
+					.invoke('plugin:event|listen', { event: name, target: { kind: 'Any' }, handler })
+					.then((id) => {
+						rec.ids[name] = id as number;
+					});
+			});
+		Promise.all(pending).then(
+			() => done('ok'),
+			(e) => done(String(e)),
+		);
+	}, events);
+	if (res !== 'ok') throw new Error(`installEventRecorder failed: ${res}`);
+}
+
+/** Prove the event recorder sees deliveries: emit a probe event and expect it back. */
+export async function assertEventRecorderWorks(): Promise<void> {
+	const probe = 'gate-event-recorder-probe';
+	await installEventRecorder([probe]);
+	await emitMenu(probe);
+	await browser.waitUntil(async () => (await readEventRecord()).some((e) => e.event === probe), {
+		timeout: 5_000,
+		timeoutMsg: 'the event recorder did not see its own probe event; refusing to drive further',
+	});
+	await clearEventRecord();
+}
+
+export async function readEventRecord(): Promise<RecordedEvent[]> {
+	return browser.execute(() => {
+		const r = (window as unknown as { __gateEvents?: EventRecord }).__gateEvents;
+		return r ? (JSON.parse(JSON.stringify(r.events)) as RecordedEvent[]) : [];
+	});
+}
+
+export async function clearEventRecord(): Promise<void> {
+	await browser.execute(() => {
+		const r = (window as unknown as { __gateEvents?: EventRecord }).__gateEvents;
+		if (r) r.events = [];
+	});
+}
+
+/** Unlisten everything the recorder registered and drop it. */
+export async function removeEventRecorder(): Promise<void> {
+	await browser.executeAsync<void, []>((done) => {
+		const w = window as unknown as {
+			__gateEvents?: EventRecord;
+			__TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+			__TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener: (event: string, id: number) => void };
+		};
+		const r = w.__gateEvents;
+		if (!r) {
+			done();
+			return;
+		}
+		delete w.__gateEvents;
+		const calls = Object.entries(r.ids).map(([event, eventId]) => {
+			try {
+				w.__TAURI_EVENT_PLUGIN_INTERNALS__?.unregisterListener(event, eventId);
+			} catch {
+				// the id is unknown to the plugin internals: the unlisten below still runs
+			}
+			return w.__TAURI_INTERNALS__.invoke('plugin:event|unlisten', { event, eventId }).catch(() => undefined);
+		});
+		Promise.all(calls).then(() => done(), () => done());
+	});
+}

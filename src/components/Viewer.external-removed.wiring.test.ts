@@ -41,7 +41,9 @@
  * - $lib/ipc / @tauri-apps/plugin-opener: モジュールモック。`invoke` の既定応答は
  *   beforeEach で `mockReset` → `mockResolvedValue(null)` し直す(ファクトリの vi.fn は
  *   restoreAllMocks で戻らない)
- * - @tauri-apps/plugin-dialog: `ask` をモック(関門 `confirmDiscardEdits` は実体を通す)
+ * - @tauri-apps/plugin-dialog: `message` をモック(関門 `confirmDiscardEdits` は実体を通す)。
+ *   要件#48 追補o(2026-10-28・由谷承認の書き換え)で `ask` 2 枚から `message` 1 枚の 3 択へ。
+ *   確認の部分(モック・答え・回数)だけを直し、確認の後の期待値は変えていない
  * - `alert` は `vi.stubGlobal`(保存失敗の通知が jsdom の未実装で落ちないように)
  * - `$state` のオブジェクトは deep proxy なので同一性(`toBe`)では見ず、uri / content で見る
  */
@@ -60,14 +62,14 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 	openUrl: vi.fn(async () => undefined),
 	openPath: vi.fn(async () => undefined),
 }));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn() }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn() }));
 
-import { ask } from '@tauri-apps/plugin-dialog';
+import { message } from '@tauri-apps/plugin-dialog';
 import { invoke } from '$lib/ipc';
 import { confirmDiscardEdits } from '$lib/edit-guard';
 import { saveDocument } from '$lib/save-document';
 
-const askMock = vi.mocked(ask);
+const messageMock = vi.mocked(message);
 const invokeMock = vi.mocked(invoke);
 const alertMock = vi.fn((_message?: unknown) => {});
 
@@ -145,7 +147,7 @@ async function renderDirty() {
 	return { ...rendered, pre };
 }
 
-/** ask → (ask) → (保存) → endEdit と await を連ねる処理を流しきる。 */
+/** message → (保存) → endEdit と await を連ねる処理を流しきる。 */
 async function settle() {
 	for (let i = 0; i < 8; i++) await Promise.resolve();
 	await tick();
@@ -159,7 +161,7 @@ const removedFlag = () => (windowState as unknown as { externalRemoved?: boolean
 beforeEach(() => {
 	invokeMock.mockReset();
 	invokeMock.mockResolvedValue(null);
-	askMock.mockReset();
+	messageMock.mockReset();
 	alertMock.mockClear();
 	vi.stubGlobal('alert', alertMock);
 	// 前のテストの編集状態・文書を持ち越さない。
@@ -360,11 +362,10 @@ describe('AC-48-追g (c)(d)(e): WindowState — 印が消えるとき', () => {
 // ---------------------------------------------------------------------------
 
 describe('AC-48-追g (e): 保存せずに編集を終える(confirmDiscardEdits で破棄)→ 文書が閉じる', () => {
-	it('破棄(続ける → 保存しない)→ 文書が閉じ、印も消え、save_document は呼ばれない', async () => {
+	it("破棄(Don't Save)→ 文書が閉じ、印も消え、save_document は呼ばれない", async () => {
 		makeDirtyInStore();
 		windowState.applyFileRemoved(TXT_URI);
-		askMock.mockResolvedValueOnce(true); // 1枚目: 続ける
-		askMock.mockResolvedValueOnce(false); // 2枚目: 保存しない
+		messageMock.mockResolvedValueOnce("Don't Save"); // 1 枚の 3 択: 保存しない
 
 		const proceeded = await confirmDiscardEdits();
 
@@ -376,10 +377,10 @@ describe('AC-48-追g (e): 保存せずに編集を終える(confirmDiscardEdits 
 		expect(saveCalls()).toEqual([]);
 	});
 
-	it('キャンセル → 文書・バッファ・印はそのまま', async () => {
+	it('キャンセル(Cancel)→ 文書・バッファ・印はそのまま', async () => {
 		makeDirtyInStore();
 		windowState.applyFileRemoved(TXT_URI);
-		askMock.mockResolvedValueOnce(false); // 1枚目: キャンセル
+		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
 
 		const proceeded = await confirmDiscardEdits();
 
@@ -390,11 +391,10 @@ describe('AC-48-追g (e): 保存せずに編集を終える(confirmDiscardEdits 
 		expect(removedFlag()).toBe(true);
 	});
 
-	it('保存する → save_document が同じ uri と中身で呼ばれ、文書は残って印が消える', async () => {
+	it('保存する(Save)→ save_document が同じ uri と中身で呼ばれ、文書は残って印が消える', async () => {
 		makeDirtyInStore();
 		windowState.applyFileRemoved(TXT_URI);
-		askMock.mockResolvedValueOnce(true); // 1枚目: 続ける
-		askMock.mockResolvedValueOnce(true); // 2枚目: 保存する
+		messageMock.mockResolvedValueOnce('Save'); // 1 枚の 3 択: 保存する
 
 		const proceeded = await confirmDiscardEdits();
 
@@ -486,7 +486,7 @@ describe('AC-48-追g (c): Viewer — 帯の Save は同じ uri と編集バッ�
 		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
 		expect(windowState.currentDocument?.content).toBe(EDITED);
 		expect(screen.queryByTestId('external-removed-banner')).toBeNull();
-		expect(askMock).not.toHaveBeenCalled();
+		expect(messageMock).not.toHaveBeenCalled();
 	});
 
 	it('Save が失敗したら印・dirty・帯は残る(文書は閉じない)', async () => {
@@ -542,43 +542,41 @@ describe('AC-48-追g (d)(e): Viewer — 作り直しで外部変更の帯へ・E
 		expect(screen.getByTestId('external-reload')).toBeTruthy();
 	});
 
-	it('(e) Esc → 続ける → 保存しない → 文書が閉じる(save_document は呼ばれない)', async () => {
+	it("(e) Esc → Don't Save(保存しない)→ 文書が閉じる(save_document は呼ばれない)", async () => {
 		const { pre } = await renderDirty();
 		windowState.applyFileRemoved(TXT_URI);
 		await tick();
-		askMock.mockResolvedValueOnce(true); // 1枚目: 続ける
-		askMock.mockResolvedValueOnce(false); // 2枚目: 保存しない
+		messageMock.mockResolvedValueOnce("Don't Save"); // 1 枚の 3 択: 保存しない
 
 		await fireEvent.keyDown(pre, { key: 'Escape' });
 		await settle();
 
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(windowState.currentDocument).toBe(null);
 		expect(removedFlag()).toBe(false);
 		expect(saveCalls()).toEqual([]);
 	});
 
-	it('(e) Done → 続ける → 保存しない → 文書が閉じる', async () => {
+	it("(e) Done → Don't Save(保存しない)→ 文書が閉じる", async () => {
 		await renderDirty();
 		windowState.applyFileRemoved(TXT_URI);
 		await tick();
-		askMock.mockResolvedValueOnce(true);
-		askMock.mockResolvedValueOnce(false);
+		messageMock.mockResolvedValueOnce("Don't Save");
 
 		await fireEvent.click(screen.getByTestId('edit-done'));
 		await settle();
 
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(windowState.currentDocument).toBe(null);
 		expect(removedFlag()).toBe(false);
 		expect(saveCalls()).toEqual([]);
 	});
 
-	it('(e) Esc → キャンセル → 文書・帯・バッファはそのまま', async () => {
+	it('(e) Esc → Cancel(キャンセル)→ 文書・帯・バッファはそのまま', async () => {
 		const { container, pre } = await renderDirty();
 		windowState.applyFileRemoved(TXT_URI);
 		await tick();
-		askMock.mockResolvedValueOnce(false); // 1枚目: キャンセル
+		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
 
 		await fireEvent.keyDown(pre, { key: 'Escape' });
 		await settle();

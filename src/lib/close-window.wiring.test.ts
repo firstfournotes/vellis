@@ -41,8 +41,13 @@
  *
  * ## スタブの設計(Viewer.edit.wiring.test.ts の家風)
  * - $lib/ipc: モジュールモック(save_document の観測)
- * - @tauri-apps/plugin-dialog: `ask` をモック。edit-guard 自体はモックしない —
- *   関門の実体を通し、`ask` の回数・返り値で3択を再現する
+ * - @tauri-apps/plugin-dialog: `message` をモック。edit-guard 自体はモックしない —
+ *   関門の実体を通し、`message` の返り値(押したボタンの文言)で3択を再現する
+ *
+ * ## 書き換え(要件#48 追補o・2026-10-28・由谷承認)
+ * 確認は `ask` 2 枚(続ける / キャンセル → 保存 / 破棄)から `message` 1 枚の 3 択
+ * (Save / Don't Save / Cancel)へ。確認の部分(モック・答え・回数)だけを直し、
+ * 確認の後の期待値(destroy する / しない・保存してから閉じる)は変えていない。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleCloseRequested } from './close-window';
@@ -51,12 +56,12 @@ import { windowState, type DocumentPayload } from '../stores/window-state.svelte
 vi.mock('$lib/ipc', () => ({
 	invoke: vi.fn(async () => null),
 }));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn() }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn() }));
 
-import { ask } from '@tauri-apps/plugin-dialog';
+import { message } from '@tauri-apps/plugin-dialog';
 import { invoke } from '$lib/ipc';
 
-const askMock = vi.mocked(ask);
+const messageMock = vi.mocked(message);
 const invokeMock = vi.mocked(invoke);
 
 const TXT_URI = 'file:///Users/a/notes/memo.txt';
@@ -100,7 +105,7 @@ describe('handleCloseRequested — 閉窓要求の分岐(backlog 139・要件#48
 		await handleCloseRequested(event, appWindow);
 
 		expect(event.preventDefault).not.toHaveBeenCalled();
-		expect(askMock).not.toHaveBeenCalled();
+		expect(messageMock).not.toHaveBeenCalled();
 		expect(appWindow.destroy).not.toHaveBeenCalled();
 	});
 
@@ -113,25 +118,23 @@ describe('handleCloseRequested — 閉窓要求の分岐(backlog 139・要件#48
 		expect(appWindow.destroy).not.toHaveBeenCalled();
 	});
 
-	it('(b) dirty → 続ける→破棄: preventDefault のうえ確認後に destroy が呼ばれる(保存は走らない)', async () => {
+	it("(b) dirty → Don't Save(破棄): preventDefault のうえ確認後に destroy が呼ばれる(保存は走らない)", async () => {
 		makeDirty();
 		const { event, appWindow } = closeRequest();
-		askMock.mockResolvedValueOnce(true); // 1枚目: 続ける
-		askMock.mockResolvedValueOnce(false); // 2枚目: 破棄する
+		messageMock.mockResolvedValueOnce("Don't Save"); // 1 枚の 3 択: 破棄する
 
 		await handleCloseRequested(event, appWindow);
 
 		expect(event.preventDefault).toHaveBeenCalledTimes(1);
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 		expect(appWindow.destroy).toHaveBeenCalledTimes(1);
 		expect(invokeMock).not.toHaveBeenCalledWith('save_document', expect.anything());
 	});
 
-	it("(b') dirty → 続ける→保存: save_document が呼ばれてから destroy", async () => {
+	it("(b') dirty → Save(保存): save_document が呼ばれてから destroy", async () => {
 		makeDirty();
 		const { event, appWindow } = closeRequest();
-		askMock.mockResolvedValueOnce(true); // 1枚目: 続ける
-		askMock.mockResolvedValueOnce(true); // 2枚目: 保存する
+		messageMock.mockResolvedValueOnce('Save'); // 1 枚の 3 択: 保存する
 
 		await handleCloseRequested(event, appWindow);
 
@@ -148,10 +151,10 @@ describe('handleCloseRequested — 閉窓要求の分岐(backlog 139・要件#48
 		expect(saveOrder).toBeLessThan(destroyOrder);
 	});
 
-	it('(c) dirty → キャンセル: preventDefault は呼ぶが destroy は呼ばれず、編集中のまま', async () => {
+	it('(c) dirty → Cancel(キャンセル): preventDefault は呼ぶが destroy は呼ばれず、編集中のまま', async () => {
 		makeDirty();
 		const { event, appWindow } = closeRequest();
-		askMock.mockResolvedValueOnce(false); // 1枚目: キャンセル
+		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
 
 		await handleCloseRequested(event, appWindow);
 

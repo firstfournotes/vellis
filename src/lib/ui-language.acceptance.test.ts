@@ -8,7 +8,7 @@
  * - AC-51-1 全面走査で CJK ゼロ(契約①⑥(a)): src/(*.test.ts と __fixtures__ を
  *   除く .svelte / .ts 全ファイル)のコメントを落とした行に日本語(CJK)が無い
  * - AC-51-2 走査規則の自己検証(契約⑥(b)): codeLines の規則そのものを検証
- * - AC-51-5 未保存確認ダイアログ(edit-guard)の文言の値固定と2段の役割分担
+ * - AC-51-5 未保存確認ダイアログ(edit-guard)の文言の値固定と役割分担(要件#48 追補o で 1 枚の 3 択)
  * - AC-51-6 波形の縮退文言テーブル(各6件=解析中1+縮退5)の値固定・二重定義のまま
  * - AC-51-7 素材パネル(ProvenancePanel)の失敗9種・警告2種・区分テーブルの値固定
  * - AC-51-9 Rust 側の不変(acceptance_req35.rs の走査が居ることの存在確認。
@@ -47,22 +47,20 @@ import type { Mock } from 'vitest';
 
 // edit-guard は plugin-dialog / save-document / window-state ストアを巻き込むので
 // モジュールモックで切る(document-edit.acceptance.test.ts と同じ家風)。
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn() }));
+// 要件#48 追補o(2026-10-28): 確認は `message`(1 枚・3 択)に変わった。`ask` は呼ばれない。
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn() }));
 vi.mock('$lib/save-document', () => ({ saveDocument: vi.fn() }));
 vi.mock('../stores/window-state.svelte', () => ({ windowState: {} }));
 
-import { ask } from '@tauri-apps/plugin-dialog';
-import {
-	UNSAVED_TITLE,
-	UNSAVED_PROCEED_MESSAGE,
-	UNSAVED_SAVE_MESSAGE,
-	askUnsavedChoice,
-} from './edit-guard';
+import { message } from '@tauri-apps/plugin-dialog';
+import { UNSAVED_TITLE, UNSAVED_SAVE_MESSAGE, askUnsavedChoice } from './edit-guard';
 import { waveformBandNote } from './audio-waveform';
 import { audioWaveformNote } from './audio-viewing';
 import type { WaveformResult } from './audio-waveform';
 
-const askMock = ask as unknown as Mock<(message: string, options?: Record<string, unknown>) => Promise<boolean>>;
+const messageMock = message as unknown as Mock<
+	(message: string, options?: Record<string, unknown>) => Promise<string>
+>;
 
 const SRC_ROOT = resolve(__dirname, '..');
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -212,68 +210,73 @@ describe('AC-51-2: codeLines の規則(コメントは落とす・コードは�
 });
 
 // ---------------------------------------------------------------------------
-// AC-51-5 — 未保存確認ダイアログの文言(契約①)と2段の役割分担(契約⑩)
+// AC-51-5 — 未保存確認ダイアログの文言(契約①)と役割分担(契約⑩)
+//
+// 要件#48 追補o(2026-10-28・由谷承認の書き換え): 確認は `ask` 2 枚(Continue / Cancel →
+// Save / Don't Save)から `message` 1 枚の 3 択(Save / Don't Save / Cancel)へ。
+// 1 枚目の文言(UNSAVED_PROCEED_MESSAGE)は無くなった。確認の部分だけを直し、
+// 英語の固定値・CJK が無いことの判定は変えていない。
 // ---------------------------------------------------------------------------
 
-describe('AC-51-5: edit-guard の未保存確認ダイアログは英語の固定値・2段の役割分担は不変', () => {
+describe('AC-51-5: edit-guard の未保存確認ダイアログは英語の固定値・1 枚の 3 択の役割分担は不変', () => {
 	beforeEach(() => {
-		askMock.mockReset();
+		messageMock.mockReset();
 	});
 
-	test('題と2段のメッセージの値固定', () => {
+	test('題とメッセージの値固定', () => {
 		expect(UNSAVED_TITLE).toBe('Unsaved Changes');
-		expect(UNSAVED_PROCEED_MESSAGE).toBe(
-			'Your edits have not been saved yet. Do you want to continue?',
-		);
 		expect(UNSAVED_SAVE_MESSAGE).toBe('Do you want to save your changes before continuing?');
 	});
 
-	test("1枚目(進む/やめる)のボタンは Continue / Cancel・題とメッセージが固定値で渡る", async () => {
-		askMock.mockResolvedValueOnce(false);
+	test('1 枚の確認の題とメッセージが固定値で渡る・Cancel ボタンの文言は Cancel', async () => {
+		messageMock.mockResolvedValueOnce('Cancel');
 
 		const choice = await askUnsavedChoice(true);
 
 		expect(choice).toBe('cancel');
-		expect(askMock).toHaveBeenCalledTimes(1);
-		const [message, options] = askMock.mock.calls[0]!;
-		expect(message).toBe(UNSAVED_PROCEED_MESSAGE);
+		expect(messageMock).toHaveBeenCalledTimes(1);
+		const [message, options] = messageMock.mock.calls[0]!;
+		expect(message).toBe(UNSAVED_SAVE_MESSAGE);
 		expect(options?.['title']).toBe(UNSAVED_TITLE);
-		expect(options?.['okLabel']).toBe('Continue');
-		expect(options?.['cancelLabel']).toBe('Cancel');
+		expect((options?.['buttons'] as Record<string, unknown>)['cancel']).toBe('Cancel');
 	});
 
-	test("2枚目(保存/破棄)のボタンは Save / Don't Save(macOS 標準用語)", async () => {
-		askMock.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+	test("保存 / 破棄のボタンは Save / Don't Save(macOS 標準用語)", async () => {
+		messageMock.mockResolvedValueOnce('Save');
 
 		const choice = await askUnsavedChoice(true);
 
 		expect(choice).toBe('save');
-		expect(askMock).toHaveBeenCalledTimes(2);
-		const [message, options] = askMock.mock.calls[1]!;
+		expect(messageMock).toHaveBeenCalledTimes(1);
+		const [message, options] = messageMock.mock.calls[0]!;
 		expect(message).toBe(UNSAVED_SAVE_MESSAGE);
 		expect(options?.['title']).toBe(UNSAVED_TITLE);
-		expect(options?.['okLabel']).toBe('Save');
-		expect(options?.['cancelLabel']).toBe("Don't Save");
+		expect(options?.['buttons']).toEqual({ yes: 'Save', no: "Don't Save", cancel: 'Cancel' });
 	});
 
-	test('役割分担の不変: 2枚目で破棄を選ぶと discard・dirty でなければ何も聞かず discard', async () => {
-		askMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+	test('役割分担の不変: 破棄を選ぶと discard・dirty でなければ何も聞かず discard', async () => {
+		messageMock.mockResolvedValueOnce("Don't Save");
 		expect(await askUnsavedChoice(true)).toBe('discard');
-		expect(askMock).toHaveBeenCalledTimes(2);
+		expect(messageMock).toHaveBeenCalledTimes(1);
 
-		askMock.mockClear();
+		messageMock.mockClear();
 		expect(await askUnsavedChoice(false)).toBe('discard');
-		expect(askMock).not.toHaveBeenCalled();
+		expect(messageMock).not.toHaveBeenCalled();
 	});
 
 	test('ダイアログへ渡る文字列のどこにも日本語(CJK)が無い', async () => {
-		askMock.mockResolvedValue(true);
+		messageMock.mockResolvedValue('Save');
 		await askUnsavedChoice(true);
-		for (const [message, options] of askMock.mock.calls) {
+		expect(messageMock).toHaveBeenCalled();
+		/** options の値(buttons のような入れ子も含む)を文字列まで辿る。 */
+		const strings = (value: unknown): string[] => {
+			if (typeof value === 'string') return [value];
+			if (value && typeof value === 'object') return Object.values(value).flatMap(strings);
+			return [];
+		};
+		for (const [message, options] of messageMock.mock.calls) {
 			expect(message).not.toMatch(CJK_PATTERN);
-			for (const value of Object.values(options ?? {})) {
-				if (typeof value === 'string') expect(value).not.toMatch(CJK_PATTERN);
-			}
+			for (const value of strings(options ?? {})) expect(value).not.toMatch(CJK_PATTERN);
 		}
 	});
 });
