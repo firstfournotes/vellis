@@ -282,7 +282,8 @@ describe('AC-53-10 — 入口の付け替え(契約①)', () => {
 		const pre = sourcePre(container);
 		expect(pre, 'Source でソース編集の pre が出ること').toBeTruthy();
 		expect((pre as HTMLElement).getAttribute('contenteditable')).toBe('true');
-		expect((pre as HTMLElement).textContent).toBe(COMMIT_HI);
+		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+		expect((pre as HTMLElement).textContent).toBe(COMMIT_HI + '\n');
 		// 編集面は消え、バッファと dirty は保持(確定済みの編集は失われない)。
 		expect(surfaceHost(container)).toBeNull();
 		expect(windowState.editBuffer).toBe(COMMIT_HI);
@@ -316,7 +317,8 @@ describe('AC-53-10 — 入口の付け替え(契約①)', () => {
 
 		const pre = sourcePre(container);
 		expect(pre).toBeTruthy();
-		expect((pre as HTMLElement).textContent).toBe('# Plan\n\n- item\n');
+		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+		expect((pre as HTMLElement).textContent).toBe('# Plan\n\n- item\n' + '\n');
 		expect(surfaceHost(container)).toBeNull();
 	});
 });

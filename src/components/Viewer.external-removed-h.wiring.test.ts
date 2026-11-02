@@ -157,15 +157,16 @@ async function renderDirty() {
 	await fireEvent.dblClick(rendered.container.querySelector('.markdown-body') as HTMLElement);
 	await tick();
 	const pre = getPre(rendered.container);
-	pre.textContent = EDITED;
+	// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」(バッファは EDITED)。
+	pre.textContent = EDITED + '\n';
 	await fireEvent.input(pre);
 	expect(windowState.dirty).toBe(true);
 	return { ...rendered, pre };
 }
 
-/** 編集面の中身を `content` にして input を飛ばす(原文に戻す・もう一度編集する)。 */
+/** 編集面の中身を `content`(+ 番兵=追補r)にして input を飛ばす(原文に戻す・もう一度編集する)。 */
 async function typeInto(pre: HTMLElement, content: string) {
-	pre.textContent = content;
+	pre.textContent = content + '\n';
 	await fireEvent.input(pre);
 	await tick();
 }
@@ -538,7 +539,8 @@ describe('AC-48-追h (d): Viewer — 同じ中身の file_changed では帯が�
 		expect(screen.queryByRole('alert')).toBeNull();
 		const pre = getPre(container);
 		expect(pre.getAttribute('contenteditable')).toBe('true');
-		expect(pre.textContent).toBe(EDITED);
+		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+		expect(pre.textContent).toBe(EDITED + '\n');
 		expect(windowState.dirty).toBe(false);
 		expect(windowState.editMode).toBe('edit');
 	});

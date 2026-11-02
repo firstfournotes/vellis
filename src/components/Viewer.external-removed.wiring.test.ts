@@ -141,7 +141,8 @@ async function renderDirty() {
 	await fireEvent.dblClick(rendered.container.querySelector('.markdown-body') as HTMLElement);
 	await tick();
 	const pre = getPre(rendered.container);
-	pre.textContent = EDITED;
+	// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」(バッファは EDITED)。
+	pre.textContent = EDITED + '\n';
 	await fireEvent.input(pre);
 	expect(windowState.dirty).toBe(true);
 	return { ...rendered, pre };

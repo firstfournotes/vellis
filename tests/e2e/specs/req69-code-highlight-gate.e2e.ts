@@ -578,7 +578,8 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 			return { children: pre.childElementCount, text: pre.textContent ?? '', lang: pre.getAttribute('data-vellis-lang') };
 		}, BODY);
 		expect(editor.children).toBe(0);
-		expect(editor.text).toBe(original);
+		// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel).
+		expect(editor.text).toBe(original + '\n');
 		expect(editor.lang).toBeNull();
 		await shot('req69-gate2-editing-plain');
 
@@ -586,7 +587,8 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		await browser.execute(
 			(body, extra) => {
 				const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-				pre.textContent = (pre.textContent ?? '') + extra;
+				// 追補r: type before the sentinel (the editor's final `\n`), so the buffer is original + extra.
+				pre.textContent = (pre.textContent ?? '').slice(0, -1) + extra + '\n';
 				pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: extra }));
 			},
 			BODY,

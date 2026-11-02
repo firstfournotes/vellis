@@ -378,7 +378,8 @@ describe('Viewer — 編集不可領域のダブルクリックはソース編�
 			const pre = sourcePre(container);
 			expect(pre).not.toBeNull();
 			expect(isEditable(pre as HTMLElement)).toBe(true);
-			expect(pre?.textContent).toBe(MD);
+			// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+			expect(pre?.textContent).toBe(MD + '\n');
 			// レンダリング済みのブロックは編集可になっていない(残っていれば false)。
 			expectOnlyEditable(container, pre as HTMLElement);
 			// 誘導しただけで dirty にはならない。
@@ -808,7 +809,8 @@ describe('Viewer — 確定後に編集不可領域をダブルクリックし�
 			const pre = sourcePre(container);
 			expect(pre).not.toBeNull();
 			expect(isEditable(pre as HTMLElement)).toBe(true);
-			expect(pre?.textContent).toBe(afterA);
+			// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+			expect(pre?.textContent).toBe(afterA + '\n');
 			expectOnlyEditable(container, pre as HTMLElement);
 			expect(windowState.currentDocument?.content).toBe(SEQ_MD);
 		},
@@ -994,7 +996,8 @@ function expectSourceEditing(container: HTMLElement, content: string) {
 	const pre = sourcePre(container);
 	expect(pre).not.toBeNull();
 	expect(isEditable(pre as HTMLElement)).toBe(true);
-	expect(pre?.textContent).toBe(content);
+	// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+	expect(pre?.textContent).toBe(content + '\n');
 	expectOnlyEditable(container, pre as HTMLElement);
 }
 

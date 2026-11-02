@@ -423,7 +423,8 @@ async function openFileAndEdit(): Promise<void> {
 	await browser.execute(
 		(body, extra) => {
 			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-			pre.textContent = (pre.textContent ?? '') + extra;
+			// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel); type before it.
+			pre.textContent = (pre.textContent ?? '').slice(0, -1) + extra + '\n';
 			pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: extra }));
 		},
 		BODY,
@@ -431,7 +432,7 @@ async function openFileAndEdit(): Promise<void> {
 	);
 	const v = await editorView();
 	expect(v.editing).toBe(true);
-	expect(v.text).toBe(ORIGINAL + EDIT);
+	expect(v.text).toBe(ORIGINAL + EDIT + '\n'); // 追補r: + sentinel
 }
 
 /** Open edit-me.txt in the plain view only (no editor, nothing dirty). */
@@ -464,7 +465,8 @@ async function revertEditAndLeaveEditor(): Promise<void> {
 			document.querySelector<HTMLButtonElement>('[data-testid="edit-done"]')?.click();
 		},
 		BODY,
-		onDisk,
+		// 追補r: write the sentinel too, so the buffer (text minus one `\n`) equals the disk.
+		onDisk + '\n',
 	);
 	await browser.waitUntil(async () => !(await editorView()).editing, {
 		timeout: 5_000,
@@ -615,7 +617,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			const root = await snapshotRoot();
 			const onDisk = fs.readFileSync(editFile, 'utf8');
 			await shot('req48m-gate1-after-cancel');
-			report(REPORT, { gate: '48m-1-cancel', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT, onDiskUnchanged: onDisk === ORIGINAL });
+			report(REPORT, { gate: '48m-1-cancel', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT + '\n', onDiskUnchanged: onDisk === ORIGINAL });
 
 			expect(asks.map((a) => a.message)).toEqual([SAVE_MESSAGE]);
 			expect(asks[0]!.title).toBe(SAVE_TITLE);
@@ -624,7 +626,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			expect(asks[0]!.autoReleased).toBe(false);
 			expect(isStartRoot(root)).toBe(true);
 			expect(view.editing).toBe(true);
-			expect(view.text).toBe(ORIGINAL + EDIT);
+			expect(view.text).toBe(ORIGINAL + EDIT + '\n'); // 追補r: + sentinel
 			expect(onDisk).toBe(ORIGINAL);
 			// Nothing was switched or saved behind the dialog (契約1・3).
 			expect(rec.ipc).not.toContain('switch_root_confirmed');
@@ -747,7 +749,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			const root = await snapshotRoot();
 			const onDisk = fs.readFileSync(editFile, 'utf8');
 			await shot('req48m-gate3b-save-failed');
-			report(REPORT, { gate: '48m-3b-save-failed', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT, onDiskUnchanged: onDisk === ORIGINAL });
+			report(REPORT, { gate: '48m-3b-save-failed', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT + '\n', onDiskUnchanged: onDisk === ORIGINAL });
 
 			expect(cli.code).toBe(0);
 			expect(asks.map((a) => a.message)).toEqual([SAVE_MESSAGE]);
@@ -762,7 +764,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			expect(rec.ipc).not.toContain('set_root');
 			expect(isStartRoot(root)).toBe(true);
 			expect(view.editing).toBe(true);
-			expect(view.text).toBe(ORIGINAL + EDIT);
+			expect(view.text).toBe(ORIGINAL + EDIT + '\n'); // 追補r: + sentinel
 			expect(onDisk).toBe(ORIGINAL);
 		} finally {
 			await setIpcBlock([]);

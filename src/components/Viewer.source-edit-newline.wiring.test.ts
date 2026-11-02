@@ -38,6 +38,11 @@
  * - **AC (f)・契約6**: 既存テストの無改変は本ファイルでは判定しない(フルスイート)。
  *   `contenteditable="true"` のままであることは入口の確認で毎回見る
  *
+ * 追補r(2026-10-29・Issue #767・契約6 の書き換え=由谷承認): 編集の `<pre>` の中身は
+ * 「原文 + 番兵の `\n`」になったので、`textContent` を原文と比べていた箇所
+ * (`enterSourceEdit`・`expectBufferIs`・素通し/空の貼り付けの `TXT_CONTENT`・AC (d) の
+ * 保存後)だけを「+ `\n`」に直した。バッファと保存の期待値は変えていない。
+ *
  * ## 判定しないもの
  * - 本物の WKWebView での `insertLineBreak` の振る舞い・Command + Z の取り消し・
  *   日本語入力の確定 Return → E2E(tests/e2e/specs/req48n-source-newline-gate.e2e.ts)
@@ -179,7 +184,8 @@ async function enterSourceEdit(container: HTMLElement, expectedText: string): Pr
 	await settle();
 	const pre = getPre(container);
 	expect(isEditable(pre), 'ソース編集の pre が contenteditable="true" であること(契約6)').toBe(true);
-	expect(pre.textContent).toBe(expectedText);
+	// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」(バッファは原文のまま)。
+	expect(pre.textContent).toBe(expectedText + '\n');
 	expect(windowState.editMode).toBe('edit');
 	expect(windowState.dirty).toBe(false);
 	return pre;
@@ -270,9 +276,12 @@ function expectTextOnly(pre: HTMLElement) {
 	expect(pre.querySelector('div, br')).toBeNull();
 }
 
-/** 契約3: 編集バッファは `<pre>` の `textContent` と同じで、`expected` に一致。 */
+/**
+ * 契約3: 編集バッファは `expected` に一致。`<pre>` の `textContent` は追補r 契約1・6
+ * により「`expected` + 番兵の `\n`」。
+ */
 function expectBufferIs(pre: HTMLElement, expected: string) {
-	expect(pre.textContent).toBe(expected);
+	expect(pre.textContent).toBe(expected + '\n');
 	expect(windowState.editBuffer).toBe(expected);
 	expectTextOnly(pre);
 }
@@ -478,7 +487,7 @@ describe('AC-48-追n (b) — IME の変換中・Command / Control 付きの Retu
 		const ev = await pressKey(pre, init);
 
 		expect(ev.defaultPrevented).toBe(false);
-		expect(pre.textContent).toBe(TXT_CONTENT);
+		expect(pre.textContent).toBe(TXT_CONTENT + '\n');
 		expectTextOnly(pre);
 		expect(windowState.editBuffer).toBe(TXT_CONTENT);
 		expect(windowState.dirty).toBe(false);
@@ -497,7 +506,7 @@ describe('AC-48-追n (b) — IME の変換中・Command / Control 付きの Retu
 
 		expect(ev.defaultPrevented).toBe(false);
 		expect(calls).toEqual([]);
-		expect(pre.textContent).toBe(TXT_CONTENT);
+		expect(pre.textContent).toBe(TXT_CONTENT + '\n');
 	});
 });
 
@@ -570,7 +579,7 @@ describe('AC-48-追n (c) — 貼り付けは text/plain だけ・改行は `\\n`
 
 		// 契約2: 既定の動作(WebKit なら HTML が入る)は止める。
 		expect(ev.defaultPrevented).toBe(true);
-		expect(pre.textContent).toBe(TXT_CONTENT);
+		expect(pre.textContent).toBe(TXT_CONTENT + '\n');
 		expectTextOnly(pre);
 		expect(windowState.editBuffer).toBe(TXT_CONTENT);
 		expect(windowState.dirty).toBe(false);
@@ -677,7 +686,7 @@ describe('契約4 — execCommand が使える環境では WebKit の編集コ�
 
 		expect(ev.defaultPrevented).toBe(true);
 		expect(calls).toEqual([]);
-		expect(pre.textContent).toBe(TXT_CONTENT);
+		expect(pre.textContent).toBe(TXT_CONTENT + '\n');
 		expect(windowState.dirty).toBe(false);
 	});
 
@@ -741,9 +750,9 @@ describe('AC-48-追n (d) — 保存で入れた改行が save_document の conte
 		expect(invokeMock).toHaveBeenCalledWith('save_document', { uri: TXT_URI, content: expected });
 		expect(windowState.currentDocument?.content).toBe(expected);
 		expect(windowState.dirty).toBe(false);
-		// 保存後も編集は続き、DOM は入れたまま。
+		// 保存後も編集は続き、DOM は入れたまま(番兵込み=追補r)。
 		expect(windowState.editMode).toBe('edit');
-		expect(pre.textContent).toBe(expected);
+		expect(pre.textContent).toBe(expected + '\n');
 	});
 
 	it('WebKit の経路(偽の execCommand)で入れた改行も save_document の content に入る', async () => {

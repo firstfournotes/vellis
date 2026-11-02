@@ -347,7 +347,8 @@ describe('Viewer — text 種別の編集モード配線(契約②③)', () => {
 		await tick();
 
 		const pre = getPre(container);
-		pre.textContent = 'edited by hand\n';
+		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。バッファは番兵を除く。
+		pre.textContent = 'edited by hand\n' + '\n';
 		await fireEvent.input(pre);
 
 		expect(windowState.editBuffer).toBe('edited by hand\n');
@@ -397,7 +398,8 @@ describe('Viewer — markdown のソース編集モード(契約②)', () => {
 
 		const pre = getPre(container);
 		expect(isEditable(pre)).toBe(true);
-		expect(pre.textContent).toBe(MD_CONTENT);
+		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+		expect(pre.textContent).toBe(MD_CONTENT + '\n');
 		expect(container.querySelector('h1')).toBeNull();
 	});
 });
@@ -408,7 +410,8 @@ describe('Viewer — 外部変更衝突の表示(契約⑥)', () => {
 		await fireEvent.dblClick(container.querySelector('.markdown-body') as HTMLElement);
 		await tick();
 		const pre = getPre(container);
-		pre.textContent = TXT_CONTENT + 'my edit\n';
+		// 追補r 契約1・6: 番兵の `\n` を付けて書く(バッファは TXT_CONTENT + 'my edit\n')。
+		pre.textContent = TXT_CONTENT + 'my edit\n' + '\n';
 		await fireEvent.input(pre);
 
 		const decision = windowState.applyFileChanged({
@@ -444,7 +447,8 @@ describe('Viewer — dirty 時の Esc / Done は confirmDiscardEdits を通る(�
 		await fireEvent.dblClick(rendered.container.querySelector('.markdown-body') as HTMLElement);
 		await tick();
 		const pre = getPre(rendered.container);
-		pre.textContent = EDITED;
+		// 追補r 契約1・6: 番兵の `\n` を付けて書く(バッファは EDITED)。
+		pre.textContent = EDITED + '\n';
 		await fireEvent.input(pre);
 		expect(windowState.dirty).toBe(true);
 		return { ...rendered, pre };

@@ -367,7 +367,8 @@ async function enterEditAndType(): Promise<void> {
 	await browser.execute(
 		(body, extra) => {
 			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-			pre.textContent = (pre.textContent ?? '') + extra;
+			// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel); type before it.
+			pre.textContent = (pre.textContent ?? '').slice(0, -1) + extra + '\n';
 			pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: extra }));
 		},
 		BODY,
@@ -407,7 +408,9 @@ async function closeAnyOpenDocument(): Promise<Record<string, unknown>> {
 		if (v.editing) {
 			// The buffer is the fixture text plus EDIT (enterEditAndType); strip the
 			// edit so the buffer equals the document and Done asks nothing.
-			const original = v.editorText !== null && v.editorText.endsWith(EDIT) ? v.editorText.slice(0, -EDIT.length) : null;
+			// 追補r: the editor holds "source + one `\n`" (the sentinel); strip it, strip EDIT, write it back with the sentinel.
+			const source = v.editorText !== null && v.editorText.endsWith('\n') ? v.editorText.slice(0, -1) : v.editorText;
+			const original = source !== null && source.endsWith(EDIT) ? source.slice(0, -EDIT.length) + '\n' : null;
 			await browser.execute(
 				(body, text) => {
 					const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`);
@@ -580,7 +583,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		await ensureGateDirExpanded();
 		await openMarkdown(restoreMe, 'Restore me');
 		await enterEditAndType();
-		expect((await view()).editorText).toBe(doc('Restore me') + EDIT);
+		expect((await view()).editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
 		await clearLogs();
 
 		// 1. Trash → the removed banner (要件#48 追補g), document and edits kept.
@@ -596,7 +599,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		expect(a.view.removed.buttons).toEqual(['Save', 'Close']);
 		expect(a.view.removed.saveTitle).toBe(SAVE_TITLE_DIRTY);
 		expect(a.view.editing).toBe(true);
-		expect(a.view.editorText).toBe(doc('Restore me') + EDIT);
+		expect(a.view.editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
 		expect(a.view.emptyState).toBe(false);
 		expect(a.events.fileRemoved).toBe(1);
 		expect(a.events.fileChanged).toBe(0);
@@ -623,7 +626,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		expect(b.view.changed.buttons).toEqual(['Overwrite', 'Reload']);
 		// The edits are still there (要件#48 追補g: nothing is dropped silently).
 		expect(b.view.editing).toBe(true);
-		expect(b.view.editorText).toBe(doc('Restore me') + EDIT);
+		expect(b.view.editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
 		expect(b.view.emptyState).toBe(false);
 		expect(b.onDisk).toBe(true);
 		expect(b.dialogs).toEqual([]);
@@ -643,7 +646,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		// 要件#48 追補h 契約1: never both banners at once.
 		expect(c.view.changed.present).toBe(false);
 		expect(c.view.editing).toBe(true);
-		expect(c.view.editorText).toBe(doc('Restore me') + EDIT);
+		expect(c.view.editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
 		expect(c.events.fileRemoved).toBe(1);
 		expect(c.events.fileChanged).toBe(0);
 		expect(c.dialogs).toEqual([]);
@@ -654,7 +657,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		await ensureGateDirExpanded();
 		await openMarkdown(resaveMe, 'Resave me');
 		await enterEditAndType();
-		expect((await view()).editorText).toBe(doc('Resave me') + EDIT);
+		expect((await view()).editorText).toBe(doc('Resave me') + EDIT + '\n'); // 追補r: + sentinel
 		await clearLogs();
 
 		// 1. Trash → the removed banner.
@@ -699,7 +702,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		// The save's own echo is not an external change (要件#48 契約⑥).
 		expect(b.view.changed.present).toBe(false);
 		expect(b.view.editing).toBe(true);
-		expect(b.view.editorText).toBe(doc('Resave me') + EDIT);
+		expect(b.view.editorText).toBe(doc('Resave me') + EDIT + '\n'); // 追補r: + sentinel
 		expect(b.events.fileRemoved).toBe(0);
 		expect(b.dialogs).toEqual([]);
 
@@ -738,7 +741,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		await waitForExplorerRow(uri(resaveMe), { timeout: ARRIVAL });
 		await openMarkdown(resaveMe, 'Resave me');
 		await enterEditAndType();
-		expect((await view()).editorText).toBe(doc('Resave me') + EDIT + EDIT);
+		expect((await view()).editorText).toBe(doc('Resave me') + EDIT + EDIT + '\n'); // 追補r: + sentinel
 		await clearLogs();
 		const t3 = moveToTrash(resaveMe, '22a-4');
 		const shown3 = await pollUntil(async () => (await view()).removed.present, ARRIVAL);
@@ -753,7 +756,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		expect(d.view.removed.buttons).toEqual(['Save', 'Close']);
 		expect(d.view.changed.present).toBe(false);
 		expect(d.view.editing).toBe(true);
-		expect(d.view.editorText).toBe(doc('Resave me') + EDIT + EDIT);
+		expect(d.view.editorText).toBe(doc('Resave me') + EDIT + EDIT + '\n'); // 追補r: + sentinel
 		expect(d.view.emptyState).toBe(false);
 		expect(d.events.fileRemoved).toBe(1);
 		expect(d.events.fileChanged).toBe(0);

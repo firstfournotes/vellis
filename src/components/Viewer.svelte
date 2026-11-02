@@ -177,6 +177,103 @@
 	let editSource = $derived(windowState.editBuffer ?? document.content);
 
 	/**
+	 * 要件#48 追補r 契約1: ソース編集の `<pre>` の末尾に置く見えない改行(番兵)。
+	 *
+	 * WebKit は `pre-wrap` の contenteditable で文書の末尾の `\n` を「空の最後の行を
+	 * 見せるための仮の改行」として扱い、最後の行の入力で消したり 1 つ多く足したり
+	 * する(Issue #767)。末尾に番兵を置けば原文の最後の改行は途中の行と同じに扱われ、
+	 * 仮の改行の役は番兵が受け持つ。番兵はバッファにもファイルにも入れない。
+	 */
+	const SOURCE_SENTINEL = '\n';
+
+	/**
+	 * 追補r 契約2・3: 入力のあとの `<pre>` から編集バッファを取る。WebKit が番兵を
+	 * 消していたら末尾に付け直す ―― 編集のコマンドではなく DOM で足すので取り消しの
+	 * 履歴に乗らず、新しいテキストノードを最後に置くのでキャレットと選択はその手前に
+	 * 残る。バッファは末尾の番兵を 1 つ除いた `textContent`(取り消しで番兵ごと戻って
+	 * いても、付け直した後に除くので同じ形になる)。
+	 *
+	 * 契約8: 取り消し・やり直し(`inputType` が `historyUndo`・`historyRedo`)のときだけ、
+	 * 先に末尾で重なった番兵を 1 つにする。
+	 */
+	function syncSourceBuffer(pre: HTMLElement, inputType = '') {
+		if (inputType === 'historyUndo' || inputType === 'historyRedo') dropDoubledSentinels(pre);
+		if (!bufferFromPre(pre).endsWith(SOURCE_SENTINEL)) {
+			pre.appendChild(pre.ownerDocument.createTextNode(SOURCE_SENTINEL));
+		}
+		rememberSourceLineBreaks(pre);
+		windowState.updateBuffer(bufferFromPre(pre).slice(0, -SOURCE_SENTINEL.length));
+	}
+
+	/**
+	 * 追補r 契約8: 原文として入った、`\n` だけのテキストノード。
+	 *
+	 * WebKit は Return を `\n` だけのテキストノードで入れる(番兵と同じ形)。最後の空の
+	 * 行で打って WebKit が番兵を消し、こちらが付け直した後に取り消すと、WebKit が戻した
+	 * 番兵と付け直した番兵が末尾に並ぶ。そのとき減らしてよいのは番兵だけで、打った
+	 * 改行のノードを減らすと、Return のやり直しや、前に打った改行がある取り消しで
+	 * 改行が消える(2026-10-29 に WKWebView で確認)。そこで流し込みと入力のたびに、
+	 * 番兵(最後の空でないノード)より前の `\n` のノードをノードそのもので覚える ――
+	 * 取り消し・やり直しは同じノードを戻すので、覚えたものは原文の改行と分かる。
+	 *
+	 * WeakSet にしないのは、WebKit が DOM から外れたノード(取り消しで外れ、取り消しの
+	 * 履歴だけが持っているノード)の JS の包みを GC で捨てるため。やり直しで戻った
+	 * ノードは新しい包みになり、WeakSet では覚えていないことになる(打った改行を番兵と
+	 * 見て消す。2026-10-29 に WKWebView で GC を起こして再現)。ここで強く持てば包みは
+	 * 捨てられない。編集を終えるときに空にする(下の閲覧へ戻る $effect)。
+	 */
+	const sourceLineBreaks = new Set<Node>();
+
+	function isSentinelShaped(node: Node): boolean {
+		return node instanceof Text && node.data === SOURCE_SENTINEL;
+	}
+
+	function isEmptyText(node: Node): boolean {
+		return node instanceof Text && node.data === '';
+	}
+
+	function rememberSourceLineBreaks(pre: HTMLElement) {
+		let sentinel = pre.lastChild;
+		while (sentinel && isEmptyText(sentinel)) sentinel = sentinel.previousSibling;
+		for (const node of pre.childNodes) {
+			if (node !== sentinel && isSentinelShaped(node)) sourceLineBreaks.add(node);
+		}
+	}
+
+	/**
+	 * 契約8: 末尾に並んだ番兵(原文の改行と覚えていない `\n` のノード)を、いちばん前の
+	 * 1 つだけ残して外す。残すのは WebKit が取り消しで戻した側で、外すのはこちらが
+	 * 付け直した後ろの側(WebKit の履歴が触らないノード)。キャレットは前の番兵か原文の
+	 * ノードの上にあるので動かない。
+	 */
+	function dropDoubledSentinels(pre: HTMLElement) {
+		const run: Node[] = [];
+		for (let node = pre.lastChild; node; node = node.previousSibling) {
+			if (isEmptyText(node)) continue;
+			if (!isSentinelShaped(node) || sourceLineBreaks.has(node)) break;
+			run.push(node);
+		}
+		for (const node of run.slice(0, -1)) pre.removeChild(node);
+	}
+
+	/**
+	 * 追補r 契約9: 選択がソース編集の `<pre>` の番兵に掛かっていれば、番兵の手前までの
+	 * 範囲(`textContent` の上の文字数)。掛かっていなければ null(今までどおり)。
+	 */
+	function selectionOverSentinel(sel: Selection): { pre: HTMLElement; start: number; end: number } | null {
+		const pre = editorEl;
+		if (!pre || sel.rangeCount === 0 || sel.isCollapsed) return null;
+		const range = sel.getRangeAt(0);
+		if (!pre.contains(range.startContainer) || !pre.contains(range.endContainer)) return null;
+		const text = pre.textContent ?? '';
+		if (!text.endsWith(SOURCE_SENTINEL)) return null;
+		const end = text.length - SOURCE_SENTINEL.length;
+		if (textOffsetIn(pre, range.endContainer, range.endOffset) <= end) return null;
+		const start = Math.min(textOffsetIn(pre, range.startContainer, range.startOffset), end);
+		return { pre, start, end };
+	}
+
+	/**
 	 * `<pre>` の中身は Svelte のテキスト補間ではなく、ここで直接入れる。
 	 *
 	 * `{@html}` も `{expr}` も、依存が動くたびにテキストノードを作り直す =
@@ -184,12 +281,21 @@
 	 * ときだけ書く」形にしてある: 利用者の入力で動いたときは `oninput` が
 	 * バッファを DOM と同じ値へ揃えるのでここは何もせず、外部変更に追従した
 	 * (契約⑥ の `apply`)ときだけ書き戻しが走る。
+	 *
+	 * 追補r 契約1・5: 中身は「原文 + 番兵」で、比べるのもその形。番兵は原文とは別の
+	 * テキストノードに置く ―― WebKit が番兵を仮の改行として消しても、原文のノードの
+	 * 上のキャレットは巻き込まれない。
 	 */
 	$effect(() => {
 		const el = editorEl;
 		const source = editSource;
-		if (!el || el.textContent === source) return;
-		el.textContent = source;
+		if (!el || el.textContent === source + SOURCE_SENTINEL) return;
+		const doc = el.ownerDocument;
+		const sentinel = doc.createTextNode(SOURCE_SENTINEL);
+		if (source.length > 0) el.replaceChildren(doc.createTextNode(source), sentinel);
+		else el.replaceChildren(sentinel);
+		// 契約8: 原文が `\n` だけなら、そのノードは番兵ではない。
+		rememberSourceLineBreaks(el);
 	});
 
 	/** 編集へ入った直後だけキャレットを本文へ置く(書き戻しのたびに奪わない)。 */
@@ -439,6 +545,34 @@
 		return textOffsetIn(root, range.startContainer, range.startOffset);
 	}
 
+	/**
+	 * 追補q 契約1・2: HTML の編集面(Shadow DOM)の点の文字数。`caretRangeFromPoint` は
+	 * Shadow の中の点をホスト側へ寄せるので、`caretPositionFromPoint` に編集面の
+	 * ShadowRoot を `shadowRoots` で渡して取る(2026-10-29 に WKWebView で確認)。
+	 * 無い・例外・null・`root` の外なら今までの `offsetAtPoint`(WebKit ではホスト側が
+	 * 返るので null=ブロックの先頭)。
+	 */
+	function offsetAtPointInShadow(root: Element, shadow: ShadowRoot, x: number, y: number): number | null {
+		// TS 5.6 の lib.dom に無いので、使う形だけを局所の型で受ける。
+		const doc = root.ownerDocument as Document & {
+			caretPositionFromPoint?: (
+				x: number,
+				y: number,
+				options?: { shadowRoots?: ShadowRoot[] },
+			) => { offsetNode: Node; offset: number } | null;
+		};
+		let pos: { offsetNode: Node; offset: number } | null = null;
+		if (typeof doc.caretPositionFromPoint === 'function') {
+			try {
+				pos = doc.caretPositionFromPoint(x, y, { shadowRoots: [shadow] });
+			} catch {
+				pos = null;
+			}
+		}
+		if (pos && root.contains(pos.offsetNode)) return textOffsetIn(root, pos.offsetNode, pos.offset);
+		return offsetAtPoint(root, x, y);
+	}
+
 	/** (node, offset) が `root` の `textContent` の上で何文字目か。 */
 	function textOffsetIn(root: Node, node: Node, offset: number): number {
 		const probe = (root.ownerDocument ?? window.document).createRange();
@@ -649,6 +783,8 @@
 		blockEditFromView = false;
 		// 要件#48 追補p: 使われなかったキャレットの控えを次の編集へ持ち越さない。
 		pendingSourceCaret = null;
+		// 要件#48 追補r 契約8: 編集の `<pre>` ごと捨てるので、覚えた改行のノードも放す。
+		sourceLineBreaks.clear();
 		releaseBlockEdit();
 		// 追補d(1)(2): 掴みを捨てるのは画面も掴む前へ戻すことを含む。
 		restoreGrabbedBlocks();
@@ -1297,8 +1433,8 @@
 			const block = resolveLeafBlock(target, root);
 			// 編集不可(hid が無い・コンテナ)ならダブルクリックは空振り(契約⑤)。
 			if (!block) return;
-			// 要件#48 追補p 契約1(d): 掴む前(ハイライトを外す前)に、点の文字数を採る。
-			const caret = e instanceof MouseEvent ? offsetAtPoint(block, e.clientX, e.clientY) : null;
+			// 要件#48 追補p 契約1(d)・追補q: 掴む前(ハイライトを外す前)に、点の文字数を採る。
+			const caret = e instanceof MouseEvent ? offsetAtPointInShadow(block, shadow, e.clientX, e.clientY) : null;
 			beginHtmlBlockEdit(block, caret);
 		};
 
@@ -1398,12 +1534,31 @@
 	}
 
 	function handleEditInput(e: Event) {
-		windowState.updateBuffer(bufferFromPre(e.currentTarget as HTMLElement));
+		syncSourceBuffer(e.currentTarget as HTMLElement, e instanceof InputEvent ? e.inputType : '');
+	}
+
+	/**
+	 * 追補r 契約9: 番兵に掛かったカット。番兵を除いた文字をクリップボードへ書き、選択を
+	 * 番兵の手前までに縮めてから消す。消すのは WebKit の `delete`(取り消しの履歴に乗り、
+	 * `input` で `syncSourceBuffer` が走る)で、使えなければ DOM で消す。番兵に掛からない
+	 * カットは既定のまま(WebKit が消して `input` を送る)。
+	 */
+	function handleEditCut(e: ClipboardEvent) {
+		const sel = window.getSelection();
+		const over = sel ? selectionOverSentinel(sel) : null;
+		if (!sel || !over) return;
+		e.preventDefault();
+		e.clipboardData?.setData('text/plain', (over.pre.textContent ?? '').slice(over.start, over.end));
+		placeSelection(over.pre, over.start, over.end);
+		const doc = over.pre.ownerDocument;
+		const deleted = typeof doc.execCommand === 'function' && doc.execCommand('delete');
+		if (!deleted && over.start < over.end) sel.getRangeAt(0).deleteContents();
+		syncSourceBuffer(over.pre);
 	}
 
 	/**
 	 * 要件#48 追補n 契約1〜4: ソース編集の `<pre>` のキャレット位置へ素テキストを
-	 * 入れ、編集バッファを `textContent` に揃える(契約3)。
+	 * 入れ、編集バッファを `textContent` に揃える(契約3。追補r: 番兵を除いて)。
 	 *
 	 * Return も貼り付けも既定任せにしないのは、WebKit が改行を `<div>` にして
 	 * `bufferFromPre`(`textContent`)から落とすため(Issue #765)。入れるのは WebKit
@@ -1431,8 +1586,16 @@
 			}
 		}
 		const rest = pieces.slice(done).join('');
-		if (rest.length > 0) insertPlainText(el, rest);
-		windowState.updateBuffer(bufferFromPre(el));
+		if (rest.length > 0) {
+			// 追補r 契約5: 選択が `<pre>` の外なら、`insertPlainText` の「末尾へ足す」は
+			// 番兵の後ろになるので、原文の末尾(番兵の手前)にキャレットを置いてから入れる。
+			if (!inside && sel) {
+				const end = Math.max(0, (el.textContent ?? '').length - SOURCE_SENTINEL.length);
+				placeSelection(el, end, end);
+			}
+			insertPlainText(el, rest);
+		}
+		syncSourceBuffer(el);
 	}
 
 	/**
@@ -1962,7 +2125,11 @@
 		// consulted at all any more; it stays for mark creation (buildAnchor).
 		const sel = window.getSelection();
 		if (!sel) return;
-		const text = planSelectionCopy(sel);
+		// 要件#48 追補r 契約9: ソース編集の番兵はクリップボードに入れない。
+		const over = selectionOverSentinel(sel);
+		const text = over
+			? (over.pre.textContent ?? '').slice(over.start, over.end)
+			: planSelectionCopy(sel);
 		if (text === null) return; // browser default (collapsed selection etc.)
 		e.preventDefault();
 		e.clipboardData?.setData('text/plain', text);
@@ -2271,7 +2438,8 @@
 				bind:this={editorEl}
 				oninput={handleEditInput}
 				onkeydown={handleEditKeydown}
-				onpaste={handleEditPaste}></pre>
+				onpaste={handleEditPaste}
+				oncut={handleEditCut}></pre>
 		{:else}
 			<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 			{@html html}

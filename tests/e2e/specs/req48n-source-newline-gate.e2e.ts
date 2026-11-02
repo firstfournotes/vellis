@@ -321,7 +321,8 @@ async function openFileAndEnterEditor(): Promise<void> {
 		timeoutMsg: 'menu_edit did not enter the editor',
 	});
 	const v = await preSnapshot();
-	expect(v.text).toBe(ORIGINAL);
+	// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel); the buffer is the text without it.
+	expect(v.text).toBe(ORIGINAL + '\n');
 	expect(v.children).toBe(0);
 }
 
@@ -349,7 +350,8 @@ async function revertEditAndLeaveEditor(): Promise<void> {
 			document.querySelector<HTMLButtonElement>('[data-testid="edit-done"]')?.click();
 		},
 		EDITOR,
-		onDisk,
+		// 追補r: write the sentinel too, so the buffer (text minus one `\n`) equals the disk.
+		onDisk + '\n',
 	);
 	await browser.waitUntil(async () => !(await preSnapshot()).editing, {
 		timeout: 5_000,
@@ -435,10 +437,10 @@ describe('Requirement #48 追補n human gate (Return and paste in the source edi
 		expect(ret.defaultPrevented).toBe(true);
 		expect(ret.hasDivOrBr).toBe(false);
 		expect(ret.children).toBe(0);
-		expect(ret.text).toBe(afterReturn);
+		expect(ret.text).toBe(afterReturn + '\n'); // 追補r: + sentinel
 		expect(ret.caret).toBe(MID_FIRST + 1);
 		expect(typed).toBe(true);
-		expect(afterType.text).toBe(expected);
+		expect(afterType.text).toBe(expected + '\n'); // 追補r: + sentinel
 		expect(afterType.hasDivOrBr).toBe(false);
 
 		// Command + S (契約3 / AC (d)): the bytes on disk carry the `\n`.
@@ -497,10 +499,11 @@ describe('Requirement #48 追補n human gate (Return and paste in the source edi
 		// Compared as labelled rows so a failure names the case.
 		const rows = outcomes.map((o) => ({ label: o.label, dispatched: o.dispatched, defaultPrevented: o.defaultPrevented, text: o.text, hasDivOrBr: o.hasDivOrBr }));
 		expect(rows).toEqual(
-			cases.map(([label]) => ({ label, dispatched: true, defaultPrevented: false, text: ORIGINAL, hasDivOrBr: false })),
+			// 追補r: the editor text carries the sentinel.
+			cases.map(([label]) => ({ label, dispatched: true, defaultPrevented: false, text: ORIGINAL + '\n', hasDivOrBr: false })),
 		);
 		expect(shift.defaultPrevented).toBe(true);
-		expect(shift.text).toBe('first\n line\nsecond line\n');
+		expect(shift.text).toBe('first\n line\nsecond line\n' + '\n'); // 追補r: + sentinel
 		expect(shift.hasDivOrBr).toBe(false);
 		expect(fs.readFileSync(editFile, 'utf8')).toBe(ORIGINAL);
 	});
@@ -527,17 +530,18 @@ describe('Requirement #48 追補n human gate (Return and paste in the source edi
 
 		expect(p1.dispatched).toBe(true);
 		expect(p1.defaultPrevented).toBe(true);
-		expect(p1.text).toBe(after1);
+		// 追補r: the editor text carries the sentinel (`after1` / `after2` are the buffer = the bytes saved).
+		expect(p1.text).toBe(after1 + '\n');
 		expect(p1.hasDivOrBr).toBe(false);
 		expect(p1.children).toBe(0);
 		expect(p1.text).not.toContain('\r');
 		expect(p1.caret).toBe(END_FIRST_LINE + PASTE_MIXED_NORMALIZED.length);
 		expect(p2.defaultPrevented).toBe(true);
-		expect(p2.text).toBe(after2);
+		expect(p2.text).toBe(after2 + '\n');
 		expect(p2.hasDivOrBr).toBe(false);
 		expect(p3.dispatched).toBe(true);
 		expect(p3.defaultPrevented).toBe(true);
-		expect(p3.text).toBe(after2);
+		expect(p3.text).toBe(after2 + '\n');
 		expect(p3.hasDivOrBr).toBe(false);
 
 		// Command + S: the lines are on disk, byte for byte, with no CR.
@@ -574,13 +578,14 @@ describe('Requirement #48 追補n human gate (Return and paste in the source edi
 		await safeShot('req48n-gate4-after-undo');
 		report(REPORT, { gate: '48n-4-undo', ret, undoReturnOk, afterUndoReturn, paste, undoPasteOk, afterUndoPaste });
 
-		expect(ret.text).toBe('first\n line\nsecond line\n');
+		// 追補r: the editor text carries the sentinel.
+		expect(ret.text).toBe('first\n line\nsecond line\n' + '\n');
 		expect(undoReturnOk).toBe(true);
-		expect(afterUndoReturn.text).toBe(ORIGINAL);
+		expect(afterUndoReturn.text).toBe(ORIGINAL + '\n');
 		expect(afterUndoReturn.hasDivOrBr).toBe(false);
-		expect(paste.text).toBe('first lineA\nB\nsecond line\n');
+		expect(paste.text).toBe('first lineA\nB\nsecond line\n' + '\n');
 		expect(undoPasteOk).toBe(true);
-		expect(afterUndoPaste.text).toBe(ORIGINAL);
+		expect(afterUndoPaste.text).toBe(ORIGINAL + '\n');
 		expect(afterUndoPaste.hasDivOrBr).toBe(false);
 
 		// The undo also brought the buffer back (契約3: `input` after undo → buffer =

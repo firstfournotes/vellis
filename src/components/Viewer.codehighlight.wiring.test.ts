@@ -160,7 +160,8 @@ function expectPlainEditor(container: HTMLElement) {
 	expect(list, 'contenteditable は 1 つだけ').toHaveLength(1);
 	const editor = list[0];
 	expect(editor.matches('pre.vellis-plaintext[contenteditable="true"]')).toBe(true);
-	expect(editor.textContent).toBe(TS_CONTENT);
+	// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+	expect(editor.textContent).toBe(TS_CONTENT + '\n');
 	expect(editor.children, '編集面は子要素を持たない(色付きの span を持ち込まない)').toHaveLength(0);
 	return editor;
 }

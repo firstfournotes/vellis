@@ -581,7 +581,8 @@ async function leaveEdit(file: string): Promise<void> {
 			document.querySelector<HTMLButtonElement>('[data-testid="edit-done"]')?.click();
 		},
 		EDITOR,
-		onDisk,
+		// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel); write it too so the buffer equals the disk.
+		onDisk + '\n',
 	);
 	await browser.waitUntil(
 		async () => browser.execute(() => document.querySelector('[contenteditable="true"]') === null && document.querySelector('[data-testid="edit-done"]') === null),
@@ -663,7 +664,7 @@ describe('Requirement #48 追補p human gate (the caret goes where the user doub
 		expect(after.selection.rect!.top).toBeGreaterThanOrEqual(after.visibleTop - 0.5);
 		expect(after.selection.rect!.bottom).toBeLessThanOrEqual(after.innerHeight + 0.5);
 		expect(typed).toBe(true);
-		expect(afterType.text).toBe(TXT_CONTENT.slice(0, point.offset) + 'X' + TXT_CONTENT.slice(point.offset));
+		expect(afterType.text).toBe(TXT_CONTENT.slice(0, point.offset) + 'X' + TXT_CONTENT.slice(point.offset) + '\n'); // 追補r: + sentinel
 	});
 
 	it('gate p-2: markdown paragraph, a real double-click in the middle → that block editable with a collapsed caret at the clicked character, scrollTop unchanged', async () => {
@@ -805,7 +806,7 @@ describe('Requirement #48 追補p human gate (the caret goes where the user doub
 		await safeShot('req48p-gate6-md-cmd-e-selection');
 		report(REPORT, { gate: '48p-6-md-cmd-e-selection', expected, after });
 
-		expect(after.text).toBe(MD_CONTENT);
+		expect(after.text).toBe(MD_CONTENT + '\n'); // 追補r: + sentinel
 		expect(after.selection.inside).toBe(true);
 		expect(after.selection.collapsed).toBe(true);
 		expect(after.selection.start).toBe(expected);

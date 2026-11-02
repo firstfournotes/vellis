@@ -993,7 +993,8 @@ describe('AC-48-追p (a) — text のダブルクリックで、その文字の�
 
 		const editor = editorPre(container);
 		expect(windowState.editMode).toBe('edit');
-		expect(editor.textContent).toBe(TXT_CONTENT);
+		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
+		expect(editor.textContent).toBe(TXT_CONTENT + '\n');
 		expect(document.activeElement, '編集の pre にフォーカスがあること').toBe(editor);
 		expectCaretAt(editor, CLICK_OFFSET);
 		expect(model.scrollTop, 'scrollTop が入る前のまま(先頭へ戻らない=契約3)').toBe(SCROLLED);
@@ -1155,7 +1156,7 @@ describe('AC-48-追p (d) — 編集できない場所のダブルクリックは
 		await doubleClickAt(pre, colClientX(LIST_COL_IN_FENCE), blockClientY(BLOCK_LIST, scrollTop));
 
 		const editor = editorPre(container);
-		expect(editor.textContent).toBe(MD);
+		expect(editor.textContent).toBe(MD + '\n'); // 追補r: 原文 + 番兵
 		expectCaretAt(editor, expected);
 		const visible = model.caretVisible();
 		expect(
@@ -1277,7 +1278,7 @@ describe('AC-48-追p (e) — Command + E: 選択があればその位置・無�
 		await settle();
 
 		const editor = editorPre(container);
-		expect(editor.textContent).toBe(MD);
+		expect(editor.textContent).toBe(MD + '\n'); // 追補r: 原文 + 番兵
 		expectCaretAt(editor, expected);
 		const visible = model.caretVisible();
 		expect(
@@ -1455,7 +1456,7 @@ describe('AC-48-追p (g) — 入った後の書き戻し(外部変更の apply)�
 		expect(windowState.applyFileChanged({ uri: TXT_URI, content: rewritten, modified: 2 })).toBe('apply');
 		await settle();
 
-		expect(editor.textContent, '書き戻しが届いている(前提)').toBe(rewritten);
+		expect(editor.textContent, '書き戻しが届いている(前提。追補r: 原文 + 番兵)').toBe(rewritten + '\n');
 		expect(editables(container)).toEqual([editor]);
 		expect(placementsIn(editor), '書き戻しで選択を置き直さない').toEqual([]);
 		expect(model.focusCalls.filter((c) => c.el === editor), '書き戻しで focus しない').toEqual([]);
@@ -1488,7 +1489,7 @@ describe('AC-48-追p 契約1(a) CRLF・契約2(a) — CRLF の文書では原文
 		});
 
 		const editor = editorPre(container);
-		expect(editor.textContent, '編集の pre は原文の `\\r\\n` をそのまま持つ').toBe(TXT_CRLF);
+		expect(editor.textContent, '編集の pre は原文の `\\r\\n` をそのまま持つ(追補r: + 番兵)').toBe(TXT_CRLF + '\n');
 		const expected = crlfLineStart(CLICK_LINE) + CLICK_COL;
 		expectCaretAt(editor, expected);
 		expect(TXT_CRLF[expected], '同じ文字(行 55 の "alpha" の "p")').toBe(TXT_CONTENT[CLICK_OFFSET]);
@@ -1509,7 +1510,7 @@ describe('AC-48-追p 契約1(a) CRLF・契約2(a) — CRLF の文書では原文
 		await settle();
 
 		const editor = editorPre(container);
-		expect(editor.textContent).toBe(TXT_CRLF);
+		expect(editor.textContent).toBe(TXT_CRLF + '\n'); // 追補r: 原文 + 番兵
 		const shape = selectionIn(editor);
 		expect(shape.inside).toBe(true);
 		expect(shape.collapsed, '範囲は潰さない').toBe(false);
