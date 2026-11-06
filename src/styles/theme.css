@@ -1,66 +1,263 @@
 /*
- * Shared UI colour palette for Vellis (要件#7).
+ * Vellis design tokens — GENERATED FILE, DO NOT EDIT BY HAND (生成物・手で直さない).
  *
- * Application chrome (RootPicker / Explorer / ExplorerItem) reads its colours
- * from these custom properties instead of hard-coding hex literals, so that a
- * palette change happens in one place. Markdown document styles keep their own
- * `--md-color-*` scale in markdown.css; this file covers the app shell only.
+ * Source of truth: themes/default.json (要件#56 契約 2・docs/theme-architecture.md).
+ * After editing the JSON, regenerate this file with `pnpm theme:css`
+ * (scripts/build-theme-css.mjs) and commit both; design-tokens.acceptance.test.ts
+ * fails while the two disagree.
  *
- * Naming follows markdown.css: `:root` custom properties named by role, not by
- * widget. Two roles that happen to share a value today keep separate names only
- * when they can legitimately drift apart (e.g. control hover text vs body text).
- *
- * Values are the ones the components used before the extraction — the rendered
- * appearance is unchanged. No dark-mode overrides (out of scope for 要件#7).
+ * Mode (要件#56 契約 3): <html data-theme="light" | "dark">, no attribute = follow
+ * the OS. A user theme is injected later as <style id="vellis-theme"> with the
+ * same three selectors, so it wins by document order.
  */
 
+/* Light — and the default while the OS is light and no mode is chosen. */
 :root {
-	/* --- Surfaces --- */
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 16px;
+	--space-5: 24px;
+	--space-6: 32px;
+	--radius-sm: 5px;
+	--radius-md: 9px;
+	--font-ui: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Helvetica Neue", sans-serif;
+	--font-doc: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Helvetica Neue", sans-serif;
+	--font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+	--text-xs: 11px;
+	--text-sm: 12px;
+	--text-md: 13px;
+	--text-lg: 15px;
+	--text-xl: 20px;
+	--doc-size: 16px;
+	--doc-leading: 1.8;
+	--doc-measure: 72ch;
+	--leading-ui: 1.45;
+	--pane-header-font-size: 11px;
+	--pane-header-font-weight: 600;
+	--pane-header-letter-spacing: .06em;
+	--duration-fast: 90ms;
+	--duration-base: 160ms;
+	--duration-slow: 240ms;
+	--ease-out: cubic-bezier(.2, .8, .2, 1);
+	--color-bg-base: #f1f2f4;
+	--color-bg-surface: #ffffff;
+	--color-bg-raised: #ffffff;
+	--color-bg-hover: rgba(15,18,30,.045);
+	--color-bg-active: rgba(15,18,30,.08);
+	--color-text-primary: #1b1d22;
+	--color-text-secondary: #555a64;
+	--color-text-muted: #8a8f99;
+	--color-border: #e1e3e8;
+	--color-border-strong: #cdd0d7;
+	--color-accent: #4256e8;
+	--color-accent-text: #3447d4;
+	--color-on-accent: #ffffff;
+	--color-accent-soft: rgba(66,86,232,.09);
+	--color-selection: rgba(66,86,232,.18);
+	--color-focus-ring: #4256e8;
+	--color-danger: #d33b3b;
+	--color-success: #16905a;
+	--color-warning: #b7791f;
+	--color-danger-soft: rgba(211,59,59,.08);
+	--color-success-soft: rgba(22,144,90,.09);
+	--color-warning-soft: rgba(183,121,31,.09);
+	--color-shadow: rgba(16,18,27,.16);
+	--color-emphasis: #8250df;
+	--shadow-1: 0 1px 2px rgba(16,18,27,.08), 0 0 0 1px rgba(16,18,27,.05);
+	--shadow-2: 0 16px 40px rgba(16,18,27,.16), 0 0 0 1px rgba(16,18,27,.08);
+	--ft-md: #4256e8;
+	--ft-html: #d0661c;
+	--ft-pdf: #d23b3b;
+	--ft-img: #16905a;
+	--ft-video: #7a4fd6;
+	--ft-audio: #c03f86;
+	--ft-3d: #118496;
+	--ft-code: #a27406;
+	--ft-folder: #7d838e;
+	--color-find-match: #fef08a;
+	--color-find-current: #fb923c;
+	--color-find-current-text: #1f2328;
 
-	/* Base canvas (RootPicker screen background). */
-	--color-bg-primary: #ffffff;
-	/* Subtle raised surface: Explorer panel, button face, picker row hover. */
-	--color-bg-secondary: #f6f8fa;
-	/* Hover state of a control sitting on a subtle surface (buttons). */
-	--color-bg-hover: #eaeef2;
-	/* Hover state of a file-tree row. */
-	--color-bg-tree-hover: #e8e8e8;
-	/* Selected file-tree row. */
-	--color-bg-tree-active: #d0e0f0;
+	/* Names from 要件#7 kept as aliases (not theme keys). */
+	--color-bg-primary: var(--color-bg-surface);
+	--color-bg-secondary: var(--color-bg-base);
+	--color-bg-tree-hover: var(--color-bg-hover);
+	--color-bg-tree-active: var(--color-accent-soft);
+	--color-text-hover: var(--color-text-primary);
+	--color-text-placeholder: var(--color-text-muted);
+	--color-text-danger: var(--color-danger);
+}
 
-	/* --- Foreground --- */
+/* Dark, chosen in View ▸ Appearance. */
+:root[data-theme="dark"] {
+	--color-bg-base: #101114;
+	--color-bg-surface: #1b1c20;
+	--color-bg-raised: #24262b;
+	--color-bg-hover: rgba(255,255,255,.05);
+	--color-bg-active: rgba(255,255,255,.085);
+	--color-text-primary: #e8e9ec;
+	--color-text-secondary: #a6a9b1;
+	--color-text-muted: #6d717a;
+	--color-border: #42464f;
+	--color-border-strong: #545964;
+	--color-accent: #5566ee;
+	--color-accent-text: #93a0ff;
+	--color-on-accent: #ffffff;
+	--color-accent-soft: rgba(112,128,255,.16);
+	--color-selection: rgba(112,128,255,.32);
+	--color-focus-ring: #93a0ff;
+	--color-danger: #f0716c;
+	--color-success: #4cc48b;
+	--color-warning: #e5b450;
+	--color-danger-soft: rgba(240,113,108,.13);
+	--color-success-soft: rgba(76,196,139,.13);
+	--color-warning-soft: rgba(229,180,80,.12);
+	--color-shadow: rgba(0,0,0,.55);
+	--color-emphasis: #d2a8ff;
+	--shadow-1: 0 1px 2px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.05);
+	--shadow-2: 0 16px 40px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+	--ft-md: #93a0ff;
+	--ft-html: #f0a060;
+	--ft-pdf: #f07a74;
+	--ft-img: #5ccf98;
+	--ft-video: #b996ff;
+	--ft-audio: #f28cc0;
+	--ft-3d: #56c8d8;
+	--ft-code: #e3c062;
+	--ft-folder: #8a8f99;
+	--color-find-match: rgba(229,180,80,.32);
+	--color-find-current: #e8913a;
+	--color-find-current-text: #1b1d22;
+}
 
-	/* Body text. */
-	--color-text-primary: #1f2328;
-	/* Text of an interactive control while hovered. */
-	--color-text-hover: #24292f;
-	/* Secondary text and glyphs: hints, section titles, carets, icon buttons. */
-	--color-text-secondary: #656d76;
-	/* De-emphasised inline notes (loading / empty markers). */
-	--color-text-muted: #8b949e;
-	/* Placeholder copy shown in place of missing content. */
-	--color-text-placeholder: #a0a8b0;
-	/* Error text. */
-	--color-text-danger: #cf222e;
+/* Dark, following the OS (System). */
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--color-bg-base: #101114;
+		--color-bg-surface: #1b1c20;
+		--color-bg-raised: #24262b;
+		--color-bg-hover: rgba(255,255,255,.05);
+		--color-bg-active: rgba(255,255,255,.085);
+		--color-text-primary: #e8e9ec;
+		--color-text-secondary: #a6a9b1;
+		--color-text-muted: #6d717a;
+		--color-border: #42464f;
+		--color-border-strong: #545964;
+		--color-accent: #5566ee;
+		--color-accent-text: #93a0ff;
+		--color-on-accent: #ffffff;
+		--color-accent-soft: rgba(112,128,255,.16);
+		--color-selection: rgba(112,128,255,.32);
+		--color-focus-ring: #93a0ff;
+		--color-danger: #f0716c;
+		--color-success: #4cc48b;
+		--color-warning: #e5b450;
+		--color-danger-soft: rgba(240,113,108,.13);
+		--color-success-soft: rgba(76,196,139,.13);
+		--color-warning-soft: rgba(229,180,80,.12);
+		--color-shadow: rgba(0,0,0,.55);
+		--color-emphasis: #d2a8ff;
+		--shadow-1: 0 1px 2px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.05);
+		--shadow-2: 0 16px 40px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+		--ft-md: #93a0ff;
+		--ft-html: #f0a060;
+		--ft-pdf: #f07a74;
+		--ft-img: #5ccf98;
+		--ft-video: #b996ff;
+		--ft-audio: #f28cc0;
+		--ft-3d: #56c8d8;
+		--ft-code: #e3c062;
+		--ft-folder: #8a8f99;
+		--color-find-match: rgba(229,180,80,.32);
+		--color-find-current: #e8913a;
+		--color-find-current-text: #1b1d22;
+	}
+}
 
-	/* --- Borders --- */
+/*
+ * Paper is always the light values above: neither the mode nor a user theme
+ * reaches print. The selector outranks the dark blocks above and the per-mode
+ * blocks of <style id="vellis-theme">.
+ */
+@media print {
+	:root:root:root {
+		--space-1: 4px;
+		--space-2: 8px;
+		--space-3: 12px;
+		--space-4: 16px;
+		--space-5: 24px;
+		--space-6: 32px;
+		--radius-sm: 5px;
+		--radius-md: 9px;
+		--font-ui: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Helvetica Neue", sans-serif;
+		--font-doc: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Helvetica Neue", sans-serif;
+		--font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+		--text-xs: 11px;
+		--text-sm: 12px;
+		--text-md: 13px;
+		--text-lg: 15px;
+		--text-xl: 20px;
+		--doc-size: 16px;
+		--doc-leading: 1.8;
+		--doc-measure: 72ch;
+		--leading-ui: 1.45;
+		--pane-header-font-size: 11px;
+		--pane-header-font-weight: 600;
+		--pane-header-letter-spacing: .06em;
+		--duration-fast: 90ms;
+		--duration-base: 160ms;
+		--duration-slow: 240ms;
+		--ease-out: cubic-bezier(.2, .8, .2, 1);
+		--color-bg-base: #f1f2f4;
+		--color-bg-surface: #ffffff;
+		--color-bg-raised: #ffffff;
+		--color-bg-hover: rgba(15,18,30,.045);
+		--color-bg-active: rgba(15,18,30,.08);
+		--color-text-primary: #1b1d22;
+		--color-text-secondary: #555a64;
+		--color-text-muted: #8a8f99;
+		--color-border: #e1e3e8;
+		--color-border-strong: #cdd0d7;
+		--color-accent: #4256e8;
+		--color-accent-text: #3447d4;
+		--color-on-accent: #ffffff;
+		--color-accent-soft: rgba(66,86,232,.09);
+		--color-selection: rgba(66,86,232,.18);
+		--color-focus-ring: #4256e8;
+		--color-danger: #d33b3b;
+		--color-success: #16905a;
+		--color-warning: #b7791f;
+		--color-danger-soft: rgba(211,59,59,.08);
+		--color-success-soft: rgba(22,144,90,.09);
+		--color-warning-soft: rgba(183,121,31,.09);
+		--color-shadow: rgba(16,18,27,.16);
+		--color-emphasis: #8250df;
+		--shadow-1: 0 1px 2px rgba(16,18,27,.08), 0 0 0 1px rgba(16,18,27,.05);
+		--shadow-2: 0 16px 40px rgba(16,18,27,.16), 0 0 0 1px rgba(16,18,27,.08);
+		--ft-md: #4256e8;
+		--ft-html: #d0661c;
+		--ft-pdf: #d23b3b;
+		--ft-img: #16905a;
+		--ft-video: #7a4fd6;
+		--ft-audio: #c03f86;
+		--ft-3d: #118496;
+		--ft-code: #a27406;
+		--ft-folder: #7d838e;
+		--color-find-match: #fef08a;
+		--color-find-current: #fb923c;
+		--color-find-current-text: #1f2328;
+	}
+}
 
-	/* Default separator and control border. */
-	--color-border: #d0d7de;
-
-	/* --- Elevation --- */
-
-	/* Drop shadow of a floating surface (context menu). */
-	--color-shadow: rgba(0, 0, 0, 0.18);
-
-	/* --- Pane header typography (not colours) --- */
-
-	/*
-	 * Section titles of the left pane (Explorer / Recent Files / Find in Folder)
-	 * share one type style so they cannot drift apart (要件#64 追補b). Case and
-	 * colour stay with each component.
-	 */
-	--pane-header-font-size: 13px;
-	--pane-header-font-weight: 500;
-	--pane-header-letter-spacing: 0.04em;
+/*
+ * No motion when the OS asks for less. The selector outranks the per-mode
+ * blocks of <style id="vellis-theme">, which come later in document order.
+ */
+@media (prefers-reduced-motion: reduce) {
+	:root:root:root {
+		--duration-fast: 0ms;
+		--duration-base: 0ms;
+		--duration-slow: 0ms;
+	}
 }

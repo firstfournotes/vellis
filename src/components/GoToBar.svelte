@@ -138,30 +138,47 @@
 	 * 閲覧面の上部に敷く1行(契約①)。外部変更の帯・検索バーと同じ「本文の上に
 	 * 重ねない」流儀で、文書が無いとき(EmptyState)もこの位置に出る。
 	 */
+	/*
+	 * 要件#56 第2段: 検索バーと同じ札の見た目(`--color-bg-raised` + `--shadow-2` +
+	 * `--radius-md` の 1 段)。契約①どおり閲覧面の上に行の場所を取って置く(本文に重ねない)。
+	 */
 	.go-to-bar {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 6px 12px;
-		background-color: #f9fafb;
-		border-bottom: 1px solid #e5e7eb;
-		font-size: 12px;
+		gap: 4px;
+		margin: 8px 12px 4px;
+		padding: 5px 5px 5px 6px;
+		background-color: var(--color-bg-raised);
+		border-radius: var(--radius-md);
+		box-shadow: var(--shadow-2);
+		font-size: var(--text-sm);
+		color: var(--color-text-primary);
 		flex-shrink: 0;
 	}
 
 	.go-to-input {
 		flex: 0 1 360px;
 		min-width: 0;
-		font-size: 12px;
-		padding: 3px 8px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #ffffff;
-		color: #111827;
+		height: 26px;
+		box-sizing: border-box;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-family: var(--font-mono);
+		padding: 0 8px;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
+	}
+
+	.go-to-input::placeholder {
+		color: var(--color-text-muted);
+		font-family: var(--font-ui);
 	}
 
 	.go-to-input:focus {
-		outline: 2px solid #93c5fd;
+		border-color: var(--color-accent);
+		outline: 2px solid var(--color-focus-ring);
 		outline-offset: -1px;
 	}
 
@@ -172,24 +189,30 @@
 	.go-to-message {
 		flex: 1 1 auto;
 		min-width: 0;
-		color: #b45309;
+		padding: 0 6px;
+		color: var(--color-warning);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
 	.go-to-button {
-		font-size: 12px;
-		padding: 3px 10px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #ffffff;
-		color: #374151;
+		height: 26px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		padding: 0 9px;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		background-color: transparent;
+		color: var(--color-text-secondary);
 		cursor: pointer;
 		flex-shrink: 0;
+		white-space: nowrap;
 	}
 
 	.go-to-button:hover {
-		background-color: #f3f4f6;
+		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 </style>

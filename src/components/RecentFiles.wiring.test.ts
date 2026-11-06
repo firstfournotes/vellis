@@ -29,7 +29,9 @@
  * - testid: `recent-files`(区画の外側の要素。`data-zoom-region="explorer"` を持ち、開いているとき
  *   inline の `height: <n>px` を持つ)・`recent-files-header`(見出し行。`<button>` か `role="button"`・
  *   `aria-expanded` に開閉・pointerdown / pointermove / pointerup で開閉とドラッグ)・
- *   `recent-files-marker`(開閉の目印。閉=› 開=⌄ 相当のテキスト。開閉で文字が変わる)・
+ *   `recent-files-marker`(開閉の目印。要件#56 第2段(2026-11-03・要件側更新)で SVG アイコン
+ *   `#i-chev-r`(閉)/ `#i-chev-d`(開)になる= 中の `<use href>` の参照先か `aria-expanded` が開閉で変わる。
+ *   テキストの非空は要求しない)・
  *   `recent-files-title`(見出し `Recent Files`)・`recent-files-clear`(`<button>` `Clear`)・
  *   `recent-files-list`(一覧の器。`explorerZoom !== 100` のとき inline `zoom: <n>%`・100 では宣言無し)・
  *   `recent-files-row`(1 行= `<button>`・`data-uri` と `title` に完全な URI・今の文書なら
@@ -348,24 +350,37 @@ describe('AC-64-14: 区画の表示 — 行・aria-current・0 件・見出し�
 		expect(actsAsButton, 'the header row is a button (or role="button") that toggles').toBe(true);
 	});
 
-	it('見出し行の aria-expanded が開閉に一致し、目印の文字が開閉で変わる(CJK 無し)', async () => {
+	/**
+	 * 目印の「向き」= 中の `<use href>` の参照先(SVG アイコン・要件#56 第2段)。SVG が無ければ
+	 * テキスト(要件#56 第2段より前の `⌄` / `›`)。
+	 */
+	const markerShape = (): string => {
+		const use = marker().querySelector('use');
+		const href = use?.getAttribute('href') ?? use?.getAttribute('xlink:href');
+		if (href) return href;
+		return marker().textContent?.trim() ?? '';
+	};
+
+	it('見出し行の aria-expanded が開閉に一致し、目印(SVG の参照先か aria-expanded)が開閉で変わる(CJK 無し)', async () => {
 		recent = [MD];
 		mountSection();
 		await loaded(1);
 		expect(expanded()).toBe('true');
-		const openMarker = marker().textContent?.trim() ?? '';
-		expect(openMarker.length).toBeGreaterThan(0);
-		expect(openMarker).not.toMatch(CJK);
+		const openMarker = markerShape();
+		expect(marker().textContent ?? '').not.toMatch(CJK);
 		cleanup();
 
 		saveSectionExpanded(false);
 		mountSection();
 		await settle();
 		expect(expanded()).toBe('false');
-		const closedMarker = marker().textContent?.trim() ?? '';
-		expect(closedMarker.length).toBeGreaterThan(0);
-		expect(closedMarker).not.toMatch(CJK);
-		expect(closedMarker).not.toBe(openMarker);
+		const closedMarker = markerShape();
+		expect(marker().textContent ?? '').not.toMatch(CJK);
+		// 要件#56 第2段(2026-11-03 要件側更新): 目印が SVG なら参照先(#i-chev-d / #i-chev-r)が変わる。
+		// 参照先もテキストも同じなら、見出し行の aria-expanded が開閉を表していることで足りる。
+		if (openMarker !== '' || closedMarker !== '') {
+			expect(closedMarker).not.toBe(openMarker);
+		}
 	});
 
 	it('閉じた状態では一覧の行も `No recent files` も描かない(見出し行だけ)し、読み込みもしない', async () => {

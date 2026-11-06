@@ -6,6 +6,8 @@
  * opener / clipboard の呼び出しは ContextMenu.svelte と ExplorerItem.svelte 側。
  */
 import { parentUri } from './uri';
+import { RELOAD_FILE_LABEL, RELOAD_FOLDER_LABEL } from './reload-file';
+import { ADD_FILE_LABEL, ADD_FOLDER_LABEL, REMOVE_FROM_RECENT_FOLDERS_LABEL } from './dashboard';
 
 
 /**
@@ -22,15 +24,45 @@ export type ContextMenuItemId =
 	| 'open-in-new-tab'
 	/** 右クリックした項目のフォルダを root にした新しい窓(要件#59)。 */
 	| 'open-in-new-window'
+	/** 今の窓で開いている文書を読み直す(要件#80 契約 9)。ファイルの行と本文のメニュー。 */
+	| 'reload-file'
+	/** フォルダの一覧を読み直す(要件#80 契約 14)。フォルダの行とツリーの空白のメニュー。 */
+	| 'reload-folder'
 	| 'copy-path'
+	/** 右クリックした項目を Dashboard の Bookmark に足す(要件#83 契約 7)。済みなら下の Unpin に替わる。 */
+	| 'pin-to-bookmarks'
+	/** 右クリックした項目を Bookmark から外す(要件#83 契約 7)。 */
+	| 'unpin-from-bookmarks'
 	/** ウィンドウの複製(要件#34)。アイテムではなく窓に効く唯一の項目。 */
-	| 'duplicate-window';
+	| 'duplicate-window'
+	// --- Dashboard のメニュー(要件#83 契約 14)。実行は Dashboard 側(`onDashboardItem`)。
+	| 'dashboard-open'
+	| 'dashboard-open-in-new-window'
+	| 'move-up'
+	| 'move-down'
+	| 'remove-from-recent-folders'
+	| 'add-folder-bookmark'
+	| 'add-file-bookmark';
 
 export type ContextMenuItem = {
 	id: ContextMenuItemId;
 	label: string;
 	enabled: boolean;
+	/**
+	 * この項目の前に区切り線を引く(要件#83 契約 14 の Dashboard のメニュー)。省略= false。
+	 * 既存のメニューの線(Duplicate Window の前)は描画側の規則のままで、この印は使わない。
+	 */
+	separatorBefore?: boolean;
 };
+
+/**
+ * Dashboard のメニューを開いた対象(要件#83 契約 14)。タイルは並べ替えのために位置を持つ。
+ * `add-bookmark` は Add Bookmark… を押したときのメニュー(契約 7 (ac))。
+ */
+export type DashboardMenuTarget =
+	| { kind: 'bookmark'; uri: string; bookmarkKind: 'folder' | 'file'; index: number }
+	| { kind: 'recent-folder'; uri: string }
+	| { kind: 'add-bookmark' };
 
 /**
  * 新しいウィンドウを開く計画(要件#59 契約②③)。`root` は新窓の起点フォルダ
@@ -45,6 +77,23 @@ export type NewWindowAction = { command: 'new-window'; root: string; path: strin
  */
 export type NewTabAction = { command: 'new-tab'; path: string };
 
+/**
+ * 読み直しの計画(要件#80 契約 9・14)。`uri` は行の URI のまま。null は entry の無い
+ * メニューから押したとき — 本文のメニューの Reload File は「今の文書」、ツリーの空白の
+ * Reload Folder は「root」。読み直しの実行列は ContextMenu の外(ページ・Explorer)。
+ */
+export type ReloadAction =
+	| { command: 'reload-file'; uri: string | null }
+	| { command: 'reload-folder'; uri: string | null };
+
+/**
+ * Bookmark に足す・外す計画(要件#83 契約 7)。`uri` は行の URI のまま(正規化は Rust)。
+ * フォルダの行= folder・ファイルとシンボリックリンクの行= file。
+ */
+export type BookmarkAction =
+	| { command: 'pin-bookmark'; uri: string; kind: 'folder' | 'file' }
+	| { command: 'unpin-bookmark'; uri: string };
+
 export type ContextAction =
 	| { command: 'reveal_item_in_dir'; path: string }
 	| { command: 'open_path'; path: string }
@@ -57,7 +106,9 @@ export type ContextAction =
 	 */
 	| { command: 'duplicate-window' }
 	| NewWindowAction
-	| NewTabAction;
+	| NewTabAction
+	| ReloadAction
+	| BookmarkAction;
 
 /** ダイアログで選んだ .app で開く計画(要件#21 第2段)。 */
 export type OpenWithAction = { command: 'open_path'; path: string; with: string };
@@ -69,9 +120,31 @@ const LABELS: Record<ContextMenuItemId, string> = {
 	'open-with': 'Open With…',
 	'open-in-new-tab': 'Open in New Tab',
 	'open-in-new-window': 'Open in New Window',
+	'reload-file': RELOAD_FILE_LABEL,
+	'reload-folder': RELOAD_FOLDER_LABEL,
 	'copy-path': 'Copy Path',
-	'duplicate-window': 'Duplicate Window'
+	'pin-to-bookmarks': 'Pin to Bookmarks',
+	'unpin-from-bookmarks': 'Unpin from Bookmarks',
+	'duplicate-window': 'Duplicate Window',
+	'dashboard-open': 'Open',
+	'dashboard-open-in-new-window': 'Open in New Window',
+	'move-up': 'Move Up',
+	'move-down': 'Move Down',
+	'remove-from-recent-folders': REMOVE_FROM_RECENT_FOLDERS_LABEL,
+	'add-folder-bookmark': ADD_FOLDER_LABEL,
+	'add-file-bookmark': ADD_FILE_LABEL
 };
+
+/** Dashboard のメニューの項目(実行は Dashboard)。ツリーの行の計画には落とさない。 */
+const DASHBOARD_ITEM_IDS: ReadonlySet<ContextMenuItemId> = new Set([
+	'dashboard-open',
+	'dashboard-open-in-new-window',
+	'move-up',
+	'move-down',
+	'remove-from-recent-folders',
+	'add-folder-bookmark',
+	'add-file-bookmark'
+]);
 
 /** ssh リモートか(判別は URI スキームのみ・パス内容では分岐しない=契約⑤)。 */
 function isRemote(uri: string): boolean {
@@ -98,10 +171,14 @@ function newWindowRoot(entry: ContextMenuEntry): string | null {
  * 右クリックされたアイテムからメニュー項目を組む。
  *
  * - ファイル/symlink = Reveal in Finder・Open with Default App・Open With…・
- *   Open in New Tab・Open in New Window・Copy Path
+ *   Open in New Tab・Open in New Window・Reload File・Copy Path
  * - Open in New Tab(要件#62)はファイル/symlink だけ・常に有効(ssh でも=
  *   アプリの中で完結する)。フォルダをタブで開く意味は定まらないので出さない
- * - フォルダ = 既定アプリ系を出さない(Finder 表示と重複するため=契約②・#21①)
+ * - Reload File(要件#80 契約 9)はファイル/symlink だけ。有効なのは行の URI が
+ *   `openDocUri`(今の窓で開いている文書の URI)と**文字列で一致する**ときだけで、
+ *   それ以外(省略・null を含む)は出したまま無効。ssh でも有効(アプリの中で完結する)
+ * - フォルダ = 既定アプリ系を出さない(Finder 表示と重複するため=契約②・#21①)。
+ *   Reload Folder(要件#80 契約 14)はフォルダだけ・常に有効(ssh でも)
  * - ssh リモートは項目を出したまま Finder / 既定アプリ / アプリ選択を disabled(契約⑤)。
  *   Open in New Window は窓を開くだけでアプリ内に閉じるので ssh でも有効(契約#59⑥)
  * - Open in New Window(要件#59)が無効になるのは **親フォルダが取れないファイル**
@@ -109,40 +186,104 @@ function newWindowRoot(entry: ContextMenuEntry): string | null {
  * - 末尾のウィンドウ複製(要件#34)だけは種別にもリモートにも左右されない。
  *   アイテムではなく窓に効く操作なので、無効になる状況が無い(契約#34③)。
  *   区切り線を挟むかは描画側の持ち場で、項目の並びには現れない
+ * - Pin to Bookmarks(要件#83 契約 7)は Copy Path の直後(Duplicate Window の前)。ファイル・
+ *   symlink・フォルダの行とも・常に有効(ssh でも=アプリの中で完結する)。`pinned`(済み)なら
+ *   同じ位置が Unpin from Bookmarks。省略= false
  */
-export function buildContextMenu(entry: ContextMenuEntry): ContextMenuItem[] {
+export function buildContextMenu(
+	entry: ContextMenuEntry,
+	openDocUri?: string | null,
+	pinned: boolean = false
+): ContextMenuItem[] {
 	const local = !isRemote(entry.uri);
+	const pin: ContextMenuItemId = pinned ? 'unpin-from-bookmarks' : 'pin-to-bookmarks';
 	const ids: ContextMenuItemId[] = isDirEntry(entry)
-		? ['reveal', 'open-in-new-window', 'copy-path', 'duplicate-window']
+		? ['reveal', 'open-in-new-window', 'reload-folder', 'copy-path', pin, 'duplicate-window']
 		: [
 				'reveal',
 				'open',
 				'open-with',
 				'open-in-new-tab',
 				'open-in-new-window',
+				'reload-file',
 				'copy-path',
+				pin,
 				'duplicate-window'
 			];
-	return ids.map((id) => ({
-		id,
-		label: LABELS[id],
-		enabled:
-			id === 'copy-path' || id === 'duplicate-window' || id === 'open-in-new-tab'
-				? true
-				: id === 'open-in-new-window'
-					? newWindowRoot(entry) !== null
-					: local
-	}));
+	const enabled = (id: ContextMenuItemId): boolean => {
+		if (id === 'copy-path' || id === 'duplicate-window' || id === 'open-in-new-tab') return true;
+		if (id === 'pin-to-bookmarks' || id === 'unpin-from-bookmarks') return true;
+		if (id === 'reload-folder') return true;
+		if (id === 'reload-file') return openDocUri != null && openDocUri === entry.uri;
+		if (id === 'open-in-new-window') return newWindowRoot(entry) !== null;
+		return local;
+	};
+	return ids.map((id) => ({ id, label: LABELS[id], enabled: enabled(id) }));
 }
 
 /**
  * ツリーの空白部分(アイテムの無いところ)を右クリックしたときのメニュー(要件#34③)。
  *
  * アイテムを指していないので、出せるのはアイテムに依存しない項目だけ —
- * 今のところウィンドウの複製1つ。
+ * root を読み直す Reload Folder(要件#80 契約 14)と、末尾のウィンドウの複製。
  */
 export function buildTreePaneMenu(): ContextMenuItem[] {
-	return [{ id: 'duplicate-window', label: LABELS['duplicate-window'], enabled: true }];
+	return [
+		{ id: 'reload-folder', label: LABELS['reload-folder'], enabled: true },
+		{ id: 'duplicate-window', label: LABELS['duplicate-window'], enabled: true }
+	];
+}
+
+/**
+ * 文書の本文(閲覧面)を右クリックしたときのメニュー(要件#80 契約 8)。項目は今の文書を
+ * 読み直す Reload File と、今の文書を Bookmark に足す Pin to Bookmarks(要件#83 契約 7。
+ * `pinned`=済みなら Unpin from Bookmarks)の 2 つ(出すかどうかの判定は `$lib/reload-file` の
+ * `viewerContextMenuMode`)。
+ */
+export function buildViewerMenu(pinned: boolean = false): ContextMenuItem[] {
+	const pin: ContextMenuItemId = pinned ? 'unpin-from-bookmarks' : 'pin-to-bookmarks';
+	return [
+		{ id: 'reload-file', label: LABELS['reload-file'], enabled: true },
+		{ id: pin, label: LABELS[pin], enabled: true }
+	];
+}
+
+function dashboardItem(id: ContextMenuItemId, enabled = true, separatorBefore = false): ContextMenuItem {
+	const item: ContextMenuItem = { id, label: LABELS[id], enabled };
+	if (separatorBefore) item.separatorBefore = true;
+	return item;
+}
+
+/**
+ * Dashboard の Bookmark のタイルのメニュー(要件#83 契約 14 (ae))= Open・Open in New Window /
+ * Move Up・Move Down / Unpin from Bookmarks。先頭の Move Up・末尾の Move Down は無効。
+ */
+export function buildBookmarkTileMenu(index: number, count: number): ContextMenuItem[] {
+	return [
+		dashboardItem('dashboard-open'),
+		dashboardItem('dashboard-open-in-new-window'),
+		dashboardItem('move-up', index > 0, true),
+		dashboardItem('move-down', index < count - 1),
+		dashboardItem('unpin-from-bookmarks', true, true)
+	];
+}
+
+/**
+ * Dashboard の Recent Folders の行のメニュー(要件#83 契約 14 (ae))= Open・Open in New Window /
+ * Pin to Bookmarks(`pinned` なら Unpin from Bookmarks)/ Remove from Recent Folders。
+ */
+export function buildRecentFolderMenu(pinned: boolean): ContextMenuItem[] {
+	return [
+		dashboardItem('dashboard-open'),
+		dashboardItem('dashboard-open-in-new-window'),
+		dashboardItem(pinned ? 'unpin-from-bookmarks' : 'pin-to-bookmarks', true, true),
+		dashboardItem('remove-from-recent-folders', true, true)
+	];
+}
+
+/** Add Bookmark… を押したときのメニュー(要件#83 契約 7 (ac))= Add Folder… / Add File…。 */
+export function buildAddBookmarkMenu(): ContextMenuItem[] {
+	return [dashboardItem('add-folder-bookmark'), dashboardItem('add-file-bookmark')];
 }
 
 /**
@@ -188,13 +329,26 @@ export function pathForReveal(uri: string): string {
  *
  * 新しいタブ(要件#62)も同じ理由でリモート判定より手前。ファイルの URI を
  * そのまま渡す(root と展開は実行側が今の窓から足す)。
+ *
+ * 読み直し(要件#80)も同じ理由でリモート判定より手前 — アプリの中で完結するので
+ * ssh でも有効。行の URI をそのまま渡す(今の文書かの照合は実行列が持つ)。
+ *
+ * Bookmark の Pin / Unpin(要件#83 契約 7)も同じ理由でリモート判定より手前。フォルダの行は
+ * folder・ファイルと symlink の行は file。Dashboard のメニューの項目は行の計画に落とさない(null)。
  */
 export function planContextAction(
 	id: ContextMenuItemId,
 	entry: ContextMenuEntry
 ): ContextAction | null {
+	if (DASHBOARD_ITEM_IDS.has(id)) return null;
 	if (id === 'duplicate-window') return { command: 'duplicate-window' };
+	if (id === 'pin-to-bookmarks') {
+		return { command: 'pin-bookmark', uri: entry.uri, kind: isDirEntry(entry) ? 'folder' : 'file' };
+	}
+	if (id === 'unpin-from-bookmarks') return { command: 'unpin-bookmark', uri: entry.uri };
 	if (id === 'open-in-new-tab') return { command: 'new-tab', path: entry.uri };
+	if (id === 'reload-file') return { command: 'reload-file', uri: entry.uri };
+	if (id === 'reload-folder') return { command: 'reload-folder', uri: entry.uri };
 	if (id === 'open-in-new-window') {
 		const root = newWindowRoot(entry);
 		if (root === null) return null;

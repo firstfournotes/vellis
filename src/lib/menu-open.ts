@@ -229,22 +229,7 @@ export function openFolderFromMenu<Root = unknown, Doc = unknown>(): Promise<Men
 export async function registerMenuOpenListeners<Root = unknown, Doc = unknown>(
 	handlers: MenuOpenHandlers<Root, Doc>,
 ): Promise<() => void> {
-	const run = async (kind: MenuOpenKind): Promise<void> => {
-		try {
-			// 関門はダイアログの前(要件#48 契約④)。選ばせてから「やっぱり中止」に
-			// させない。
-			if (handlers.canProceed && !(await handlers.canProceed())) return;
-			const attempt = await attemptMenuOpen<Root, Doc>(kind);
-			if (attempt === null) return; // キャンセル=無変化
-			// root は切り替わったのに文書だけ開けなかったときも、まず画面を新しい
-			// root にしてから(`document: null`)失敗を知らせる(要件#71 追補b(2))。
-			// 知らせる側の alert は閉じるまで JS を止めるので、この順序が効く。
-			handlers.onOpened(attempt.opened);
-			if (attempt.documentFailed) handlers.onError?.(attempt.documentError);
-		} catch (err) {
-			handlers.onError?.(err);
-		}
-	};
+	const run = (kind: MenuOpenKind): Promise<void> => runMenuOpen(kind, handlers);
 
 	const [unlistenFile, unlistenFolder] = await Promise.all([
 		listen<unknown>(MENU_OPEN_FILE_EVENT, () => run('file')),
@@ -255,4 +240,29 @@ export async function registerMenuOpenListeners<Root = unknown, Doc = unknown>(
 		unlistenFile();
 		unlistenFolder();
 	};
+}
+
+/**
+ * File ▸ Open… / Open Folder… の 1 回分(関門 → ダイアログ → `set_root` →(ファイルなら)文書)。
+ * メニューの購読(上)と、Dashboard の Open… のボタン(要件#83 契約 2)が同じ手順を通る。
+ * 失敗は `onError` に渡し、reject しない。
+ */
+export async function runMenuOpen<Root = unknown, Doc = unknown>(
+	kind: MenuOpenKind,
+	handlers: MenuOpenHandlers<Root, Doc>,
+): Promise<void> {
+	try {
+		// 関門はダイアログの前(要件#48 契約④)。選ばせてから「やっぱり中止」に
+		// させない。
+		if (handlers.canProceed && !(await handlers.canProceed())) return;
+		const attempt = await attemptMenuOpen<Root, Doc>(kind);
+		if (attempt === null) return; // キャンセル=無変化
+		// root は切り替わったのに文書だけ開けなかったときも、まず画面を新しい
+		// root にしてから(`document: null`)失敗を知らせる(要件#71 追補b(2))。
+		// 知らせる側の alert は閉じるまで JS を止めるので、この順序が効く。
+		handlers.onOpened(attempt.opened);
+		if (attempt.documentFailed) handlers.onError?.(attempt.documentError);
+	} catch (err) {
+		handlers.onError?.(err);
+	}
 }

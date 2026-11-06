@@ -77,10 +77,11 @@
 {/if}
 
 <style>
+	/* 暗くする層(要件#56 契約 4= `--color-shadow`)。 */
 	.backdrop {
 		position: fixed;
 		inset: 0;
-		background-color: rgba(0, 0, 0, 0.4);
+		background-color: var(--color-shadow);
 		z-index: 100;
 	}
 
@@ -96,9 +97,11 @@
 		flex-direction: column;
 		gap: 12px;
 		padding: 20px;
-		background-color: #ffffff;
-		border-radius: 8px;
-		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
+		/* 重なりの 1 段(要件#56 契約 4)。 */
+		border-radius: var(--radius-md);
+		box-shadow: var(--shadow-2);
 	}
 
 	header h2 {
@@ -109,7 +112,7 @@
 
 	.preview-label {
 		font-size: 11px;
-		color: #6b7280;
+		color: var(--color-text-secondary);
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 	}
@@ -117,9 +120,10 @@
 	.preview pre {
 		margin: 4px 0 0;
 		padding: 8px 12px;
-		background-color: #f3f4f6;
-		border-radius: 4px;
-		font-size: 12px;
+		background-color: var(--color-bg-hover);
+		border-radius: var(--radius-sm);
+		font-family: var(--font-mono);
+		font-size: var(--text-sm);
 		max-height: 160px;
 		overflow: auto;
 		white-space: pre-wrap;
@@ -129,19 +133,25 @@
 	label {
 		display: block;
 		font-size: 12px;
-		color: #374151;
+		color: var(--color-text-primary);
 		margin-bottom: 4px;
 	}
 
 	textarea {
 		width: 100%;
 		font-family: inherit;
-		font-size: 13px;
+		font-size: var(--text-md);
 		padding: 8px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
 		resize: vertical;
 		box-sizing: border-box;
+	}
+
+	textarea::placeholder {
+		color: var(--color-text-muted);
 	}
 
 	footer {
@@ -151,27 +161,31 @@
 	}
 
 	footer button {
-		font-size: 12px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
 		padding: 6px 14px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #ffffff;
-		color: #374151;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
 		cursor: pointer;
 	}
 
 	footer button:hover:not(:disabled) {
-		background-color: #f3f4f6;
+		background-color: var(--color-bg-hover);
 	}
 
 	footer button.primary {
-		background-color: #2563eb;
-		border-color: #2563eb;
-		color: #ffffff;
+		background-color: var(--color-accent);
+		border-color: transparent;
+		color: var(--color-on-accent);
 	}
 
+	/* 押せる主ボタンのホバーは同じアクセントを少し明るく(色を直書きしない)。 */
 	footer button.primary:hover:not(:disabled) {
-		background-color: #1d4ed8;
+		background-color: var(--color-accent);
+		filter: brightness(1.1);
 	}
 
 	footer button:disabled {

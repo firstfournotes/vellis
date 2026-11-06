@@ -244,7 +244,8 @@ describe('AC-71-9(ソース走査): +page.svelte の起動処理は initWindowOr
 		);
 	});
 
-	test('failed のとき rootPicker = { …, open: true, …, error: <outcome>.message } で履歴選択画面を出す。<RootPicker> には error を渡したまま', () => {
+	// 要件#83 契約 1【(s) 決定】(2026-11-05 承認 7 の要件側更新): 最後の正規表現の <RootPicker を <Dashboard に(`rootPicker = {` の走査はそのまま)。
+	test('failed のとき rootPicker = { …, open: true, …, error: <outcome>.message } で履歴選択画面(今は Dashboard)を出す。<Dashboard> には error を渡したまま', () => {
 		const src = page();
 		const found = initCall(src);
 		expect(found, 'see the previous case').not.toBeNull();
@@ -264,7 +265,7 @@ describe('AC-71-9(ソース走査): +page.svelte の起動処理は initWindowOr
 			`expected a \`rootPicker = { …, open: true, …, error: ${varName}.message }\` after initWindowOrPicker (backlog 278)`,
 		).toBeDefined();
 
-		expect(src).toMatch(/<RootPicker[\s\S]*?error=\{rootPicker\.error\}[\s\S]*?\/>/);
+		expect(src).toMatch(/<Dashboard[\s\S]*?error=\{rootPicker\.error\}[\s\S]*?\/>/);
 	});
 
 	test('failed でも起動処理は止めない: 呼び出しから startupSettled = true の間に return が無く、5 つの購読と startupSettled はその後に残る', () => {

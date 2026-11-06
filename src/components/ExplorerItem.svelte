@@ -4,6 +4,7 @@
 	import { windowState, type Entry } from '../stores/window-state.svelte';
 	import { contextMenu } from '../stores/context-menu.svelte';
 	import ExplorerItem from './ExplorerItem.svelte';
+	import Icon from './Icon.svelte';
 
 	let {
 		entry,
@@ -33,7 +34,8 @@
 	 */
 	const expanded = $derived(isDir && windowState.isExpanded(entry.uri));
 	const active = $derived(entry.uri === selectedUri);
-	const caret = $derived(isDir ? (expanded ? '▾' : '▸') : '');
+	/** 開閉の目印(要件#56 契約 5= SVG の chev-d / chev-r)。ファイルの行は空けておく。 */
+	const caret = $derived(isDir ? (expanded ? 'chev-d' : 'chev-r') : null);
 	const icon = $derived(isDir ? '\u{1F4C1}' : '\u{1F4C4}');
 	/**
 	 * シンボリックリンクの行だけに付けるツールチップ(要件#70 契約5)。行の
@@ -107,10 +109,11 @@
 	/**
 	 * ツリーの行の上では webview 既定のメニューを自前のものに差し替える(要件#19)。
 	 * 他の領域の既定挙動には触らない。開き直しがそのまま前のメニューを閉じる。
+	 * 今の窓で開いている文書の URI を渡す — その行のときだけ Reload File が有効(要件#80 契約 9)。
 	 */
 	function handleContextMenu(e: MouseEvent) {
 		e.preventDefault();
-		contextMenu.openAt(entry, e.clientX, e.clientY);
+		contextMenu.openAt(entry, e.clientX, e.clientY, windowState.currentDocument?.uri);
 	}
 </script>
 
@@ -125,7 +128,7 @@
 	oncontextmenu={handleContextMenu}
 	title={entry.uri}
 >
-	<span class="caret">{caret}</span>
+	<span class="caret">{#if caret}<Icon name={caret} size={14} />{/if}</span>
 	<span class="icon" title={linkTitle}>{icon}{#if entry.link}<svg class="link-badge" viewBox="0 0 10 10" aria-hidden="true"><rect class="link-badge-bg" x="0.5" y="0.5" width="9" height="9" rx="2" /><path d="M3 8V6a2.5 2.5 0 0 1 2.5-2.5H8M6 1.5l2 2-2 2" /></svg>{/if}</span>
 	<span class="name" title={linkTitle}>{entry.name}</span>
 </button>
@@ -150,38 +153,56 @@
 {/if}
 
 <style>
+	/*
+	 * ツリーの行(モックの `.row`= 24px・角丸・地の文字は secondary)。ホバーは
+	 * `--color-bg-hover`、選択は `--color-accent-soft`(要件#56 契約 4)。
+	 */
 	.explorer-item {
 		display: flex;
 		align-items: center;
 		gap: 4px;
+		box-sizing: border-box;
 		width: 100%;
-		padding: 4px 12px 4px 8px;
+		height: 24px;
+		padding: 0 8px;
 		border: none;
+		border-radius: var(--radius-sm);
 		background: none;
-		color: inherit;
+		color: var(--color-text-secondary);
 		font: inherit;
-		font-size: 13px;
+		font-size: var(--text-md);
 		text-align: left;
 		cursor: pointer;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		transition: background-color var(--duration-fast) var(--ease-out);
 	}
 
 	.explorer-item:hover {
-		background-color: var(--color-bg-tree-hover);
+		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 
 	.explorer-item.active {
-		background-color: var(--color-bg-tree-active);
-		font-weight: 600;
+		background-color: var(--color-accent-soft);
+		color: var(--color-text-primary);
+		font-weight: 500;
+	}
+
+	/* ツリーはスクロールで切れるので、リングは行の内側に描く。 */
+	.explorer-item:focus-visible {
+		outline: 2px solid var(--color-focus-ring);
+		outline-offset: -2px;
 	}
 
 	.caret {
-		display: inline-block;
-		width: 10px;
-		color: var(--color-text-secondary);
-		font-size: 10px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 14px;
+		height: 14px;
+		color: var(--color-text-muted);
 		flex-shrink: 0;
 	}
 
@@ -244,7 +265,7 @@
 	}
 
 	.tree-note.error {
-		color: var(--color-text-danger);
+		color: var(--color-danger);
 		font-style: normal;
 	}
 </style>

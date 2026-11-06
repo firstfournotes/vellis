@@ -38,30 +38,50 @@ import { describe, expect, test } from 'vitest';
 const REPO_ROOT = resolve(__dirname, '../..');
 const THEME_CSS_PATH = resolve(REPO_ROOT, 'src/styles/theme.css');
 
+// 要件#83 契約 1【(s) 決定】(2026-11-05 承認 1 の要件側更新): RootPicker.svelte は Dashboard.svelte に置き換わった。
+// この表から作られる 4 本の対象が替わるだけ(describe の題の「RootPicker」は「Dashboard」と読み替える)。
 const COMPONENT_TARGETS = [
-	{ name: 'RootPicker.svelte', path: resolve(REPO_ROOT, 'src/components/RootPicker.svelte') },
+	{ name: 'Dashboard.svelte', path: resolve(REPO_ROOT, 'src/components/Dashboard.svelte') },
 	{ name: 'Explorer.svelte', path: resolve(REPO_ROOT, 'src/components/Explorer.svelte') },
 	{ name: 'ExplorerItem.svelte', path: resolve(REPO_ROOT, 'src/components/ExplorerItem.svelte') },
 ] as const;
 
 /**
- * 置換前(2026-08-04 時点)に RootPicker/Explorer/ExplorerItem の <style> で使われて
- * いた全 hex 値。「見た目は現状維持」の機械判定可能な代替として、これらが theme.css
- * の変数定義値に現れることを要求する(どの変数名に載せるかは実装の自由)。
+ * theme.css の変数定義値に現れることを要求する hex 値(どの変数名に載せるかは実装の自由)。
+ *
+ * 要件側更新(2026-11-02・要件#56 契約 2・棚卸し 1=req-56.md で事前承認): 2026-08-04 時点の
+ * 「置換前の配色 12 個」は、要件#56 の新パレット(docs/theme-architecture.md §3.1 の Default の
+ * **ライト**の値のうち hex で書かれるもの)に置き換えた。「見た目は現状維持」の代替判定から
+ * 「正本 themes/default.json のライトの値が生成物 theme.css に現れる」の判定に変わる。
+ * rgba() で書かれる値(hover / soft / selection / shadow)は hex ではないのでここには載せない。
  */
 const REQUIRED_PALETTE_HEXES = [
-	'#ffffff', // RootPicker .root-picker 背景
-	'#f6f8fa', // Explorer 背景・RootPicker hover/ボタン背景
-	'#eaeef2', // hover 背景(RootPicker/Explorer)
-	'#d0d7de', // 枠線(RootPicker/Explorer)
-	'#1f2328', // 主要文字色(RootPicker)
-	'#24292f', // Explorer .up-button hover 文字色
-	'#656d76', // 副次文字色(3ファイル共通。ExplorerItem .caret 含む)
-	'#a0a8b0', // RootPicker 空履歴の文字色
-	'#cf222e', // エラー文字色(RootPicker .error / ExplorerItem .tree-note.error)
-	'#e8e8e8', // ExplorerItem .explorer-item:hover 背景
-	'#d0e0f0', // ExplorerItem .explorer-item.active 背景
-	'#8b949e', // ExplorerItem .tree-note 文字色
+	// 色(§3.1 ライト)
+	'#f1f2f4', // --color-bg-base
+	'#ffffff', // --color-bg-surface / --color-bg-raised / --color-on-accent
+	'#1b1d22', // --color-text-primary
+	'#555a64', // --color-text-secondary
+	'#8a8f99', // --color-text-muted
+	'#e1e3e8', // --color-border
+	'#cdd0d7', // --color-border-strong
+	'#4256e8', // --color-accent / --color-focus-ring(藍=2026-11-02 由谷決定)
+	'#3447d4', // --color-accent-text
+	'#d33b3b', // --color-danger
+	'#16905a', // --color-success
+	'#b7791f', // --color-warning
+	'#8250df', // --color-emphasis(判断 (l))
+	// ファイル種別(§3.1 ライト)
+	'#d0661c', // --ft-html
+	'#d23b3b', // --ft-pdf
+	'#7a4fd6', // --ft-video
+	'#c03f86', // --ft-audio
+	'#118496', // --ft-3d
+	'#a27406', // --ft-code
+	'#7d838e', // --ft-folder
+	// 検索の一致(判断 (k)・ライト=今の Viewer.svelte の直書きの値)
+	'#fef08a', // --color-find-match
+	'#fb923c', // --color-find-current
+	'#1f2328', // --color-find-current-text
 ] as const;
 
 /** CSS 拡張名前色キーワード(CSS Color Module)。回避防止のための禁止リスト。 */
@@ -174,7 +194,7 @@ describe('契約(a): src/styles/theme.css に共通パレットを定義する',
 		expect(propsInRoot.length, ':root 内に --xxx: 値 の定義があること').toBeGreaterThan(0);
 	});
 
-	test('現状の配色(RootPicker/Explorer/ExplorerItem で使用中の全 hex 値)が変数定義値として現れる', () => {
+	test('新パレット(要件#56・theme-architecture §3.1 の Default のライトの hex 値)が変数定義値として現れる', () => {
 		const defined = new Set(
 			themeCustomProps().flatMap((d) => (d.value.match(HEX_RE_G) ?? []).map(normalizeHex)),
 		);

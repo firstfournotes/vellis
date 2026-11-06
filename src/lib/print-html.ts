@@ -155,6 +155,12 @@ export type PrintHandlers = {
 	 * 行き違ったときにここで受け止める。省略時は従来どおり印刷する。
 	 */
 	canPrint?: () => boolean;
+	/**
+	 * メインフレーム印刷(markdown / text)の直前に待つ準備(要件#56 判断 (p))。紙は
+	 * いつもライトなので、画面がダークのときはコードの色(Shiki)をライトで描き直して
+	 * から刷る。印刷後に戻すのは準備した側の持ち場。失敗しても印刷は止めない。省略可。
+	 */
+	beforeMainFramePrint?: () => Promise<void>;
 	/** 失敗の通知先。省略可 — 省略しても例外は外へ出さない。 */
 	onError?: (err: unknown) => void;
 };
@@ -176,6 +182,11 @@ export async function registerPrintListener(handlers: PrintHandlers): Promise<()
 		try {
 			const route = printRouteFor(handlers.getFileType());
 			if (route === 'main-frame') {
+				try {
+					await handlers.beforeMainFramePrint?.();
+				} catch {
+					// 準備が欠けても印刷はする(コードの色が画面のままになるだけ)。
+				}
 				// 従来の終端。Rust 側は invoke 元=この窓の `Webview::print()` を
 				// 呼ぶだけで、紙の体裁は `print.css` が決める(契約④)。
 				await invoke('print_current_window');

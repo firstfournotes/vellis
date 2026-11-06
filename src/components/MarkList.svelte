@@ -9,6 +9,7 @@
 	 */
 	import { marksStore } from '../stores/marks.svelte';
 	import type { Mark, MarkStatus } from '../lib/annotation';
+	import Icon from './Icon.svelte';
 
 	type FilterMode = 'all' | 'drift';
 
@@ -107,7 +108,7 @@
 			<button type="button" class="primary" onclick={generateInbox} disabled={marksStore.all.length === 0}>
 				Generate Inbox
 			</button>
-			<button type="button" class="ghost" onclick={onClose} aria-label="Close">×</button>
+			<button type="button" class="ghost" onclick={onClose} aria-label="Close"><Icon name="x" size={14} /></button>
 		</div>
 	</header>
 	<nav class="filter-tabs" aria-label="Mark Filter">
@@ -171,8 +172,8 @@
 		max-width: 40vw;
 		display: flex;
 		flex-direction: column;
-		background-color: #fafafa;
-		border-left: 1px solid #e5e7eb;
+		background-color: var(--color-bg-base);
+		border-left: 1px solid var(--color-border);
 		overflow-y: auto;
 	}
 
@@ -183,14 +184,14 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 8px 12px;
-		background-color: #ffffff;
-		border-bottom: 1px solid #e5e7eb;
+		background-color: var(--color-bg-surface);
+		border-bottom: 1px solid var(--color-border);
 		z-index: 1;
 	}
 
 	header h2 {
 		margin: 0;
-		font-size: 14px;
+		font-size: var(--text-md);
 		font-weight: 600;
 		display: flex;
 		align-items: center;
@@ -202,14 +203,14 @@
 		font-weight: 700;
 		padding: 1px 6px;
 		border-radius: 8px;
-		border: 1px solid #fca5a5;
-		background-color: #fee2e2;
-		color: #991b1b;
+		border: 1px solid var(--color-danger);
+		background-color: var(--color-danger-soft);
+		color: var(--color-danger);
 		cursor: pointer;
 	}
 
 	.drift-badge:hover {
-		background-color: #fecaca;
+		background-color: var(--color-danger-soft);
 	}
 
 	.header-actions {
@@ -218,18 +219,21 @@
 	}
 
 	header button {
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
+		font-weight: 500;
 		padding: 4px 10px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #ffffff;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
 		cursor: pointer;
 	}
 
 	header button.primary {
-		background-color: #2563eb;
-		border-color: #2563eb;
-		color: #ffffff;
+		background-color: var(--color-accent);
+		border-color: transparent;
+		color: var(--color-on-accent);
 	}
 
 	header button.primary:disabled {
@@ -238,49 +242,61 @@
 	}
 
 	header button.ghost {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
 		border-color: transparent;
-		font-size: 16px;
-		padding: 0 8px;
-		color: #6b7280;
+		border-radius: 5px;
+		background-color: transparent;
+		color: var(--color-text-secondary);
+	}
+
+	header button.ghost:hover {
+		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 
 	.filter-tabs {
 		display: flex;
 		gap: 0;
-		border-bottom: 1px solid #e5e7eb;
-		background-color: #ffffff;
+		border-bottom: 1px solid var(--color-border);
+		background-color: var(--color-bg-surface);
 	}
 
 	.filter-tab {
 		flex: 1;
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
 		padding: 6px 4px;
 		border: none;
 		border-bottom: 2px solid transparent;
 		background-color: transparent;
-		color: #6b7280;
+		color: var(--color-text-secondary);
 		cursor: pointer;
 	}
 
 	.filter-tab:hover {
-		color: #1f2937;
+		color: var(--color-text-primary);
 	}
 
 	.filter-tab.active {
-		color: #1e40af;
-		border-bottom-color: #2563eb;
+		color: var(--color-accent-text);
+		border-bottom-color: var(--color-accent);
 	}
 
 	.empty,
 	.error {
 		padding: 16px 12px;
 		font-size: 12px;
-		color: #6b7280;
+		color: var(--color-text-secondary);
 		text-align: center;
 	}
 
 	.error {
-		color: #b91c1c;
+		color: var(--color-danger);
 	}
 
 	ul {
@@ -291,7 +307,7 @@
 
 	li {
 		padding: 8px 12px;
-		border-bottom: 1px solid #e5e7eb;
+		border-bottom: 1px solid var(--color-border);
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
@@ -308,35 +324,35 @@
 	.status {
 		font-weight: 600;
 		padding: 1px 6px;
-		border-radius: 3px;
+		border-radius: 4px;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 	}
 
 	.status-open {
-		background-color: #dbeafe;
-		color: #1e40af;
+		background-color: var(--color-accent-soft);
+		color: var(--color-accent-text);
 	}
 	.status-sent_to_agent {
-		background-color: #fef3c7;
-		color: #92400e;
+		background-color: var(--color-bg-active);
+		color: var(--color-text-secondary);
 	}
 	.status-changed_by_agent {
-		background-color: #fed7aa;
-		color: #9a3412;
+		background-color: var(--color-warning-soft);
+		color: var(--color-warning);
 	}
 	.status-resolved {
-		background-color: #dcfce7;
-		color: #166534;
+		background-color: var(--color-success-soft);
+		color: var(--color-success);
 	}
 	.status-stale {
-		background-color: #fee2e2;
-		color: #991b1b;
+		background-color: var(--color-danger-soft);
+		color: var(--color-danger);
 	}
 
 	.file {
-		font-family: ui-monospace, SFMono-Regular, monospace;
-		color: #374151;
+		font-family: var(--font-mono);
+		color: var(--color-text-primary);
 		flex: 1;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -344,13 +360,13 @@
 	}
 
 	.lines {
-		color: #6b7280;
+		color: var(--color-text-secondary);
 	}
 
 	.instruction {
 		margin: 0;
 		font-size: 12px;
-		color: #1f2937;
+		color: var(--color-text-primary);
 		line-height: 1.4;
 	}
 
@@ -361,16 +377,17 @@
 	}
 
 	.actions button {
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
 		padding: 2px 8px;
-		border: 1px solid #d1d5db;
-		border-radius: 3px;
-		background-color: #ffffff;
-		color: #374151;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 4px;
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
 		cursor: pointer;
 	}
 
 	.actions button:hover {
-		background-color: #f3f4f6;
+		background-color: var(--color-bg-hover);
 	}
 </style>

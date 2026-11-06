@@ -130,7 +130,17 @@ fn menu_zoom_const_names(code: &str) -> Vec<&str> {
 // AC-63-12 — View メニューの項目列(契約2・10・ソース走査)
 // ---------------------------------------------------------------------------
 
-/// 1. View メニューは周回開始時点の 8 項目そのまま(順序・束縛名まで一致=項目を足していない)。
+/// 1. View メニューは固定の項目列そのまま(順序・束縛名まで一致=要件#63 は項目を足していない)。
+///
+/// 要件側更新(2026-11-02・要件#56 契約 3・4・棚卸し 4=req-56.md で事前承認): 要件#56 第1段が
+/// View に **Appearance サブメニュー**(`appearance_menu`)と **Toggle Full Width**(`toggle_full_width_item`)を
+/// 区切り線(`view_chrome_sep`)付きで足した。位置= Show All Tabs の区切りの下・Zoom の上
+/// (docs/theme-architecture.md §6.1 の図。acceptance_req56.rs が同じ列を固定する)。既存 8 項目の相対順は
+/// そのまま。それ以外の増減・並べ替えは引き続き赤。
+///
+/// 要件側更新(2026-11-04・要件#80 契約 2・12 承認 1=req-80.md で事前承認・(r) 決定): 要件#80 が
+/// `view_tab_sep` の直後に **`reload_file_item`・`view_reload_sep`** を足した(acceptance_req80.rs が同じ列を
+/// 固定する)。項目数は 11 → 13。テスト名はそのまま=「要件#80 の 2 つを除き足していない」の意味に読み替える。
 #[test]
 fn view_menu_keeps_the_eight_entries_from_before_req63() {
     let code = menu_rs_code();
@@ -141,6 +151,11 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
         "show_tab_bar_item",
         "show_all_tabs_item",
         "view_tab_sep",
+        "reload_file_item",
+        "view_reload_sep",
+        "appearance_menu",
+        "toggle_full_width_item",
+        "view_chrome_sep",
         "zoom_in_item",
         "zoom_out_item",
         "actual_size_item",
@@ -149,7 +164,7 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
     ];
     assert_eq!(
         idents, expected,
-        "requirement #63 must not add, remove or reorder View menu items (found {idents:?})"
+        "the View menu must hold exactly the 13 entries of requirement #62 追補b / #56 stage 1 / #80 in this order (found {idents:?})"
     );
 }
 

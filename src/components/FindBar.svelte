@@ -115,14 +115,26 @@
 	 * 閲覧面の上部に敷く1行(契約①)。外部変更の帯・構造変化の通知と同じ「本文の
 	 * 上に重ねない」流儀 —— 検索中の本文を隠さないため。
 	 */
+	/*
+	 * 要件#56 第2段: 見た目はモックのファイル内検索(右上に浮かぶ 1 段= `--color-bg-raised` +
+	 * `--shadow-2` + `--radius-md`)。ただし契約①の「本文の上に重ねない」は守るので、行の
+	 * 場所は取ったまま(右に寄せた札として置く)。
+	 */
 	.find-bar {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 6px 12px;
-		background-color: #f9fafb;
-		border-bottom: 1px solid #e5e7eb;
-		font-size: 12px;
+		gap: 4px;
+		align-self: flex-end;
+		box-sizing: border-box;
+		width: fit-content;
+		max-width: calc(100% - 24px);
+		margin: 8px 12px 4px;
+		padding: 5px 5px 5px 6px;
+		background-color: var(--color-bg-raised);
+		border-radius: var(--radius-md);
+		box-shadow: var(--shadow-2);
+		font-size: var(--text-sm);
+		color: var(--color-text-primary);
 	}
 
 	/*
@@ -134,44 +146,62 @@
 	 */
 	.find-bar--sticky {
 		position: sticky;
-		top: var(--vellis-find-bar-top, 0px);
+		/* 札の上の 8px の間(margin)を貼り付いた後も保つ。 */
+		top: calc(var(--vellis-find-bar-top, 0px) + 8px);
 		z-index: 9;
 	}
 
+	/* 入力欄(モックの `.inp`= 26px・角丸 6px)。フォーカスはアクセントの縁とリング。 */
 	.find-input {
-		flex: 0 1 240px;
+		flex: 0 1 220px;
 		min-width: 0;
-		font-size: 12px;
-		padding: 3px 8px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #ffffff;
-		color: #111827;
+		height: 26px;
+		box-sizing: border-box;
+		font: inherit;
+		font-size: var(--text-sm);
+		padding: 0 8px;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
+	}
+
+	.find-input::placeholder {
+		color: var(--color-text-muted);
 	}
 
 	.find-input:focus {
-		outline: 2px solid #93c5fd;
+		border-color: var(--color-accent);
+		outline: 2px solid var(--color-focus-ring);
 		outline-offset: -1px;
 	}
 
 	/* 件数は幅が揺れると Prev/Next が踊るので、最小幅を取って左寄せで固定する。 */
 	.find-count {
 		min-width: 72px;
-		color: #6b7280;
+		padding: 0 6px;
+		color: var(--color-text-secondary);
 		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
 	}
 
+	/* 札の中の文字ボタン(モックの `.ib` と同じく地は透明・ホバーで面)。 */
 	.find-button {
-		font-size: 12px;
-		padding: 3px 10px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #ffffff;
-		color: #374151;
+		height: 26px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		padding: 0 9px;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		background-color: transparent;
+		color: var(--color-text-secondary);
 		cursor: pointer;
+		white-space: nowrap;
 	}
 
 	.find-button:hover {
-		background-color: #f3f4f6;
+		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 </style>

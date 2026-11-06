@@ -2,36 +2,36 @@
  * GitHub-flavoured Markdown styles for the Viewer component.
  *
  * All styles are scoped under `.markdown-body`.
- * CSS custom properties are used throughout so that a dark-mode theme
- * (Phase 2) can override colours without touching selectors.
+ * The `--md-*` names below are what the rules read; each one is derived from a
+ * design token of theme.css (要件#56 契約 2), so the light / dark switch and a
+ * user theme reach the document without touching any selector here.
  */
 
 :root {
-	--md-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif,
-		'Apple Color Emoji', 'Segoe UI Emoji';
-	--md-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
-		monospace;
-	--md-font-size: 16px;
-	--md-line-height: 1.6;
+	--md-font-family: var(--font-doc);
+	--md-font-mono: var(--font-mono);
+	--md-font-size: var(--doc-size);
+	--md-line-height: var(--doc-leading);
 
-	--md-color-text: #1f2328;
-	--md-color-text-secondary: #656d76;
-	--md-color-bg: #ffffff;
-	--md-color-border: #d0d7de;
-	--md-color-border-heavy: #c0c8d0;
-	--md-color-link: #0969da;
-	--md-color-code-bg: #eff1f3;
-	--md-color-blockquote-border: #d0d7de;
-	--md-color-blockquote-text: #656d76;
-	--md-color-table-row-alt: #f6f8fa;
-	--md-color-task-checked: #0969da;
+	--md-color-text: var(--color-text-primary);
+	--md-color-text-secondary: var(--color-text-secondary);
+	--md-color-bg: var(--color-bg-surface);
+	--md-color-border: var(--color-border);
+	--md-color-border-heavy: var(--color-border-strong);
+	--md-color-link: var(--color-accent-text);
+	/* Translucent, so code and striped rows read on either mode's surface. */
+	--md-color-code-bg: var(--color-bg-hover);
+	--md-color-blockquote-border: var(--color-border-strong);
+	--md-color-blockquote-text: var(--color-text-secondary);
+	--md-color-table-row-alt: var(--color-bg-hover);
+	--md-color-task-checked: var(--color-accent);
 
-	/* GitHub-style alert blockquotes (requirement #15 / Issue 24) */
-	--md-color-alert-note: #0969da;
-	--md-color-alert-tip: #1a7f37;
-	--md-color-alert-important: #8250df;
-	--md-color-alert-warning: #9a6700;
-	--md-color-alert-caution: #cf222e;
+	/* GitHub-style alert blockquotes (requirement #15 / Issue 24; 要件#56 判断 (l)) */
+	--md-color-alert-note: var(--color-accent-text);
+	--md-color-alert-tip: var(--color-success);
+	--md-color-alert-important: var(--color-emphasis);
+	--md-color-alert-warning: var(--color-warning);
+	--md-color-alert-caution: var(--color-danger);
 }
 
 .markdown-body {
@@ -41,6 +41,66 @@
 	color: var(--md-color-text);
 	word-wrap: break-word;
 	padding: 2rem 3rem;
+}
+
+/* --- Line length (要件#56 契約 4・判断 (f)(g)) ---
+   Running text — paragraphs, headings, lists, quotes, footnotes and a plain
+   text file — stops at --doc-measure (72ch, so it follows the zoom of 要件#36).
+   The column is centred by widening the left padding; tables, code, diagrams
+   and an image alone on its line start at the same left edge and run on to
+   the right. Views that are not running text (a code file, the source editor,
+   the HTML find / edit surfaces) keep the plain padding. View ▸ Toggle Full
+   Width (<html data-doc-measure="full">) lifts the measure, which is the
+   window-wide text of 要件#20. Screen only: the paper is laid out by
+   print.css as before. */
+
+@media screen {
+	.markdown-body:not(:has(> .vellis-plaintext[data-vellis-lang], > .vellis-plaintext:read-write, > .html-find-surface, > .html-edit-surface)) {
+		padding-left: max(3rem, calc((100% - var(--doc-measure)) / 2));
+	}
+
+	.markdown-body > p,
+	.markdown-body > h1,
+	.markdown-body > h2,
+	.markdown-body > h3,
+	.markdown-body > h4,
+	.markdown-body > h5,
+	.markdown-body > h6,
+	.markdown-body > ul,
+	.markdown-body > ol,
+	.markdown-body > blockquote,
+	.markdown-body > dl,
+	.markdown-body > hr,
+	.markdown-body > .footnotes,
+	.markdown-body > .vellis-plaintext:not([data-vellis-lang]):read-only {
+		max-width: var(--doc-measure);
+	}
+
+	.markdown-body > p:has(> img:only-child) {
+		max-width: none;
+	}
+
+	/* Same specificity as the centring rule above; wins by coming later. */
+	:root[data-doc-measure="full"] .markdown-body {
+		padding-left: 3rem;
+	}
+
+	:root[data-doc-measure="full"] .markdown-body > p,
+	:root[data-doc-measure="full"] .markdown-body > h1,
+	:root[data-doc-measure="full"] .markdown-body > h2,
+	:root[data-doc-measure="full"] .markdown-body > h3,
+	:root[data-doc-measure="full"] .markdown-body > h4,
+	:root[data-doc-measure="full"] .markdown-body > h5,
+	:root[data-doc-measure="full"] .markdown-body > h6,
+	:root[data-doc-measure="full"] .markdown-body > ul,
+	:root[data-doc-measure="full"] .markdown-body > ol,
+	:root[data-doc-measure="full"] .markdown-body > blockquote,
+	:root[data-doc-measure="full"] .markdown-body > dl,
+	:root[data-doc-measure="full"] .markdown-body > hr,
+	:root[data-doc-measure="full"] .markdown-body > .footnotes,
+	:root[data-doc-measure="full"] .markdown-body > .vellis-plaintext:not([data-vellis-lang]):read-only {
+		max-width: none;
+	}
 }
 
 /* --- Headings --- */
@@ -295,6 +355,10 @@
 .markdown-body .vellis-mermaid-rendered svg {
 	max-width: 100%;
 	height: auto;
+	/* Diagrams keep Mermaid's own colours in either mode (要件#56 判断 (o)), so they
+	   sit on the light canvas colour rather than on the dark surface. */
+	color-scheme: light;
+	background-color: Canvas;
 }
 
 .markdown-body .vellis-mermaid-error {

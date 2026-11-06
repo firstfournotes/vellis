@@ -225,6 +225,42 @@ function openedUris(captured: CapturedIpc[]): string[] {
 		.map((c) => (c.args as { uri?: string } | null)?.uri ?? '?');
 }
 
+/**
+ * Wait until the recorded events have been quiet for `quietMs`, counted from
+ * the later of the call (`t0`) and the newest recorded event (any uri): at
+ * least `quietMs` always passes, and an event arriving meanwhile restarts the
+ * count. Counting from `t0` matters because the notification this guards
+ * against (Issue #770) arrives ~1.1-1.2 s after the put back, while the
+ * newest event on record at the call is the *earlier* Trash move's
+ * `file_removed` (nothing `file_*` is emitted by the reopen or the typing) —
+ * measured from that alone, the wait would return at once and miss it.
+ * Gives up after `timeout` and says so (`settled: false`) rather than
+ * throwing — the gate's own assertions then judge what arrived. Used before
+ * clearing the logs for a step that expects no `file_changed`: a late
+ * notification of an earlier operation (the put back of the same file) would
+ * otherwise land after the clear and be counted against the step. `e.at` is
+ * the page's `Date.now()`, `t0` the spec's: one machine, one epoch clock.
+ */
+async function waitForEventsQuiet(quietMs = QUIET, timeout = ARRIVAL): Promise<{ settled: boolean; ms: number; late: string[] }> {
+	const t0 = Date.now();
+	const seen = new Set<number>();
+	const late: string[] = [];
+	for (;;) {
+		const all = await readEventRecord();
+		for (const e of all) {
+			if (!seen.has(e.seq)) {
+				seen.add(e.seq);
+				late.push(`${e.event}:${payloadUri(e) ?? JSON.stringify(e.payload)}@${e.at - t0}ms`);
+			}
+		}
+		const newest = all.reduce((m, e) => Math.max(m, e.at), 0);
+		const since = Math.max(newest, t0);
+		if (Date.now() - since >= quietMs) return { settled: true, ms: Date.now() - t0, late };
+		if (Date.now() - t0 >= timeout) return { settled: false, ms: Date.now() - t0, late };
+		await browser.pause(200);
+	}
+}
+
 async function clearLogs(): Promise<void> {
 	await browser.execute(() => {
 		const r = (window as unknown as { __gate?: { ipc: string[]; dialogs: string[] } }).__gate;
@@ -632,7 +668,11 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		expect(b.dialogs).toEqual([]);
 
 		// 3. Trash again → the banner is back (the hub's `gone` was reset by the
-		//    return; 契約3 counts one `file_removed` per move).
+		//    return; 契約3 counts one `file_removed` per move). The put back's own
+		//    notifications must have stopped arriving before the logs are cleared,
+		//    or a late one is counted against this move (Issue #770).
+		const settled3 = await waitForEventsQuiet();
+		report(REPORT, { gate: '22a-3-c-settle', ...settled3 });
 		await clearLogs();
 		const t2 = moveToTrash(restoreMe, '22a-3');
 		const shown2 = await pollUntil(async () => (await view()).removed.present, ARRIVAL);
@@ -742,6 +782,13 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		await openMarkdown(resaveMe, 'Resave me');
 		await enterEditAndType();
 		expect((await view()).editorText).toBe(doc('Resave me') + EDIT + EDIT + '\n'); // 追補r: + sentinel
+		// The put back's notification can reach the reopened document's watch
+		// late and be recorded as a `file_changed` after the clear below (Issue
+		// #770). The recorder sees `file_*` events only for an open document, so
+		// the quiet is checked here, once the file is watched again, not before
+		// the reopen.
+		const settled4 = await waitForEventsQuiet();
+		report(REPORT, { gate: '22a-4-d-settle', ...settled4 });
 		await clearLogs();
 		const t3 = moveToTrash(resaveMe, '22a-4');
 		const shown3 = await pollUntil(async () => (await view()).removed.present, ARRIVAL);

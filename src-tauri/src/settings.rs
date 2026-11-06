@@ -6,6 +6,10 @@
 //! - `files.exclude`  — hidden from the tree **and** the search
 //! - `search.exclude` — left out of the search only (on top of `files.exclude`)
 //!
+//! and the theme in use (requirements.md #56 契約 3): `appearance.theme`, the
+//! name of a file in `themes/` next to this one (`"default"` = built in). The
+//! theme itself is read and watched by `theme.rs`.
+//!
 //! Each is a dictionary "glob pattern → true / false". A key that is present
 //! replaces its default entirely; a missing key keeps the default. The defaults
 //! reproduce the exclusions that used to be hard-coded (the dot-name skip in
@@ -35,6 +39,8 @@ pub const SETTINGS_FILENAME: &str = "settings.json";
 pub const FILES_EXCLUDE_KEY: &str = "files.exclude";
 /// Key of the list left out of the search only.
 pub const SEARCH_EXCLUDE_KEY: &str = "search.exclude";
+/// Key of the theme in use (requirements.md #56 契約 3).
+pub const APPEARANCE_THEME_KEY: &str = "appearance.theme";
 /// Event sent to every window after Vellis saved `settings.json`
 /// (契約7). Must match `SETTINGS_CHANGED_EVENT` in `src/lib/settings.ts`.
 pub const SETTINGS_CHANGED_EVENT: &str = "settings_changed";
@@ -48,10 +54,12 @@ const SETTINGS_DIR: &str = "vellis";
 const DEFAULT_FILES_EXCLUDE: &[&str] = &["**/.*", "**/.git", "**/.DS_Store", "**/.vellis"];
 
 /// What "Settings…" writes when the file is missing (契約6). The example in
-/// req-65.md plus the `**/.vellis` line of 追補a; it reads back as
-/// `Settings::default()` with no warnings (checked by the acceptance tests, so
-/// it cannot drift from the constants above).
+/// req-65.md plus the `**/.vellis` line of 追補a, with `appearance.theme`
+/// first so the key can be found (requirements.md #56, theme-architecture
+/// (s)); it reads back as `Settings::default()` with no warnings (checked by
+/// the acceptance tests, so it cannot drift from the constants above).
 const DEFAULT_SETTINGS_JSON: &str = r#"{
+  "appearance.theme": "default",
   "files.exclude": {
     "**/.*": true,
     "**/.git": true,
@@ -77,11 +85,15 @@ pub type ExcludeMap = BTreeMap<String, bool>;
 pub struct Settings {
     pub files_exclude: ExcludeMap,
     pub search_exclude: ExcludeMap,
+    /// `appearance.theme` as written (requirements.md #56 契約 3). Whether the
+    /// theme exists and is usable is `theme.rs`'s to decide.
+    pub appearance_theme: String,
 }
 
 impl Default for Settings {
     /// 契約5: `files.exclude` = [`DEFAULT_FILES_EXCLUDE`], `search.exclude` =
     /// `**/<name>` for each of [`EXCLUDED_DIR_NAMES`]. All lines are `true`.
+    /// `appearance.theme` = the built-in theme.
     fn default() -> Self {
         Self {
             files_exclude: DEFAULT_FILES_EXCLUDE.iter().map(|p| (p.to_string(), true)).collect(),
@@ -89,6 +101,7 @@ impl Default for Settings {
                 .iter()
                 .map(|name| (format!("**/{name}"), true))
                 .collect(),
+            appearance_theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
     }
 }
@@ -129,6 +142,7 @@ impl LoadedSettings {
 /// - a key whose value is not an object → that list defaults, with a warning
 /// - a line whose value is not true/false → that line is dropped, with a warning
 /// - a present key replaces its default entirely; a missing key keeps it
+/// - `appearance.theme` that is not a string → `"default"`, with a warning
 /// - unknown keys are ignored silently
 pub fn parse_settings(text: &str) -> LoadedSettings {
     let both = format!("{FILES_EXCLUDE_KEY}, {SEARCH_EXCLUDE_KEY}");
@@ -152,7 +166,28 @@ pub fn parse_settings(text: &str) -> LoadedSettings {
         read_exclude_map(object, FILES_EXCLUDE_KEY, defaults.files_exclude, &mut warnings);
     let search_exclude =
         read_exclude_map(object, SEARCH_EXCLUDE_KEY, defaults.search_exclude, &mut warnings);
-    LoadedSettings { settings: Settings { files_exclude, search_exclude }, warnings }
+    let appearance_theme = appearance_theme_of(object).unwrap_or_else(|warning| {
+        warnings.push(warning);
+        defaults.appearance_theme
+    });
+    LoadedSettings {
+        settings: Settings { files_exclude, search_exclude, appearance_theme },
+        warnings,
+    }
+}
+
+/// `appearance.theme` of a settings object: the string written, `"default"`
+/// when the key is missing, or the warning when it is not a string. Shared by
+/// [`parse_settings`] and the theme resolution (`theme::resolve_theme`), so the
+/// key is read one way only.
+pub fn appearance_theme_of(object: &serde_json::Map<String, Value>) -> Result<String, String> {
+    match object.get(APPEARANCE_THEME_KEY) {
+        None => Ok(crate::theme::DEFAULT_THEME_NAME.to_string()),
+        Some(Value::String(name)) => Ok(name.clone()),
+        Some(_) => Err(format!(
+            "Settings file has errors; using the default theme (the value of {APPEARANCE_THEME_KEY} must be a string)"
+        )),
+    }
 }
 
 fn read_exclude_map(
@@ -245,7 +280,7 @@ pub fn is_settings_file(path: &Path) -> bool {
     }
 }
 
-/// The JSON "Settings…" writes when the file is missing: the two keys with
+/// The JSON "Settings…" writes when the file is missing: the three keys with
 /// their defaults, and nothing else.
 pub fn default_settings_json() -> String {
     DEFAULT_SETTINGS_JSON.to_string()

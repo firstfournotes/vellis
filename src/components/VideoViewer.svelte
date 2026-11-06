@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
+	import Icon from './Icon.svelte';
+	import { observeAppearance } from '$lib/theme';
 	import { openPath } from '@tauri-apps/plugin-opener';
 	import { planOpenVideoExternally, videoViewMode } from '$lib/video-viewing';
 	import {
@@ -91,6 +93,11 @@
 	const REPEAT_DELAY_MS = 400;
 	/** 連射の間隔(ms)。フレーム送りが目で追える速さ。 */
 	const REPEAT_INTERVAL_MS = 80;
+	/**
+	 * シークが止まったとみなすまでの、visible の間の `seeking` の長さ(ms・要件#37 追補i 契約1)。
+	 * 普通のシークは長くても 1 秒弱(追補g の fs で最大 0.92 秒)なので、その上に置く。
+	 */
+	const STALLED_SEEK_MS = 1500;
 
 	/**
 	 * 波形帯の高さ(px・要件#41 契約②/要件#42)。
@@ -162,6 +169,29 @@
 	 * (契約⑤)。読み込み直しのたびに立て直す。
 	 */
 	let initialSeekPending = true;
+
+	/**
+	 * `<video>` の世代(要件#37 追補i 契約2)。止まったシークを見張りが見つけたら 1 つ進め、
+	 * 同じ `src` のまま要素だけを作り直す ―― `src` の文字列を変えると、索引・波形の取り直しと
+	 * 開き直しの effect(追補a・b・e)まで走ってしまう。
+	 */
+	let videoGeneration = $state(0);
+	/**
+	 * 作り直した要素の `loadedmetadata` で当てる行き先(秒・契約2)。null =作り直しではない
+	 * (初期シークの経路)。当てたら空にする。
+	 */
+	let stalledSeekTarget: number | null = null;
+	/**
+	 * 行き先を当てた要素と行き先(契約4)。その要素の次の `seeking` が同じ行き先なら作り直しの
+	 * 戻しなので、利用者の新しいシークに数えない。次の `seeking` で使い切る(行き先が違えば、
+	 * 戻しの `seeking` が来ないうちに利用者がシークした=新しいシーク)。
+	 */
+	let stalledSeekRestoring: { el: HTMLVideoElement; target: number } | null = null;
+	/**
+	 * いまのシークで作り直しを使ったか(契約4=1 つの行き先につき 1 回)。作り直しの戻し以外の
+	 * シークが来たら降ろす(=新しいシークは 1 から数える)。表示ではないので `$state` にしない。
+	 */
+	let stalledSeekRebuilt = false;
 
 	/** 解析結果。null =まだ解析していない(src が変わった直後・解析中)。 */
 	let waveform = $state<WaveformResult | null>(null);
@@ -305,6 +335,11 @@
 		scrubbing = null;
 		requestedFrame = null;
 		initialSeekPending = true;
+		// 止まったシークの作り直し(要件#37 追補i)の行き先は、読み込み直しより前のもの。
+		// 持ち越すと、開き直しの先頭への巻き戻し(追補b)や別の素材の初期シークを上書きする。
+		stalledSeekTarget = null;
+		stalledSeekRestoring = null;
+		stalledSeekRebuilt = false;
 		stopRepeat();
 		// 同じ src の開き直しでは、据え置かれた `<video>` も初めて開いたときの状態へ
 		// そろえる(要件#37 追補b・backlog 238)。`loadedmetadata` はもう来ないので、
@@ -477,6 +512,8 @@
 		const height = waveformHeight;
 		const zoom = waveformZoom;
 		const axisSeconds = barDuration;
+		// 見え方(テーマ・モード・OS の外観)が変わったら色を引き直して描き直す(要件#56 第2段 (e))。
+		void appearanceTick;
 		if (!canvas || width <= 0) return;
 		const ready = result?.state === 'ready' ? result : null;
 		// 等倍のレーンは解析したバッファ全体(末尾の詰め物込み)を割ったものなので、
@@ -520,6 +557,34 @@
 		// 保存はドラッグ確定時のみ(要件#9 と同じ理由 ―― 途中経過を保存値にしない)。
 		saveWaveformHeight(waveformHeight);
 	}
+
+	/**
+	 * 見え方(テーマ・モード・OS の外観)が変わった回数(要件#56 契約 7 第2段 (e)・AudioViewer と
+	 * 同じ)。canvas の中身はトークンの変化に自動では追従しないので、描画の effect がこれを読み、
+	 * 増えるたびに `drawWaveform` が今の色を引き直す。
+	 */
+	let appearanceTick = $state(0);
+
+	/** 新しい色が当たってから(`theme_changed` なら `applyTheme` の後)描き直させる。 */
+	function redrawWaveform(): void {
+		requestAnimationFrame(() => {
+			appearanceTick += 1;
+		});
+	}
+
+	// マウント中だけ見え方の変化を購読する(解除は戻り値の関数)。
+	onMount(() => {
+		let stop: (() => void) | null = null;
+		let disposed = false;
+		void observeAppearance(() => redrawWaveform()).then((off) => {
+			if (disposed) off();
+			else stop = off;
+		});
+		return () => {
+			disposed = true;
+			stop?.();
+		};
+	});
 
 	// 保存値の復元と、ウインドウ高の変化への追従(要件#42)。起動ごと(= 新規
 	// ウインドウごと)にこの onMount が走るので、再起動にも新規ウインドウにも同じ
@@ -880,6 +945,118 @@
 	});
 
 	/**
+	 * 止まったシークの見張り(要件#37 追補i・Issue #788)。
+	 *
+	 * 見えている間に作られた一時停止中の `<video>` は、ページが一度 hidden になると WebKit に
+	 * デコーダを捨てられ、そのあとの精密シークが終わらない(`seeking` が true のまま・後に
+	 * 続くシークも保留に積まれる)。直るのは `play()` か要素の作り直しだけなので、止まったら
+	 * 同じ `src` のまま要素を作り直す(`rebuildStalledVideo`)。
+	 *
+	 * 判定(契約1): この要素が作られてから一度でも hidden を経験していて、ページが visible の
+	 * 間に `seeking` が `STALLED_SEEK_MS` 続いたら止まったとみなす。hidden の間は数えず、
+	 * visible に戻るたびに 0 から数え直す。新しいシークの要求(`seeking`)でも 0 から数え直す
+	 * ―― 前のシークは新しいシークに取って代わられており(HTML の seek の手順)、止まって
+	 * いるかを問うのは最後の要求だから。ドラッグや長押しの最中に要素を替えないためでもある。
+	 * 作られた時点で hidden だった要素は、次に hidden になるまで「経験した」に入れない
+	 * (契約1 の実装裁量。そうした要素は止まらないことが分かっている)。
+	 *
+	 * 追うのは `video` だけ。要素が替われば、古い要素のタイマーと購読はここで外れる。
+	 */
+	$effect(() => {
+		const el = video;
+		if (!el) return;
+
+		let hiddenSeen = false;
+		let timer: ReturnType<typeof setTimeout> | null = null;
+
+		const disarm = () => {
+			if (timer !== null) {
+				clearTimeout(timer);
+				timer = null;
+			}
+		};
+		/** 条件がそろっていれば 0 から数え始める。そろっていなければ止めるだけ。 */
+		const arm = () => {
+			disarm();
+			if (!hiddenSeen || document.visibilityState !== 'visible' || !el.seeking) return;
+			timer = setTimeout(onStalled, STALLED_SEEK_MS);
+		};
+		const onStalled = () => {
+			timer = null;
+			if (!el.seeking || document.visibilityState !== 'visible') return;
+			// 1 つの行き先につき作り直しは 1 回まで(契約4)。作り直した要素でも止まったら、
+			// 利用者が新しくシークするまで何もしない。
+			if (stalledSeekRebuilt) return;
+			rebuildStalledVideo(el.currentTime);
+		};
+		const onSeeking = () => {
+			// 作り直しの戻し(`restoreStalledSeek`)は同じ行き先の続き。それ以外のシークは
+			// 新しいシークなので、作り直しの回数を 1 から数え直す(契約4)。
+			const restoring = stalledSeekRestoring;
+			stalledSeekRestoring = null;
+			const isRestore =
+				restoring !== null &&
+				restoring.el === el &&
+				Math.abs(el.currentTime - restoring.target) < 1e-6;
+			if (!isRestore) stalledSeekRebuilt = false;
+			arm();
+		};
+		const onVisibilityChange = () => {
+			if (document.visibilityState === 'hidden') {
+				hiddenSeen = true;
+				disarm();
+			} else {
+				arm();
+			}
+		};
+
+		el.addEventListener('seeking', onSeeking);
+		el.addEventListener('seeked', disarm);
+		document.addEventListener('visibilitychange', onVisibilityChange);
+		return () => {
+			disarm();
+			el.removeEventListener('seeking', onSeeking);
+			el.removeEventListener('seeked', disarm);
+			document.removeEventListener('visibilitychange', onVisibilityChange);
+		};
+	});
+
+	/**
+	 * 止まった要素を作り直す(要件#37 追補i 契約2・3)。
+	 *
+	 * 世代だけを進めて `src` は変えないので、開き直しの effect(追補a・b・e)・索引の取得・
+	 * 波形の解析はどれも走らない(いずれも `src` しか見ていない)。尺(`mediaDuration`・
+	 * `durationSrc`)・波形のズームと窓はそのまま残り、消音は `muted={audioMuted}` で新しい
+	 * 要素へ渡る。
+	 *
+	 * 行き先は止まった要素の `currentTime` ―― シーク中は最後に要求した位置を返すので、
+	 * 止まっている間に重ねて要求された位置もここに入る。新しい要素の `loadedmetadata` で
+	 * そこへシークし直す(`restoreStalledSeek`)。表示は作り直しの間も行き先を示す(`position` を
+	 * 行き先へ。先頭へは戻さない)。`play()` は呼ばない(一時停止のまま・由谷の決定 (b))ので、
+	 * 再生中の表示も降ろす ―― 外される要素の `pause` を待たない。
+	 */
+	function rebuildStalledVideo(target: number): void {
+		stalledSeekRebuilt = true;
+		stalledSeekTarget = target;
+		playing = false;
+		report(target);
+		videoGeneration += 1;
+	}
+
+	/**
+	 * 作り直した要素を止まったシークの行き先へ戻す(要件#37 追補i 契約2)。作り直しでなければ
+	 * 何もせず false を返し、呼び手は初期シーク(要件#39)へ進む。
+	 */
+	function restoreStalledSeek(el: HTMLVideoElement): boolean {
+		const target = stalledSeekTarget;
+		if (target === null) return false;
+		stalledSeekTarget = null;
+		stalledSeekRestoring = { el, target };
+		el.currentTime = target;
+		return true;
+	}
+
+	/**
 	 * 素材パネルが開いた直後の一押し(要件#40 契約⑪)。
 	 *
 	 * 停止中は rVFC が鳴らないので、パネルを開いても次の再生まで位置が届かない。
@@ -1117,31 +1294,38 @@
 					新しい要素へ引き継ぐ(要件#37 追補c・要件#50 追補e(2) の AudioViewer と同じ形)。
 					`toggleMute` が要素の `muted` を書き換え → `volumechange` で `audioMuted` に
 					写り → 同じ値の再代入になるだけなので、往復して振動しない。
+
+					内側の `{#key videoGeneration}` は、止まったシークの作り直し(要件#37 追補i)で
+					同じ `src` のまま要素だけを替えるためのもの。作り直した要素の `loadedmetadata` は
+					初期シークではなく、止まったシークの行き先へ戻す。
 				-->
 				{#key src}
-					<!-- svelte-ignore a11y_media_has_caption -->
-					<!-- svelte-ignore a11y_click_events_have_key_events -->
-					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-					<video
-						class="video"
-						bind:this={video}
-						{src}
-						preload="metadata"
-						muted={audioMuted}
-						onclick={togglePlay}
-						onloadedmetadata={(event) => {
-							applyInitialSeek(event.currentTarget);
-							onDisplayed?.();
-						}}
-						onplay={() => (playing = true)}
-						onpause={() => (playing = false)}
-						onvolumechange={(event) => (audioMuted = event.currentTarget.muted)}
-						ondurationchange={(event) => {
-							const value = event.currentTarget.duration;
-							mediaDuration = Number.isFinite(value) ? value : 0;
-						}}
-						onerror={() => (loadFailed = true)}
-					></video>
+					{#key videoGeneration}
+						<!-- svelte-ignore a11y_media_has_caption -->
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+						<video
+							class="video"
+							bind:this={video}
+							{src}
+							preload="metadata"
+							muted={audioMuted}
+							onclick={togglePlay}
+							onloadedmetadata={(event) => {
+								const el = event.currentTarget;
+								if (!restoreStalledSeek(el)) applyInitialSeek(el);
+								onDisplayed?.();
+							}}
+							onplay={() => (playing = true)}
+							onpause={() => (playing = false)}
+							onvolumechange={(event) => (audioMuted = event.currentTarget.muted)}
+							ondurationchange={(event) => {
+								const value = event.currentTarget.duration;
+								mediaDuration = Number.isFinite(value) ? value : 0;
+							}}
+							onerror={() => (loadFailed = true)}
+						></video>
+					{/key}
 				{/key}
 			{:else}
 				<div class="video-placeholder">
@@ -1294,7 +1478,7 @@
 				<div class="video-buttons">
 					<button
 						type="button"
-						class="video-button"
+						class="video-button video-play"
 						title={playing ? 'Pause (Space)' : 'Play (Space)'}
 						onclick={togglePlay}
 					>
@@ -1375,7 +1559,7 @@
 							aria-label="Zoom In Waveform"
 							onclick={() => zoomWaveformBy(2)}
 						>
-							+
+							<Icon name="zoom-in" size={16} />
 						</button>
 						<button
 							type="button"
@@ -1384,7 +1568,7 @@
 							aria-label="Zoom Out Waveform"
 							onclick={() => zoomWaveformBy(0.5)}
 						>
-							−
+							<Icon name="zoom-out" size={16} />
 						</button>
 						<button
 							type="button"
@@ -1419,44 +1603,56 @@
 		flex-direction: column;
 		min-width: 0;
 		overflow: hidden;
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-surface);
 	}
 
 	.video-toolbar {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		flex-shrink: 0;
-		padding: 6px 12px;
-		background-color: var(--color-bg-primary);
+		box-sizing: border-box;
+		min-height: 34px;
+		padding: 4px 8px 4px 12px;
+		background-color: var(--color-bg-surface);
 		border-bottom: 1px solid var(--color-border);
 	}
 
+	/*
+	 * 見出し行のボタン(Viewer の `.toolbar-button` と同じ= 24px・角丸 6px・縁は
+	 * border-strong・ホバーは地の上に `--color-bg-hover` を重ねる。要件#56 第2段)。
+	 */
 	.toolbar-button {
-		font-size: 12px;
-		padding: 4px 10px;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-secondary);
+		height: 24px;
+		box-sizing: border-box;
+		padding: 0 10px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		line-height: 1;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
 		color: var(--color-text-primary);
 		cursor: pointer;
+		white-space: nowrap;
 	}
 
 	.toolbar-button:hover {
-		background-color: var(--color-bg-hover);
+		background-image: linear-gradient(var(--color-bg-hover), var(--color-bg-hover));
 	}
 
 	/* 開いている間は押し込んで見せる(Viewer のマーク一覧トグルと同じ扱い)。 */
 	.toolbar-button.active {
-		background-color: var(--color-bg-tree-active);
-		border-color: var(--color-border);
-		color: var(--color-text-primary);
+		background-color: var(--color-accent-soft);
+		border-color: var(--color-accent);
+		color: var(--color-accent-text);
 	}
 
 	.video-name {
 		flex: 1;
 		min-width: 0;
-		font-size: 12px;
+		font-size: var(--text-sm);
 		color: var(--color-text-secondary);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1497,7 +1693,7 @@
 		justify-content: center;
 		overflow: hidden;
 		padding: 16px;
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-base);
 	}
 
 	/*
@@ -1523,7 +1719,7 @@
 
 	.video-message {
 		margin: 0;
-		font-size: 13px;
+		font-size: var(--text-md);
 		color: var(--color-text-secondary);
 	}
 
@@ -1534,7 +1730,7 @@
 		gap: 6px;
 		padding: 8px 12px 10px;
 		border-top: 1px solid var(--color-border);
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-surface);
 	}
 
 	/*
@@ -1565,9 +1761,10 @@
 		flex-shrink: 0;
 		overflow: hidden;
 		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-secondary);
-		color: var(--color-text-secondary);
+		border-radius: var(--radius-sm);
+		background-color: var(--color-bg-base);
+		/* 波形の塗り(モックの波形= 文字の薄い色)。 */
+		color: var(--color-text-muted);
 		cursor: pointer; /* 左右の余白もクリックでシークできる(要件#41 追補g 契約6) */
 	}
 
@@ -1599,7 +1796,7 @@
 		z-index: 1;
 		width: 1px;
 		height: 100%;
-		background-color: var(--color-text-primary);
+		background-color: var(--color-accent-text);
 		pointer-events: none;
 	}
 
@@ -1611,11 +1808,13 @@
 		position: absolute;
 		left: 3px;
 		padding: 1px 3px;
-		border-radius: 2px;
+		border-radius: 3px;
 		font-size: 10px;
+		font-family: var(--font-mono);
+		font-weight: 600;
 		line-height: 1.2;
-		color: var(--color-text-secondary);
-		background-color: var(--color-bg-secondary);
+		color: var(--color-text-muted);
+		background-color: var(--color-bg-base);
 		pointer-events: none;
 	}
 
@@ -1626,8 +1825,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 12px;
-		color: var(--color-text-secondary);
+		font-size: var(--text-sm);
+		color: var(--color-text-muted);
 		pointer-events: none;
 	}
 
@@ -1644,7 +1843,7 @@
 		display: block;
 		width: 100%;
 		margin: 0;
-		accent-color: var(--color-text-secondary);
+		accent-color: var(--color-accent);
 		cursor: pointer;
 	}
 
@@ -1662,10 +1861,10 @@
 		top: 0;
 		bottom: 0;
 		box-sizing: border-box;
-		border: 1px solid var(--color-text-secondary);
+		border: 1px solid var(--color-accent-text);
 		border-radius: 3px;
-		background-color: var(--color-bg-hover);
-		opacity: 0.5;
+		background-color: var(--color-accent-soft);
+		opacity: 0.8;
 		pointer-events: none;
 	}
 
@@ -1675,18 +1874,50 @@
 		gap: 6px;
 	}
 
+	/*
+	 * 操作部のボタン(モックの `.btn` を小さくしたもの= 28px・角丸 6px)。ホバーは地の上に
+	 * `--color-bg-hover` を重ねる。再生だけはアクセントの主ボタン(モックの `.play`)。
+	 */
 	.video-button {
-		font-size: 12px;
-		padding: 4px 10px;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-secondary);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: 28px;
+		box-sizing: border-box;
+		padding: 0 10px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		line-height: 1;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
 		color: var(--color-text-primary);
 		cursor: pointer;
+		white-space: nowrap;
 	}
 
 	.video-button:hover {
-		background-color: var(--color-bg-hover);
+		background-image: linear-gradient(var(--color-bg-hover), var(--color-bg-hover));
+	}
+
+	.video-play {
+		min-width: 64px;
+		background-color: var(--color-accent);
+		border-color: transparent;
+		color: var(--color-on-accent);
+	}
+
+	.video-play:hover {
+		background-image: none;
+		filter: brightness(1.1);
+	}
+
+	/* 消音中は押し込んだ見た目(見出し行のトグルと同じ)。 */
+	.video-mute[aria-pressed='true'] {
+		background-color: var(--color-accent-soft);
+		border-color: var(--color-accent);
+		color: var(--color-accent-text);
 	}
 
 	/* 歩幅のボタンは数字が並ぶので、幅を揃えて押し間違いを減らす。 */
@@ -1709,6 +1940,8 @@
 
 	.video-zoom {
 		min-width: 32px;
+		padding: 0 6px;
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* 消音トグルは残りを右へ押しやる位置に置く。 */
@@ -1718,17 +1951,28 @@
 
 	/*
 	 * 3表記。等幅の数字で桁を固定する — 再生中に数字の幅が変わると、読み取る前に
-	 * 表示が動いて位置が判らなくなる。
+	 * 表示が動いて位置が判らなくなる。見た目はモックの時刻の枠(`.tcs`= 縁で区切った 3 枠)。
 	 */
 	.video-readout {
 		display: flex;
-		align-items: baseline;
-		gap: 10px;
+		align-items: stretch;
 		margin-left: 8px;
-		font-size: 12px;
+		border: 1px solid var(--color-border);
+		border-radius: 7px;
+		overflow: hidden;
+		font-size: var(--text-sm);
 		font-variant-numeric: tabular-nums;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-family: var(--font-mono);
 		color: var(--color-text-secondary);
+	}
+
+	.video-readout > span {
+		padding: 4px 10px;
+		white-space: nowrap;
+	}
+
+	.video-readout > span + span {
+		border-left: 1px solid var(--color-border);
 	}
 
 	/* 正本はフレーム番号(契約①)。3つのうちここだけを強く出す。 */

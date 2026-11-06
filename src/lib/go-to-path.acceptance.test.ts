@@ -850,6 +850,9 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		// 要件#38 追補g(2026-10-06)で `print_pdf` を追加(set_print_available の直後)。
 		// 要件#64 追補f(2026-10-25・Issue #717)で `record_displayed_file` を追加(list_recent_files と clear_recent_files のあいだ)。
 		// 要件#48 追補m(2026-10-26・Issue #750)で `switch_root_confirmed` を追加(set_root の直後)=由谷承認 2026-10-26。
+		// 要件#56 第1段(2026-11-02・契約 3 のテーマ・棚卸し 6=req-56.md で事前承認)で `get_theme` を追加(get_build_info の直後)。
+		// 要件#83(2026-11-05・契約 16・承認 2)で `list_bookmarks` / `add_bookmark` / `remove_bookmark` / `move_bookmark` /
+		// `remove_history_entry` / `list_missing_paths` / `scan_recently_modified` を追加(clear_recent_files の直後・契約 16 の表の順)。
 		const libRs = readFileSync(resolve(REPO_ROOT, 'src-tauri/src/lib.rs'), 'utf-8');
 		const blocks = [...libRs.matchAll(/generate_handler!\[([^\]]*)\]/g)].map((m) =>
 			(m[1] ?? '')
@@ -884,10 +887,18 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'diff_against_snapshot',
 			'revert_to_snapshot',
 			'get_build_info',
+			'get_theme',
 			'list_history',
 			'list_recent_files',
 			'record_displayed_file',
 			'clear_recent_files',
+			'list_bookmarks',
+			'add_bookmark',
+			'remove_bookmark',
+			'move_bookmark',
+			'remove_history_entry',
+			'list_missing_paths',
+			'scan_recently_modified',
 			'get_video_frame_index',
 			'extract_waveform_audio',
 			'analyze_wav_waveform',

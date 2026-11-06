@@ -42,6 +42,12 @@ if [[ "${VELLIS_E2E_SSH_MODE:-}" == 1 ]]; then
 	if [[ $# -gt 0 ]]; then
 		exec "$sshd_tool" exec -- "$binary" "$@"
 	fi
+	# VELLIS_E2E_NO_ROOT=1 (要件#83 gates): no argument at all, so the first
+	# window is the Dashboard (`needs_root_selection`) with the cwd as the
+	# provisional root — still inside the sshd's fake home.
+	if [[ "${VELLIS_E2E_NO_ROOT:-}" == 1 ]]; then
+		exec "$sshd_tool" exec -- "$binary"
+	fi
 	if [[ -z "${VELLIS_E2E_SSH_URI:-}" ]]; then
 		echo "VELLIS_E2E_SSH_MODE=1 but VELLIS_E2E_SSH_URI is not set" >&2
 		exit 1
@@ -71,6 +77,13 @@ export CFFIXED_USER_HOME="$app_home"
 # `tauri:options.args`.
 if [[ $# -gt 0 ]]; then
 	exec "$binary" "$@"
+fi
+
+# VELLIS_E2E_NO_ROOT=1 (要件#83 gates, scripts/gate-device/run-gate-spec.sh
+# req83): the argument-less launch — the first window is the Dashboard and the
+# cwd (tauri-webdriver's, set by the harness) is the provisional root.
+if [[ "${VELLIS_E2E_NO_ROOT:-}" == 1 ]]; then
+	exec "$binary"
 fi
 
 if [[ -z "$root" ]]; then

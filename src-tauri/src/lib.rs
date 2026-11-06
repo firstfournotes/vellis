@@ -1,11 +1,13 @@
 pub mod annotation;
 pub mod audio_extract;
+pub mod bookmarks;
 pub mod channel;
 pub mod cli;
 pub mod features;
 pub mod cli_fix;
 pub mod cli_install;
 pub mod commands;
+pub mod dashboard;
 pub mod errors;
 pub mod exclude;
 pub mod fs;
@@ -19,6 +21,7 @@ pub mod self_check;
 pub mod session;
 pub mod settings;
 pub mod spacemouse;
+pub mod theme;
 pub mod update_check;
 pub mod video_frames;
 pub mod video_sync;
@@ -45,12 +48,15 @@ use commands::asset::handle_asset_for_window;
 use commands::build_info::get_build_info;
 use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
 use commands::document::{open_binary_document, open_document, save_document};
-use commands::history::list_history;
+use commands::bookmarks::{add_bookmark, list_bookmarks, move_bookmark, remove_bookmark};
+use commands::dashboard::{list_missing_paths, scan_recently_modified};
+use commands::history::{list_history, remove_history_entry};
 use commands::list::list_dir;
 use commands::print::{print_current_window, print_html, print_pdf, set_print_available};
 use commands::recent_files::{clear_recent_files, list_recent_files, record_displayed_file};
 use commands::root::{set_root, switch_root_confirmed};
 use commands::search::{search_in_folder, search_in_folder_page, search_in_folder_reset, SearchResults};
+use commands::theme::get_theme;
 use commands::video::get_video_frame_index;
 use commands::wav_waveform::analyze_wav_waveform;
 use commands::waveform::extract_waveform_audio;
@@ -159,7 +165,10 @@ pub(crate) fn run_app(
         .manage(PrintAvailability::new())
         // Finder の Open With で渡されたファイル(要件#68)。起動の途中では
         // `setup` より前に届くので、Builder の段階で置き場を用意しておく。
-        .manage(PendingOpens::default());
+        .manage(PendingOpens::default())
+        // 解決済みのテーマ(要件#56 契約 3)。アプリに 1 つ。最初の窓の `get_theme` が
+        // `setup` と競っても答えられるよう、Builder の段階で読んで置いておく。
+        .manage(theme::ThemeState::load());
 
     #[cfg(all(feature = "webdriver", debug_assertions))]
     let builder = builder.plugin(tauri_plugin_webdriver::init());
@@ -329,10 +338,18 @@ pub(crate) fn run_app(
         diff_against_snapshot,
         revert_to_snapshot,
         get_build_info,
+        get_theme,
         list_history,
         list_recent_files,
         record_displayed_file,
         clear_recent_files,
+        list_bookmarks,
+        add_bookmark,
+        remove_bookmark,
+        move_bookmark,
+        remove_history_entry,
+        list_missing_paths,
+        scan_recently_modified,
         get_video_frame_index,
         extract_waveform_audio,
         analyze_wav_waveform,
@@ -369,10 +386,18 @@ pub(crate) fn run_app(
         diff_against_snapshot,
         revert_to_snapshot,
         get_build_info,
+        get_theme,
         list_history,
         list_recent_files,
         record_displayed_file,
         clear_recent_files,
+        list_bookmarks,
+        add_bookmark,
+        remove_bookmark,
+        move_bookmark,
+        remove_history_entry,
+        list_missing_paths,
+        scan_recently_modified,
         get_video_frame_index,
         extract_waveform_audio,
         analyze_wav_waveform,
@@ -481,6 +506,11 @@ pub(crate) fn run_app(
                 id if id == menu::ACTUAL_SIZE_ITEM_ID => {
                     menu::handle_menu_open_click(app_handle, menu::MENU_ZOOM_RESET_EVENT);
                 }
+                id if id == menu::RELOAD_FILE_ITEM_ID => {
+                    // 開いている文書も、未保存の確認も、開いた command もツリーも窓の側に
+                    // しかないので、Zoom と同じくフォーカス中の窓へ投げて任せる(要件#80 契約2)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_RELOAD_FILE_EVENT);
+                }
                 id if id == menu::OPEN_FILE_ITEM_ID => {
                     menu::handle_menu_open_click(app_handle, menu::MENU_OPEN_FILE_EVENT);
                 }
@@ -497,6 +527,12 @@ pub(crate) fn run_app(
                     // どの行へフォーカスするかも窓の側にしかないので、Go to Path… と
                     // 同じくフォーカス中の窓へ投げて任せる(要件#64 契約5)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_RECENT_FILES_EVENT);
+                }
+                id if id == menu::DASHBOARD_ITEM_ID => {
+                    // Dashboard に入れ替えるか・後ろの画面に戻るか・何もしないか(戻る先の
+                    // 無い Dashboard)は窓の側にしかないので、Go to Path… と同じくフォーカス
+                    // 中の窓へ投げて任せる(要件#83 契約3・4)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_DASHBOARD_EVENT);
                 }
                 id if id == menu::EDIT_ITEM_ID => {
                     // 編集に入れる文書かも、いま編集中かも窓の側にしかないので、
@@ -522,6 +558,32 @@ pub(crate) fn run_app(
                     // 設定ファイルの置き場も既定値も Rust が知っているので、窓へは投げず
                     // Rust の中で「無ければ書き出して新しい窓で開く」まで済ませる(要件#65 契約6)。
                     menu::handle_settings_click(app_handle);
+                }
+                id if id == menu::APPEARANCE_LIGHT_ITEM_ID => {
+                    // モードは窓の見た目の好み(localStorage・<html data-theme>)なので、
+                    // ズームと同じくフォーカス中の窓へ投げて任せる(要件#56 契約 3)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_APPEARANCE_LIGHT_EVENT);
+                }
+                id if id == menu::APPEARANCE_DARK_ITEM_ID => {
+                    menu::handle_menu_open_click(app_handle, menu::MENU_APPEARANCE_DARK_EVENT);
+                }
+                id if id == menu::APPEARANCE_SYSTEM_ITEM_ID => {
+                    menu::handle_menu_open_click(app_handle, menu::MENU_APPEARANCE_SYSTEM_EVENT);
+                }
+                id if id == menu::TOGGLE_FULL_WIDTH_ITEM_ID => {
+                    // 本文の幅(72ch / 幅いっぱい)も窓の側の好み(要件#56 契約 4)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_TOGGLE_FULL_WIDTH_EVENT);
+                }
+                id if id == menu::EXPORT_DEFAULT_THEME_ITEM_ID => {
+                    // Default のテーマを themes/ に書き出して新しい窓で開く。Settings… と
+                    // 同じく Rust の中で完結し、窓へは投げない(要件#56 AC-56-23)。
+                    menu::handle_export_default_theme_click(app_handle);
+                }
+                id if id.starts_with(menu::APPEARANCE_THEME_ITEM_PREFIX) => {
+                    // テーマは settings.json の appearance.theme だけを書き換える。全窓へ
+                    // 配るのは theme.rs の watcher(経路を 1 本にする=要件#56 契約 3)。
+                    let name = &id[menu::APPEARANCE_THEME_ITEM_PREFIX.len()..];
+                    menu::handle_appearance_theme_click(app_handle, name);
                 }
                 _ => {}
             });
@@ -594,6 +656,14 @@ pub(crate) fn run_app(
                         e
                     );
                 }
+            }
+
+            // --- Theme (要件#56 契約 3) ---
+            // The startup warnings (if the theme is broken) and the watcher of
+            // ~/.config/vellis/ and its themes/. Not for `--self-check`
+            // (要件#72 契約2・8): no dialog, nothing kept running.
+            if self_check_session.is_none() {
+                theme::start(app.handle());
             }
 
             // --- Update notification (要件#14) ---

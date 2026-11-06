@@ -1205,11 +1205,13 @@
 	/**
 	 * 編集面の中だけに効かせる素の見た目。文書の CSS は Shadow に閉じているので、
 	 * 編集中のブロックを示す枠とリンクの見た目はここで足す(アプリの UI へは漏れない)。
+	 * 色はトークン(custom property は shadow root にも継承される)か UA のリンク色
+	 * (`-webkit-link`)で書き、直書きしない(要件#56 契約 2・第2段 (b))。
 	 */
 	const HTML_SURFACE_CSS = [
 		':host{display:block}',
-		'[contenteditable="true"]{outline:2px solid #93c5fd;outline-offset:2px;border-radius:2px}',
-		'[data-vellis-href],[data-vellis-xlink-href]{color:#0000ee;color:-webkit-link;',
+		'[contenteditable="true"]{outline:2px solid var(--color-focus-ring);outline-offset:2px;border-radius:2px}',
+		'[data-vellis-href],[data-vellis-xlink-href]{color:-webkit-link;',
 		'text-decoration:underline}',
 	].join('');
 
@@ -1773,17 +1775,18 @@
 	/**
 	 * 複製面の中だけに効かせる見た目。文書の CSS は Shadow に閉じているので、
 	 * ハイライトの色はこちら側にも要る(`::highlight()` はツリースコープごと)。
-	 * 現在の一致の文字色は閲覧面と同じく #1f2328 に固定する(要件#54 追補d)。
+	 * 現在の一致の文字色は閲覧面と同じく `--color-find-current-text` に固定する
+	 * (要件#54 追補d・要件#56 判断 (k)。custom property は shadow root にも継承される)。
 	 */
 	const FIND_SURFACE_CSS = [
 		':host{display:block}',
-		'[data-vellis-href],[data-vellis-xlink-href]{color:#0000ee;color:-webkit-link;',
+		'[data-vellis-href],[data-vellis-xlink-href]{color:-webkit-link;',
 		'text-decoration:underline}',
-		'mark[data-vellis-find]{background-color:#fef08a;color:inherit}',
-		'mark[data-vellis-find-current]{background-color:#fb923c;color:#1f2328}',
-		'mark[data-vellis-find-current] *{color:#1f2328 !important}',
-		'::highlight(vellis-find){background-color:#fef08a}',
-		'::highlight(vellis-find-current){background-color:#fb923c;color:#1f2328}',
+		'mark[data-vellis-find]{background-color:var(--color-find-match);color:inherit}',
+		'mark[data-vellis-find-current]{background-color:var(--color-find-current);color:var(--color-find-current-text)}',
+		'mark[data-vellis-find-current] *{color:var(--color-find-current-text) !important}',
+		'::highlight(vellis-find){background-color:var(--color-find-match)}',
+		'::highlight(vellis-find-current){background-color:var(--color-find-current);color:var(--color-find-current-text)}',
 	].join('');
 
 	/**
@@ -2454,39 +2457,58 @@
 		flex-direction: column;
 		overflow-y: auto;
 		min-width: 0;
-		background-color: #ffffff;
+		background-color: var(--color-bg-surface);
 	}
 
+	/*
+	 * ペインの見出し行(モックの `.ph`= 34px・下に 1px の線)。要件#56 第2段で各ビューアの
+	 * ツールバーと同じ寸法・同じボタンにそろえた。
+	 */
 	.viewer-toolbar {
 		position: sticky;
 		top: 0;
 		z-index: 10;
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 6px 12px;
-		background-color: #ffffff;
-		border-bottom: 1px solid #e5e7eb;
+		gap: 6px;
+		box-sizing: border-box;
+		min-height: 34px;
+		padding: 4px 8px 4px 12px;
+		background-color: var(--color-bg-surface);
+		border-bottom: 1px solid var(--color-border);
 	}
 
+	/*
+	 * 見出し行のボタン(モックの `.btn` を小さくしたもの= 24px・角丸 6px・縁は border-strong)。
+	 * ホバーは地の上に `--color-bg-hover` を重ねる(ダークでも「明るくなる」向きにそろう)。
+	 */
 	.toolbar-button {
-		font-size: 12px;
-		padding: 4px 10px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #f9fafb;
-		color: #374151;
+		height: 24px;
+		box-sizing: border-box;
+		padding: 0 10px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		line-height: 1;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-primary);
 		cursor: pointer;
+		white-space: nowrap;
+		transition:
+			background-color var(--duration-fast) var(--ease-out),
+			border-color var(--duration-fast) var(--ease-out);
 	}
 
 	.toolbar-button:hover {
-		background-color: #f3f4f6;
+		background-image: linear-gradient(var(--color-bg-hover), var(--color-bg-hover));
 	}
 
 	.toolbar-button.active {
-		background-color: #dbeafe;
-		border-color: #93c5fd;
-		color: #1e40af;
+		background-color: var(--color-accent-soft);
+		border-color: var(--color-accent);
+		color: var(--color-accent-text);
 	}
 
 	/*
@@ -2499,10 +2521,10 @@
 		align-items: center;
 		gap: 8px;
 		padding: 6px 12px;
-		background-color: #fef3c7;
-		border-bottom: 1px solid #fcd34d;
-		font-size: 12px;
-		color: #78350f;
+		background-color: var(--color-warning-soft);
+		border-bottom: 1px solid var(--color-warning);
+		font-size: var(--text-sm);
+		color: var(--color-text-primary);
 	}
 
 	.external-change-text {
@@ -2516,10 +2538,10 @@
 	 */
 	.structure-notice {
 		padding: 6px 12px;
-		background-color: #fee2e2;
-		border-bottom: 1px solid #fca5a5;
-		font-size: 12px;
-		color: #7f1d1d;
+		background-color: var(--color-danger-soft);
+		border-bottom: 1px solid var(--color-danger);
+		font-size: var(--text-sm);
+		color: var(--color-text-primary);
 	}
 
 	/*
@@ -2545,31 +2567,33 @@
 	 * セレクタは本文の中に生えるものに当てるので :global が要る。
 	 */
 	.markdown-body :global(mark[data-vellis-find]) {
-		background-color: #fef08a;
+		background-color: var(--color-find-match);
 		color: inherit;
 	}
 
 	/*
-	 * 要件#54 追補d: 現在の一致は文字色を #1f2328 に固定する。橙の背景の上で
-	 * Shiki の橙のトークンが読めない(比 1.54)ため。mark の中の Shiki の span は
-	 * インラインの `style="color:…"` を持つので、子孫の規則は `!important` で勝たせる。
+	 * 要件#54 追補d: 現在の一致は文字色を固定する。橙の背景の上で Shiki の橙の
+	 * トークンが読めない(比 1.54)ため。色は要件#56 判断 (k) の 3 トークン(ライトは
+	 * 追補d の #fef08a / #fb923c / #1f2328 のまま・ダークは対比 4.5 以上の値)。
+	 * mark の中の Shiki の span はインラインの `style="color:…"` を持つので、子孫の
+	 * 規則は `!important` で勝たせる。
 	 */
 	.markdown-body :global(mark[data-vellis-find-current]) {
-		background-color: #fb923c;
-		color: #1f2328;
+		background-color: var(--color-find-current);
+		color: var(--color-find-current-text);
 	}
 
 	.markdown-body :global(mark[data-vellis-find-current] *) {
-		color: #1f2328 !important;
+		color: var(--color-find-current-text) !important;
 	}
 
 	:global(::highlight(vellis-find)) {
-		background-color: #fef08a;
+		background-color: var(--color-find-match);
 	}
 
 	:global(::highlight(vellis-find-current)) {
-		background-color: #fb923c;
-		color: #1f2328;
+		background-color: var(--color-find-current);
+		color: var(--color-find-current-text);
 	}
 
 	/*
@@ -2580,7 +2604,7 @@
 	 */
 	.vellis-plaintext[contenteditable='true'] {
 		outline: none;
-		box-shadow: inset 3px 0 0 #93c5fd;
+		box-shadow: inset 3px 0 0 var(--color-focus-ring);
 	}
 
 	/*
@@ -2589,7 +2613,7 @@
 	 * 中に生えた要素に当てるので :global が要る。
 	 */
 	.markdown-body :global([contenteditable='true']) {
-		outline: 2px solid #93c5fd;
+		outline: 2px solid var(--color-focus-ring);
 		outline-offset: 2px;
 		border-radius: 2px;
 	}

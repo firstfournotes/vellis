@@ -222,6 +222,27 @@ pub const MENU_RECENT_FILES_EVENT: &str = "menu_recent_files";
 /// test and the menu read the same literal.
 pub const RECENT_FILES_ACCELERATOR: &str = "CmdOrCtrl+Shift+R";
 
+/// Stable identifier for the Go menu's "Dashboard" item (requirements.md #83
+/// 契約3).
+pub const DASHBOARD_ITEM_ID: &str = "dashboard";
+
+/// Event emitted to the focused window when "Dashboard" is clicked
+/// (requirements.md #83 契約3).
+///
+/// Same division of labour as Go to Path… and Recent Files: the menu only
+/// reports the gesture. Whether the window swaps its root view for the
+/// Dashboard, goes back to the root behind it, or does nothing (a Dashboard with
+/// nowhere to go back to) is the window's to decide (`src/lib/dashboard.ts`).
+/// Name must stay in sync with `MENU_DASHBOARD_EVENT` there. No payload.
+pub const MENU_DASHBOARD_EVENT: &str = "menu_dashboard";
+
+/// Accelerator for the Dashboard item (requirements.md #83 契約3・(a)): Shift +
+/// Command + H — unused (Hide is Command + H, Hide Others Option + Command + H)
+/// and the key Finder gives Go ▸ Home. A constant for the same reason as
+/// `GO_TO_ACCELERATOR`: tauri drops an unparseable accelerator silently, so the
+/// test and the menu read the same literal.
+pub const DASHBOARD_ACCELERATOR: &str = "CmdOrCtrl+Shift+H";
+
 /// Events emitted to the focused window when the Open items are clicked.
 ///
 /// The dialog, the root derivation and the command sequence all live in the
@@ -283,6 +304,68 @@ pub const MENU_ZOOM_RESET_EVENT: &str = "menu_zoom_reset";
 pub const ZOOM_IN_ACCELERATOR: &str = "CmdOrCtrl+=";
 pub const ZOOM_OUT_ACCELERATOR: &str = "CmdOrCtrl+-";
 pub const ACTUAL_SIZE_ACCELERATOR: &str = "CmdOrCtrl+0";
+
+/// Stable identifier for View ▸ Reload File (requirements.md #80 契約 1・2).
+pub const RELOAD_FILE_ITEM_ID: &str = "reload-file";
+
+/// Event emitted to the focused window when View ▸ Reload File is clicked
+/// (requirements.md #80 契約 2).
+///
+/// Same division of labour as the zoom and Open items: the menu only reports
+/// the gesture. Which document the window shows, whether it has unsaved edits
+/// to settle first, which command opened it and how its tree is reloaded all
+/// live in the frontend (`src/lib/reload-file.ts`). Name must stay in sync
+/// with `MENU_RELOAD_FILE_EVENT` there. A window with no document ignores it.
+pub const MENU_RELOAD_FILE_EVENT: &str = "menu_reload_file";
+
+/// Accelerator for View ▸ Reload File (requirements.md #80 契約 2): Command +
+/// R, as Safari's Reload Page. A constant for the same reason as the zoom
+/// ones: tauri drops an unparseable accelerator silently, so the test and the
+/// menu read the same literal. Command + Shift + R stays Recent Files.
+pub const RELOAD_FILE_ACCELERATOR: &str = "CmdOrCtrl+R";
+
+/// Stable identifiers for View ▸ Appearance ▸ Light / Dark / System
+/// (requirements.md #56 契約 3・判断 (a)). Plain items with no check mark, like
+/// Show Tab Bar: which mode a window shows is the window's to know.
+pub const APPEARANCE_LIGHT_ITEM_ID: &str = "appearance-light";
+pub const APPEARANCE_DARK_ITEM_ID: &str = "appearance-dark";
+pub const APPEARANCE_SYSTEM_ITEM_ID: &str = "appearance-system";
+
+/// Events emitted to the focused window for Light / Dark / System
+/// (requirements.md #56 契約 3).
+///
+/// Same shape as the zoom events: the mode is a preference of the window's
+/// look, kept in its localStorage and put on `<html data-theme>`
+/// (`src/lib/ui-chrome.ts`), so the menu only reports the choice. Names must
+/// stay in sync with the same-named constants there.
+pub const MENU_APPEARANCE_LIGHT_EVENT: &str = "menu_appearance_light";
+pub const MENU_APPEARANCE_DARK_EVENT: &str = "menu_appearance_dark";
+pub const MENU_APPEARANCE_SYSTEM_EVENT: &str = "menu_appearance_system";
+
+/// Identifier of the Appearance submenu, so its theme list can be rebuilt
+/// when `themes/` changes ([`rebuild_theme_items`]).
+pub const APPEARANCE_MENU_ID: &str = "appearance-menu";
+
+/// Prefix of the theme items of View ▸ Appearance (requirements.md #56 契約 3・
+/// 由谷決定 8): `appearance-theme:<name>`, built from the file stems of
+/// `~/.config/vellis/themes/`. The built-in Default is
+/// [`APPEARANCE_DEFAULT_THEME_ITEM_ID`].
+pub const APPEARANCE_THEME_ITEM_PREFIX: &str = "appearance-theme:";
+pub const APPEARANCE_DEFAULT_THEME_ITEM_ID: &str = "appearance-theme:default";
+
+/// Stable identifier for View ▸ Appearance ▸ Export Default Theme…
+/// (requirements.md #56 AC-56-23・theme-architecture (e)): the last item of
+/// Appearance, behind a separator. No check mark, no shortcut.
+pub const EXPORT_DEFAULT_THEME_ITEM_ID: &str = "export-default-theme";
+
+/// Stable identifier for View ▸ Toggle Full Width (requirements.md #56 契約 4・
+/// 判断 (g)): no check mark, no shortcut.
+pub const TOGGLE_FULL_WIDTH_ITEM_ID: &str = "toggle-full-width";
+
+/// Event emitted to the focused window for Toggle Full Width (requirements.md
+/// #56 契約 4). The window flips `<html data-doc-measure="full">` and keeps the
+/// choice in localStorage (`src/lib/ui-chrome.ts`, same-named constant).
+pub const MENU_TOGGLE_FULL_WIDTH_EVENT: &str = "menu_toggle_full_width";
 
 /// Stable identifier for the Window submenu, so it can be found again after
 /// the menu is installed (see [`attach_windows_menu_to_nsapp`]).
@@ -572,6 +655,91 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         Some(SHOW_ALL_TABS_ACCELERATOR),
     )?;
     let view_tab_sep = PredefinedMenuItem::separator(app)?;
+    // Reload File sits right under the tab items, behind its own separator
+    // (requirements.md #80 契約 2), where Safari's View menu keeps Reload Page.
+    // Always enabled: a window with no document simply ignores the event.
+    let reload_file_item = MenuItem::with_id(
+        app,
+        RELOAD_FILE_ITEM_ID,
+        "Reload File",
+        true,
+        Some(RELOAD_FILE_ACCELERATOR),
+    )?;
+    let view_reload_sep = PredefinedMenuItem::separator(app)?;
+    // Appearance and Toggle Full Width sit under the tab items, above the zoom
+    // ones, so the items about the look stay together (requirements.md #56
+    // 契約 3・4, 2026-11-02 由谷決定). Appearance holds the mode (Light / Dark /
+    // System) and, behind a separator, the theme: the built-in Default and the
+    // files of ~/.config/vellis/themes/ (由谷決定 8). None of them carries a check
+    // mark; choosing a theme rewrites `appearance.theme` in settings.json.
+    let appearance_light_item = MenuItem::with_id(
+        app,
+        APPEARANCE_LIGHT_ITEM_ID,
+        "Light",
+        true,
+        None::<&str>,
+    )?;
+    let appearance_dark_item = MenuItem::with_id(
+        app,
+        APPEARANCE_DARK_ITEM_ID,
+        "Dark",
+        true,
+        None::<&str>,
+    )?;
+    let appearance_system_item = MenuItem::with_id(
+        app,
+        APPEARANCE_SYSTEM_ITEM_ID,
+        "System",
+        true,
+        None::<&str>,
+    )?;
+    let appearance_theme_sep = PredefinedMenuItem::separator(app)?;
+    let appearance_default_item = MenuItem::with_id(
+        app,
+        APPEARANCE_DEFAULT_THEME_ITEM_ID,
+        "Default",
+        true,
+        None::<&str>,
+    )?;
+    // Export Default Theme… closes the submenu behind its own separator
+    // (requirements.md #56 AC-56-23): it writes the Default theme into
+    // themes/ and opens it, all in Rust like Settings….
+    let appearance_export_sep = PredefinedMenuItem::separator(app)?;
+    let export_default_theme_item = MenuItem::with_id(
+        app,
+        EXPORT_DEFAULT_THEME_ITEM_ID,
+        "Export Default Theme…",
+        true,
+        None::<&str>,
+    )?;
+    let appearance_menu = Submenu::with_id_and_items(
+        app,
+        APPEARANCE_MENU_ID,
+        "Appearance",
+        true,
+        &[
+            &appearance_light_item,
+            &appearance_dark_item,
+            &appearance_system_item,
+            &appearance_theme_sep,
+            &appearance_default_item,
+            &appearance_export_sep,
+            &export_default_theme_item,
+        ],
+    )?;
+    // The files of themes/ go right under Default, before the separator of
+    // Export (the same items `rebuild_theme_items` makes when themes/ changes).
+    for (offset, name) in crate::theme::installed_themes().names.iter().enumerate() {
+        appearance_menu.insert(&theme_item(app, name)?, THEME_LIST_START + offset)?;
+    }
+    let toggle_full_width_item = MenuItem::with_id(
+        app,
+        TOGGLE_FULL_WIDTH_ITEM_ID,
+        "Toggle Full Width",
+        true,
+        None::<&str>,
+    )?;
+    let view_chrome_sep = PredefinedMenuItem::separator(app)?;
     let zoom_in_item = MenuItem::with_id(
         app,
         ZOOM_IN_ITEM_ID,
@@ -609,6 +777,11 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &show_tab_bar_item,
             &show_all_tabs_item,
             &view_tab_sep,
+            &reload_file_item,
+            &view_reload_sep,
+            &appearance_menu,
+            &toggle_full_width_item,
+            &view_chrome_sep,
             &zoom_in_item,
             &zoom_out_item,
             &actual_size_item,
@@ -635,7 +808,18 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         Some(RECENT_FILES_ACCELERATOR),
     )?;
-    let go_menu = Submenu::with_items(app, "Go", true, &[&go_to_item, &recent_files_item])?;
+    // Dashboard (requirements.md #83 契約3・(v)) comes last, behind a separator
+    // of its own: it swaps the whole window view rather than moving inside the
+    // root. No ellipsis — it is not a dialog. Always enabled, like the two above.
+    let go_dashboard_sep = PredefinedMenuItem::separator(app)?;
+    let dashboard_item =
+        MenuItem::with_id(app, DASHBOARD_ITEM_ID, "Dashboard", true, Some(DASHBOARD_ACCELERATOR))?;
+    let go_menu = Submenu::with_items(
+        app,
+        "Go",
+        true,
+        &[&go_to_item, &recent_files_item, &go_dashboard_sep, &dashboard_item],
+    )?;
 
     Menu::with_items(
         app,
@@ -648,6 +832,144 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &window_menu,
         ],
     )
+}
+
+/// Position of the first theme of `themes/` in View ▸ Appearance: after Light,
+/// Dark, System, the separator and Default.
+const THEME_LIST_START: usize = 5;
+
+/// The View ▸ Appearance item of the user's theme `name` (a file stem of
+/// `themes/`, labelled as it is).
+fn theme_item<R: Runtime>(app: &AppHandle<R>, name: &str) -> tauri::Result<MenuItem<R>> {
+    MenuItem::with_id(
+        app,
+        format!("{APPEARANCE_THEME_ITEM_PREFIX}{name}"),
+        name,
+        true,
+        None::<&str>,
+    )
+}
+
+/// Replace the theme list of View ▸ Appearance with `names` — called when the
+/// files of `themes/` changed (requirements.md #56 契約 3). The items before
+/// it (the modes, the separator, Default) stay. The separator and Export
+/// Default Theme… after it are taken off and appended again behind the new
+/// list, so Export stays the last item. Failures are logged: a stale list
+/// still works, and a theme can be chosen in settings.json too.
+pub fn rebuild_theme_items<R: Runtime>(app: &AppHandle<R>, names: &[String]) {
+    let appearance = app.menu().and_then(|menu| {
+        menu.items().unwrap_or_default().into_iter().find_map(|kind| {
+            kind.as_submenu()
+                .and_then(|submenu| submenu.get(APPEARANCE_MENU_ID))
+                .and_then(|found| found.as_submenu().cloned())
+        })
+    });
+    let Some(appearance) = appearance else {
+        tracing::warn!("Appearance submenu '{}' not found in the app menu", APPEARANCE_MENU_ID);
+        return;
+    };
+    let items = appearance.items().unwrap_or_default();
+    // Export Default Theme… and the separator right above it.
+    let tail: Vec<_> = match items
+        .iter()
+        .position(|item| item.id().as_ref() == EXPORT_DEFAULT_THEME_ITEM_ID)
+    {
+        Some(at) if at > 0 && items[at - 1].as_predefined_menuitem().is_some() => {
+            items[at - 1..=at].to_vec()
+        }
+        Some(at) => vec![items[at].clone()],
+        None => Vec::new(),
+    };
+    for item in &items {
+        let id = item.id().as_ref();
+        let theme = id.starts_with(APPEARANCE_THEME_ITEM_PREFIX) && id != APPEARANCE_DEFAULT_THEME_ITEM_ID;
+        if theme || tail.iter().any(|kept| kept.id() == item.id()) {
+            if let Err(e) = appearance.remove(item) {
+                tracing::warn!("failed to remove the Appearance item '{}': {}", id, e);
+            }
+        }
+    }
+    for name in names {
+        if let Err(e) = theme_item(app, name).and_then(|item| appearance.append(&item)) {
+            tracing::warn!("failed to add the theme item '{}': {}", name, e);
+        }
+    }
+    for item in &tail {
+        if let Err(e) = appearance.append(item) {
+            tracing::warn!("failed to put back the Appearance item '{}': {}", item.id().as_ref(), e);
+        }
+    }
+}
+
+/// Handle a theme of View ▸ Appearance (requirements.md #56 契約 3・由谷決定 8):
+/// write `name` as `appearance.theme` into settings.json — that key only, the
+/// others keep their order; a missing file is created like Settings… does. A
+/// broken file is left as it is, with one dialog.
+///
+/// Nothing is sent to the windows from here: the theme watcher (`theme.rs`)
+/// sees the write and broadcasts the resolved theme, so there is one route.
+/// It is only asked to look now, in case the settings folder is new.
+pub fn handle_appearance_theme_click(app: &AppHandle<Wry>, name: &str) {
+    let Some(path) = crate::settings::default_settings_path() else {
+        tracing::warn!("Appearance: no home directory to keep the settings file in");
+        return;
+    };
+    if let Err(message) = crate::theme::set_appearance_theme(&path, name) {
+        tracing::warn!("Appearance: {}", message);
+        app.dialog()
+            .message(message)
+            .title("Vellis Theme")
+            .kind(MessageDialogKind::Warning)
+            .show(|_| {});
+        return;
+    }
+    crate::theme::poke_watcher(app);
+}
+
+/// Handle View ▸ Appearance ▸ Export Default Theme… (requirements.md #56
+/// AC-56-23・theme-architecture (e)). Everything stays in Rust, like Settings…:
+/// the whole Default theme is written into `~/.config/vellis/themes/` as
+/// `my-theme.json` (or the next free `my-theme-<n>.json` — an existing file is
+/// never overwritten), then a new window opens with that folder as its root
+/// and the written file as its document.
+///
+/// Nothing is sent to the windows: the theme watcher sees the new file and
+/// rebuilds the Appearance list (it is only asked to look now, in case the
+/// folder is new). A failure to write is shown in one dialog.
+pub fn handle_export_default_theme_click(app: &AppHandle<Wry>) {
+    let Some(folder) = crate::theme::themes_dir() else {
+        tracing::warn!("Export Default Theme…: no home directory to keep the themes in");
+        return;
+    };
+    let written = match crate::theme::export_default_theme(&folder, env!("CARGO_PKG_VERSION")) {
+        Ok(path) => path,
+        Err(message) => {
+            tracing::warn!("Export Default Theme…: {}", message);
+            app.dialog()
+                .message(message)
+                .title("Vellis Theme")
+                .kind(MessageDialogKind::Warning)
+                .show(|_| {});
+            return;
+        }
+    };
+    crate::theme::poke_watcher(app);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let document = format!("file://{}", written.display());
+        let root = format!("file://{}", folder.display());
+        if let Err(e) = crate::commands::window::create_window(
+            &app,
+            Some(document),
+            Some(root),
+            Vec::new(),
+            crate::window::tab::WindowKind::Standalone,
+        )
+        .await
+        {
+            tracing::warn!("Export Default Theme…: failed to open the theme window: {}", e);
+        }
+    });
 }
 
 /// Hand the Window submenu to NSApp as *the* Window menu (requirements.md

@@ -767,15 +767,21 @@ fn default_search_exclude_mirrors_excluded_dir_names() {
     assert_eq!(active.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(), expected);
 }
 
-/// 11. 既定値の JSON はキーが files.exclude / search.exclude の 2 つだけで、読み戻すと既定値・警告 0 件。
+/// 11. 既定値の JSON はキーが appearance.theme / files.exclude / search.exclude の 3 つだけで、読み戻すと既定値・警告 0 件。
+///
+///     要件側更新(2026-11-02・要件#56 契約 3・棚卸し 7=req-56.md で事前承認・req-65.md の状態節の対応表):
+///     `appearance.theme`(文字列・既定 "default")が `Settings` と既定の JSON に加わった。鍵の集合に 1 つ足す。
+///     「既定値の JSON を読み戻すと既定値」の形はそのまま。
 #[test]
 fn default_settings_json_round_trips_to_the_defaults_without_warnings() {
     let json = default_settings_json();
     let value: serde_json::Value = serde_json::from_str(&json).expect("default JSON must parse");
     let object = value.as_object().expect("default JSON is an object");
     let keys: BTreeSet<&str> = object.keys().map(String::as_str).collect();
-    let expected_keys: BTreeSet<&str> = [FILES_EXCLUDE_KEY, SEARCH_EXCLUDE_KEY].into_iter().collect();
-    assert_eq!(keys, expected_keys, "the default JSON carries exactly the two keys");
+    let expected_keys: BTreeSet<&str> =
+        ["appearance.theme", FILES_EXCLUDE_KEY, SEARCH_EXCLUDE_KEY].into_iter().collect();
+    assert_eq!(keys, expected_keys, "the default JSON carries exactly the three keys");
+    assert_eq!(object["appearance.theme"], serde_json::Value::from("default"));
     assert_eq!(FILES_EXCLUDE_KEY, "files.exclude");
     assert_eq!(SEARCH_EXCLUDE_KEY, "search.exclude");
     for key in [FILES_EXCLUDE_KEY, SEARCH_EXCLUDE_KEY] {
@@ -1030,7 +1036,9 @@ fn tree_always_hides_vellis_tmp_files_whatever_the_settings() {
     assert!(!is_builtin_excluded("a.md"));
     assert!(!is_builtin_excluded("vellis-tmp.md"));
 
-    let none = Settings { files_exclude: ExcludeMap::new(), search_exclude: ExcludeMap::new() };
+    // 要件#56(2026-11-02・棚卸し 7 の拡大=由谷承認)で `Settings` に `appearance_theme` が加わったため、
+    // 残りの項目は既定値で埋める(判定の中身は変えない)。
+    let none = Settings { files_exclude: ExcludeMap::new(), search_exclude: ExcludeMap::new(), ..Settings::default() };
     for s in [Settings::default(), settings_from(r#"{"files.exclude": {}}"#), none] {
         assert!(is_hidden_from_tree(".a.md.vellis-tmp", &s));
         assert!(is_hidden_from_tree("docs/.a.md.vellis-tmp", &s));
@@ -1288,7 +1296,9 @@ async fn files_exclude_pattern_cuts_a_directory_before_it_is_listed() {
 /// 37. `.vellis-tmp` で終わる名前はどの設定でも読まれない(両方の辞書が空でも)。
 #[tokio::test]
 async fn vellis_tmp_files_are_never_read_whatever_the_settings() {
-    let none = Settings { files_exclude: ExcludeMap::new(), search_exclude: ExcludeMap::new() };
+    // 要件#56(2026-11-02・棚卸し 7 の拡大=由谷承認)で `Settings` に `appearance_theme` が加わったため、
+    // 残りの項目は既定値で埋める(判定の中身は変えない)。
+    let none = Settings { files_exclude: ExcludeMap::new(), search_exclude: ExcludeMap::new(), ..Settings::default() };
     for settings in [Settings::default(), settings_from(r#"{"files.exclude": {}, "search.exclude": {}}"#), none] {
         let mut fs = MockFs::new(FILE_ROOT);
         fs.file(".x.md.vellis-tmp", "alpha tmp\n");

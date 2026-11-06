@@ -116,6 +116,26 @@ impl HistoryStore {
         self.write(&entries)
     }
 
+    /// Drop the entry naming `uri` and persist (requirements.md #83 契約10 —
+    /// the Dashboard's Remove from Recent Folders).
+    ///
+    /// Compared through [`normalize_uri`] like [`Self::add`], so any spelling of
+    /// the folder removes it; the rest keep their order. Returns the history as
+    /// it stands afterwards. A URI that is not in the history writes nothing
+    /// (the file is left exactly as it was).
+    pub fn remove(&self, uri: &str) -> Result<Vec<String>, HistoryError> {
+        let _guard = lock_writes();
+        let target = normalize_uri(uri);
+        let entries = self.list()?;
+        let kept: Vec<String> =
+            entries.iter().filter(|e| normalize_uri(e) != target).cloned().collect();
+        if kept.len() == entries.len() {
+            return Ok(entries);
+        }
+        self.write(&kept)?;
+        Ok(kept)
+    }
+
     /// Atomic write (tmp → rename), creating the parent directory on demand.
     fn write(&self, entries: &[String]) -> Result<(), HistoryError> {
         if let Some(parent) = self.file.parent() {
@@ -159,7 +179,7 @@ fn lock_writes() -> MutexGuard<'static, ()> {
 /// `://` is not a URI this can take apart safely — the scheme/authority
 /// boundary is what keeps the collapsing rules honest — so it is returned
 /// unchanged.
-fn normalize_uri(uri: &str) -> String {
+pub fn normalize_uri(uri: &str) -> String {
     const SEP: &str = "://";
     let Some(sep_at) = uri.find(SEP) else {
         return uri.to_string();

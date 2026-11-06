@@ -102,6 +102,12 @@ const PEAK_SEARCH_CSS = 24;
  * position) is tens of px; 0.25 px only rules out the reference pointing somewhere else.
  */
 const ZOOM_WINDOW_AGREE_PX = 0.25;
+/** ms a seek (`currentTime` write, bar release, band click) may stay `seeking` before the spec gives up. */
+const SEEK_SETTLE_MS = 10_000;
+/** ms to wait for the page to be visible before a material is opened (the app's window is covered → environment). */
+const VISIBLE_WAIT_MS = 120_000;
+/** Times a material is started over on a new element after the page was hidden under it (Issue #782 / #788). */
+const HIDDEN_RETRIES = 2;
 
 const uri = (p: string) => `file://${p}`;
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -172,10 +178,13 @@ interface ViewerState {
 	indicator: Box | null;
 	frameReadout: boolean | null;
 	activeRow: string | null;
+	/** `document.visibilityState` and the recorder's hidden count at the time of the read (null = recorder not installed). */
+	visibility: VisibilitySnapshot | null;
 }
 
 async function readState(kind: Kind): Promise<ViewerState> {
 	return browser.execute((s) => {
+		const vis = (window as unknown as VisibilityWindow).__req41Visibility;
 		const box = (el: Element): Box => {
 			const r = el.getBoundingClientRect();
 			return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
@@ -203,8 +212,161 @@ async function readState(kind: Kind): Promise<ViewerState> {
 			indicator: ind ? box(ind) : null,
 			frameReadout: s.frameReadout ? !!document.querySelector(s.frameReadout) : null,
 			activeRow: document.querySelector<HTMLElement>('.explorer-item.active')?.title ?? null,
+			visibility: vis ? { state: document.visibilityState, hiddenCount: vis.hiddenCount } : null,
 		};
 	}, SEL[kind]);
+}
+
+// --- page visibility (Issue #782 / #788) ---------------------------------------
+//
+// WebKit drops the decoder of a paused `<video>` that was created while the page was
+// visible as soon as the page becomes hidden (the app's window covered by another
+// app), and does not bring it back when the page is visible again: the next precise
+// seek stays `seeking: true` for ever and later seeks only queue behind it. Waiting
+// longer, waiting for `seeked`, or re-issuing the seek does not help, and a seek to
+// the *same* time is "ignored" by WebKit (`seeking` goes false with the old frame and
+// value — a false settle, so the spec never does that). Only a new element (another
+// row, then back; `{#key src}` keeps the element for the same src) recovers. An
+// element created while hidden is not affected.
+//
+// So: `before()` installs a recorder that counts `visibilitychange` → hidden; a
+// material is opened only while visible, on a fresh element, and the hidden count at
+// that open is kept; every seek checks the count before writing and while settling
+// and raises `PageHiddenError` (no waiting) when the page was hidden under the open
+// element; the per-material `it` starts the material over on a new element for that
+// error only (HIDDEN_RETRIES), after dropping the material's records. Any other
+// failure propagates untouched.
+
+interface VisibilitySnapshot {
+	state: string;
+	/** Number of `visibilitychange` → hidden transitions since the recorder was installed. */
+	hiddenCount: number;
+}
+
+interface VisibilityRecord extends VisibilitySnapshot {
+	installedAt: number;
+	/** The transitions, newest last (capped at 50). `at` = `Date.now()` in the page. */
+	events: { state: string; at: number }[];
+}
+
+type VisibilityWindow = Window & { __req41Visibility?: VisibilityRecord };
+
+async function installVisibilityRecorder(): Promise<void> {
+	await browser.execute(() => {
+		const w = window as unknown as VisibilityWindow;
+		if (w.__req41Visibility) return;
+		const rec: VisibilityRecord = {
+			state: document.visibilityState,
+			hiddenCount: 0,
+			installedAt: Date.now(),
+			events: [{ state: document.visibilityState, at: Date.now() }],
+		};
+		document.addEventListener('visibilitychange', () => {
+			rec.state = document.visibilityState;
+			if (document.visibilityState === 'hidden') rec.hiddenCount++;
+			rec.events.push({ state: document.visibilityState, at: Date.now() });
+			if (rec.events.length > 50) rec.events.splice(0, rec.events.length - 50);
+		});
+		w.__req41Visibility = rec;
+	});
+}
+
+async function readVisibility(): Promise<VisibilityRecord> {
+	const rec = await browser.execute(() => {
+		const r = (window as unknown as VisibilityWindow).__req41Visibility;
+		return r ? { ...r, state: document.visibilityState } : null;
+	});
+	if (!rec) throw new Error('the visibility recorder is not installed (before() did not run?)');
+	return rec;
+}
+
+/** The page was hidden while the material's current element was open — the measurement cannot be trusted. */
+class PageHiddenError extends Error {
+	constructor(
+		readonly where: string,
+		readonly material: string,
+		readonly hiddenAtOpen: number,
+		readonly visibility: VisibilitySnapshot,
+	) {
+		super(
+			`${where}: the page was hidden since ${material} was opened (hidden count ${hiddenAtOpen} → ${visibility.hiddenCount}, now ${visibility.state}); ` +
+				'WebKit does not bring the decoder back (Issue #788) — the material is started over on a new element',
+		);
+		this.name = 'PageHiddenError';
+	}
+}
+
+/** The open the running measurements belong to: the material and the hidden count when its element was created. */
+let openedElement: { material: string; hiddenCount: number } | null = null;
+
+function assertNotHiddenSinceOpen(where: string, vis: VisibilitySnapshot | null): void {
+	if (!vis) throw new Error(`${where}: the visibility recorder is not installed (before() did not run?)`);
+	if (!openedElement) throw new Error(`${where}: no material is open`);
+	if (vis.hiddenCount > openedElement.hiddenCount || vis.state !== 'visible') {
+		throw new PageHiddenError(where, openedElement.material, openedElement.hiddenCount, vis);
+	}
+}
+
+/**
+ * Poll `probe` every `interval` ms until it returns a non-null `done`, failing the step when the page was hidden
+ * under the open element (PageHiddenError, at once) or after `timeout` ms (a plain error carrying the probe's
+ * last detail and the visibility record). Written out instead of `browser.waitUntil` because waitUntil keeps an
+ * error thrown by the condition until its own timeout and then rewraps it, which would both delay and hide the
+ * PageHiddenError.
+ */
+async function pollUntil<T>(
+	where: string,
+	probe: () => Promise<{ done: T | null; visibility: VisibilitySnapshot | null; detail: string }>,
+	timeout: number,
+	interval = 100,
+): Promise<T> {
+	const deadline = Date.now() + timeout;
+	for (;;) {
+		const p = await probe();
+		assertNotHiddenSinceOpen(where, p.visibility);
+		if (p.done !== null) return p.done;
+		if (Date.now() >= deadline) {
+			throw new Error(`${where}: not settled within ${timeout} ms (${p.detail}); visibility: ${JSON.stringify(await readVisibility())}`);
+		}
+		await browser.pause(interval);
+	}
+}
+
+/** Wait for the page to be visible before a material is opened; a page that stays hidden is the environment, not the product. */
+async function waitForVisible(material: string): Promise<void> {
+	const deadline = Date.now() + VISIBLE_WAIT_MS;
+	for (;;) {
+		const vis = await readVisibility();
+		if (vis.state === 'visible') return;
+		if (Date.now() >= deadline) {
+			report(REPORT, { gate: '41g-env-hidden', material, phase: 'before open', retry: false, visibility: vis });
+			throw new Error(
+				`${material}: the app's window is not visible (document.visibilityState = ${vis.state} for ${VISIBLE_WAIT_MS} ms) — ` +
+					`environment, not the product; the window must stay visible for this gate (Issue #788). visibility: ${JSON.stringify(vis)}`,
+			);
+		}
+		await browser.pause(500);
+	}
+}
+
+/**
+ * Wait until the paused media is not seeking and its time holds over two reads, so `currentTime` is the landed
+ * position rather than the requested one (`currentTime` returns the request while `seeking`). A seek that WebKit
+ * never completes therefore fails here instead of passing with the requested value.
+ */
+async function waitSeekDone(kind: Kind, where: string): Promise<ViewerState> {
+	let previous = Number.NaN;
+	return pollUntil<ViewerState>(
+		where,
+		async () => {
+			const s = await readState(kind);
+			const media = s.media!;
+			const done = !media.seeking && media.currentTime === previous ? s : null;
+			previous = media.currentTime;
+			return { done, visibility: s.visibility, detail: JSON.stringify({ media: s.media, value: s.seek?.value }) };
+		},
+		SEEK_SETTLE_MS,
+	);
 }
 
 /** Per-column count of drawn (alpha > 0) device pixels of the waveform canvas. */
@@ -244,15 +406,42 @@ async function peakX(kind: Kind, aroundX: number): Promise<{ x: number | null; w
 	return { x: weight > 0 ? left + sum / weight / ratio : null, weight, baseline };
 }
 
+/**
+ * Open the material on a fresh media element while the page is visible, and remember the hidden count at that
+ * open (`openedElement`). When the material's row is already the active one (a start-over after PageHiddenError), another
+ * material is opened first, because the same src keeps the same element (`{#key src}`) and with it the dropped
+ * decoder. The readiness waits raise PageHiddenError too: the app's own initial seek (frame index arrival) stalls
+ * the same way when the page is hidden right after the open.
+ */
 async function openMaterial(m: Material): Promise<ViewerState> {
 	const target = uri(path.join(gateDir, m.name));
+	await waitForVisible(m.name);
+	const active = await browser.execute(() => document.querySelector<HTMLElement>('.explorer-item.active')?.title ?? null);
+	if (active === target) {
+		const detour = materials[(materials.findIndex((o) => o.name === m.name) + 1) % materials.length]!;
+		const detourTarget = uri(path.join(gateDir, detour.name));
+		await clickExplorerRow(detourTarget);
+		let last = '';
+		await browser.waitUntil(
+			async () => {
+				const s = await readState(m.kind);
+				last = JSON.stringify({ activeRow: s.activeRow, src: s.src });
+				return s.activeRow === detourTarget && !s.src.includes(m.name);
+			},
+			{ timeout: 30_000, timeoutMsg: `${m.name}: opening ${detour.name} first did not replace the element (${last})` },
+		);
+		report(REPORT, { gate: '41g-reopen', material: m.name, via: detour.name });
+	}
+	// The baseline is taken before the click: the element is created after it, so any hidden from here on may
+	// have hit the element (a hidden in this gap that did not is retried needlessly — bounded by HIDDEN_RETRIES).
+	const baseline = await readVisibility();
+	openedElement = { material: m.name, hiddenCount: baseline.hiddenCount };
 	await clickExplorerRow(target);
-	let last: ViewerState | null = null;
-	await browser.waitUntil(
+	await pollUntil<ViewerState>(
+		`${m.name}: becoming ready`,
 		async () => {
 			const s = await readState(m.kind);
-			last = s;
-			return (
+			const ready =
 				s.ready &&
 				s.activeRow === target &&
 				s.src.includes(m.name) &&
@@ -260,17 +449,19 @@ async function openMaterial(m: Material): Promise<ViewerState> {
 				!s.seek!.disabled &&
 				s.note === null &&
 				s.headX !== null &&
-				(!m.indexed || s.frameReadout === true)
-			);
+				(!m.indexed || s.frameReadout === true);
+			return { done: ready ? s : null, visibility: s.visibility, detail: JSON.stringify(s) };
 		},
-		{ timeout: 30_000, timeoutMsg: `${m.name} never became ready (${JSON.stringify(last)})` },
+		30_000,
 	);
-	await browser.waitUntil(
+	await pollUntil<true>(
+		`${m.name}: the waveform canvas`,
 		async () => {
 			const { columns } = await canvasColumns(m.kind);
-			return columns.some((c) => c > 0);
+			const s = await readState(m.kind);
+			return { done: columns.some((c) => c > 0) ? true : null, visibility: s.visibility, detail: 'the canvas stayed blank' };
 		},
-		{ timeout: 15_000, timeoutMsg: `${m.name}: the waveform canvas stayed blank` },
+		15_000,
 	);
 	await browser.pause(300);
 	return readState(m.kind);
@@ -284,8 +475,13 @@ async function openMaterial(m: Material): Promise<ViewerState> {
  * element may clamp the request. The thumb and the playhead both follow the
  * bar's value, which is what the comparisons use; a landing away from `t` is
  * recorded (`41g-seek-landing`).
+ *
+ * Before the write, and on every read while settling, the page must not have been
+ * hidden since the open (PageHiddenError, see the visibility section): a seek on such
+ * an element never settles, so no time is spent waiting for it.
  */
 async function seekTo(kind: Kind, t: number, material = ''): Promise<ViewerState> {
+	assertNotHiddenSinceOpen(`seek to ${t}`, (await readState(kind)).visibility);
 	await browser.execute(
 		(s, time) => {
 			const media = document.querySelector<HTMLMediaElement>(s.media)!;
@@ -294,29 +490,28 @@ async function seekTo(kind: Kind, t: number, material = ''): Promise<ViewerState
 		SEL[kind],
 		t,
 	);
-	let last = '';
 	let previous = Number.NaN;
 	let settledReads = 0;
-	try {
-		await browser.waitUntil(
-			async () => {
-				const s = await readState(kind);
-				last = JSON.stringify({ media: s.media, value: s.seek?.value, headX: s.headX });
-				const media = s.media!;
-				const value = s.seek!.value;
-				// Settled = not seeking, the bar is within 0.1 s of the request (the presented frame may sit
-				// a frame or two before it, e.g. the last webm frame at 9.96 s for a 10.0135 s duration), and
-				// three reads in a row agree.
-				const nearRequest = Math.abs(value - Math.min(t, media.duration)) <= 0.1;
-				settledReads = !media.seeking && nearRequest && value === previous ? settledReads + 1 : 0;
-				previous = value;
-				return settledReads >= 2;
-			},
-			{ timeout: 10_000, interval: 100 },
-		);
-	} catch (e) {
-		throw new Error(`seek to ${t} did not settle (${last}): ${String(e)}`);
-	}
+	await pollUntil<ViewerState>(
+		`seek to ${t}`,
+		async () => {
+			const s = await readState(kind);
+			const media = s.media!;
+			const value = s.seek!.value;
+			// Settled = not seeking, the bar is within 0.1 s of the request (the presented frame may sit
+			// a frame or two before it, e.g. the last webm frame at 9.96 s for a 10.0135 s duration), and
+			// three reads in a row agree.
+			const nearRequest = Math.abs(value - Math.min(t, media.duration)) <= 0.1;
+			settledReads = !media.seeking && nearRequest && value === previous ? settledReads + 1 : 0;
+			previous = value;
+			return {
+				done: settledReads >= 2 ? s : null,
+				visibility: s.visibility,
+				detail: JSON.stringify({ media: s.media, value: s.seek?.value, headX: s.headX }),
+			};
+		},
+		SEEK_SETTLE_MS,
+	);
 	await browser.pause(150);
 	const state = await readState(kind);
 	if (Math.abs(state.seek!.value - t) > 2e-3) {
@@ -350,8 +545,12 @@ async function setBarValue(kind: Kind, value: number): Promise<number> {
  * for the commit (and put back afterwards) so the viewer's commit handler receives `value` itself: used
  * where the reference time is not on the 1 ms grid (the zoomed window's ends) and the rounding would
  * otherwise be read as a product difference.
+ *
+ * The landing is read only once the media is no longer seeking (`waitSeekDone`): while it seeks,
+ * `currentTime` returns the request, which let a stalled player pass this comparison (Issue #782).
  */
 async function scrubCommit(kind: Kind, value: number, exactStep = false): Promise<number> {
+	assertNotHiddenSinceOpen(`seek bar released at ${value}`, (await readState(kind)).visibility);
 	await browser.execute(
 		(s, v, exact) => {
 			const input = document.querySelector<HTMLInputElement>(s.seek)!;
@@ -370,7 +569,7 @@ async function scrubCommit(kind: Kind, value: number, exactStep = false): Promis
 		exactStep,
 	);
 	await browser.pause(400);
-	return (await readState(kind)).media!.currentTime;
+	return (await waitSeekDone(kind, `seek bar released at ${value}`)).media!.currentTime;
 }
 
 /**
@@ -418,8 +617,13 @@ function windowFromIndicator(
 	};
 }
 
-/** Click the band at viewport (x, y) with a real MouseEvent on whatever is there; returns where the media landed. */
+/**
+ * Click the band at viewport (x, y) with a real MouseEvent on whatever is there; returns where the media landed.
+ * As in `scrubCommit`, the landing is read only once the media is no longer seeking — the v0.5.5 CI red stalled
+ * on exactly this click and was still read as a pass.
+ */
 async function clickBandAt(kind: Kind, x: number, y: number): Promise<{ landed: number; target: string }> {
+	assertNotHiddenSinceOpen(`band click at x=${r3(x)}`, (await readState(kind)).visibility);
 	const target = await browser.execute(
 		(cx, cy) => {
 			const el = document.elementFromPoint(cx, cy);
@@ -431,7 +635,7 @@ async function clickBandAt(kind: Kind, x: number, y: number): Promise<{ landed: 
 		y,
 	);
 	await browser.pause(400);
-	return { landed: (await readState(kind)).media!.currentTime, target };
+	return { landed: (await waitSeekDone(kind, `band click at x=${r3(x)} (${target})`)).media!.currentTime, target };
 }
 
 async function pressZoom(label: 'Zoom In Waveform' | 'Zoom Out Waveform' | 'Reset Waveform Zoom'): Promise<void> {
@@ -548,6 +752,8 @@ interface Check {
 const EXCLUDED_FROM_PASS: ReadonlyArray<{ material: string; item: string; reason: string }> = [];
 
 const checks: Check[] = [];
+/** Which start of the running material this is (0 = first); > 0 is written into the material's report entries. */
+let attempt = 0;
 
 function check(material: string, item: string, value: number, limit = TOLERANCE_PX, extra: Record<string, unknown> = {}): void {
 	const ok = Math.abs(value) <= limit + 1e-9;
@@ -561,9 +767,17 @@ function check(material: string, item: string, value: number, limit = TOLERANCE_
 		value: r3(value),
 		limit,
 		ok,
+		...(attempt > 0 ? { attempt } : {}),
 		...(excluded ? { excluded: true, excludedBy: exclusion.reason } : {}),
 		...extra,
 	});
+}
+
+/** Drop everything a material recorded in this process (before it is started over), so no stale red survives. */
+function forgetMaterial(material: string): void {
+	for (let i = checks.length - 1; i >= 0; i--) if (checks[i]!.material === material) checks.splice(i, 1);
+	delete insets[material];
+	delete offsets[material];
 }
 
 function expectChecks(material: string): void {
@@ -590,11 +804,13 @@ function shape(o: { p5: number; p50: number; p95: number }): 'same-offset' | 'no
 // --- the spec ------------------------------------------------------------------
 
 describe('Requirement #41 addendum g (d): the waveform axis coincides with the seek thumb’s travel', function () {
-	this.timeout(600_000);
+	// One run of a material plus up to HIDDEN_RETRIES starts over, each possibly preceded by VISIBLE_WAIT_MS.
+	this.timeout(900_000);
 
 	before(async () => {
 		await waitForAppMounted();
 		await installGateRecorder();
+		await installVisibilityRecorder();
 		await browser.setTimeout({ script: 120_000 });
 		await browser.waitUntil(
 			async () => browser.execute(() => document.querySelectorAll('.explorer-item').length > 0),
@@ -608,6 +824,7 @@ describe('Requirement #41 addendum g (d): the waveform axis coincides with the s
 			gate: '41g-setup',
 			materials: materials.map((m) => [m.name, fs.statSync(path.join(gateDir, m.name)).size]),
 			viewport: await browser.execute(() => ({ innerWidth: window.innerWidth, innerHeight: window.innerHeight, dpr: window.devicePixelRatio })),
+			visibility: await readVisibility(),
 		});
 	});
 
@@ -621,260 +838,288 @@ describe('Requirement #41 addendum g (d): the waveform axis coincides with the s
 
 	for (const m of materials) {
 		it(`${m.name}: thumb centre = playhead = marker peak at 1×, thumb = window indicator at 4×, margin clicks land on the ends`, async () => {
-			const tag = m.name.replace('.', '-');
-			const kind = m.kind;
-			const seek = (t: number) => seekTo(kind, t, m.name);
-			const opened = await openMaterial(m);
-			const seekRect = opened.seek!.rect;
-			const D = opened.seek!.max;
-			report(REPORT, {
-				gate: '41g-open',
-				material: m.name,
-				barMax: D,
-				mediaDuration: opened.media!.duration,
-				seekRect,
-				band: opened.band,
-				canvas: opened.canvas,
-				frameReadout: opened.frameReadout,
-			});
-			// The band and the seek bar share their outer left edge and width (the contract's premise).
-			check(m.name, 'premise: band.left - seek.left', opened.band!.left - seekRect.left, 0.5);
-			check(m.name, 'premise: band.width - seek.width', opened.band!.width - seekRect.width, 0.5);
-
-			// (i) SEEK_THUMB_INSET_PX: the thumb centre's distance from the box's ends with the value at 0 and at max.
-			const widths: number[] = [];
-			await seek(0);
-			const valueAtZero = await setBarValue(kind, 0);
-			let thumb = await measureThumb(kind, `req41-${tag}-value0`, true);
-			widths.push(thumb.width);
-			const thumbAtZero = thumb.center;
-			const leftDistance = thumbAtZero - seekRect.left;
-			await zoomedShot(`req41-${tag}-value0-seekrow-x4`, { x: seekRect.left - 8, y: seekRect.top - 4, width: 120, height: seekRect.height + 8 }, 4);
-			const valueAtMax = await setBarValue(kind, D);
-			thumb = await measureThumb(kind, `req41-${tag}-valueMax`, true);
-			widths.push(thumb.width);
-			const rightDistance = seekRect.right - thumb.center;
-			/** CSS px the thumb's centre moves per second of bar value (its travel is linear in the value). */
-			const thumbRate = (thumb.center - thumbAtZero) / (valueAtMax - valueAtZero);
-			await zoomedShot(`req41-${tag}-valueMax-seekrow-x4`, { x: seekRect.right - 112, y: seekRect.top - 4, width: 120, height: seekRect.height + 8 }, 4);
-			await setBarValue(kind, 0);
-			insets[m.name] = { leftDistance, rightDistance, thumbWidth: widths };
-			report(REPORT, {
-				gate: '41g-0-i',
-				material: m.name,
-				valueAtZero,
-				valueAtMax,
-				barMax: D,
-				leftDistance: r3(leftDistance),
-				rightDistance: r3(rightDistance),
-				mean: r3((leftDistance + rightDistance) / 2),
-				meanRoundedHalfPx: Math.round(leftDistance + rightDistance) / 2,
-				thumbWidth: widths.map(r3),
-				thumbRows: [thumb.rowsUsed, thumb.rowsDropped],
-				thumbPxPerSecond: r3(thumbRate),
-				dpr: thumb.dpr,
-			});
-
-			// 等倍: thumb centre vs playhead at 0 / 0.5 / D/2 / D−0.5 / D, plus 5 / 50 / 95 % for step 0 (ii).
-			const positions: [string, number][] = [
-				['0', 0],
-				['0.5s', 0.5],
-				['5%', 0.05 * D],
-				['50%', 0.5 * D],
-				['95%', 0.95 * D],
-				['D-0.5s', D - 0.5],
-				['D', D],
-			];
-			const headDiffs: Record<string, number> = {};
-			for (const [label, t] of positions) {
-				const s = await seek(t);
-				const th = await measureThumb(kind, `req41-${tag}-at-${label}`);
-				const diff = th.center - s.headX!;
-				headDiffs[label] = diff;
-				check(m.name, `1x thumb - head @ ${label}`, diff, TOLERANCE_PX, {
-					t,
-					barValue: s.seek!.value,
-					thumb: r3(th.center),
-					head: r3(s.headX!),
-					thumbWidth: r3(th.width),
-				});
+			// Started over on a new element only for PageHiddenError (the page was hidden under the open element,
+			// Issue #788 — the environment, not the product), at most HIDDEN_RETRIES times. Every other failure
+			// is thrown as is: mocha's `this.retries` would retry a real red too, so it is not used.
+			for (attempt = 0; ; attempt++) {
+				try {
+					await measureMaterial(m);
+					return;
+				} catch (e) {
+					if (!(e instanceof PageHiddenError)) throw e;
+					const retry = attempt < HIDDEN_RETRIES;
+					report(REPORT, {
+						gate: '41g-env-hidden',
+						material: m.name,
+						attempt,
+						where: e.where,
+						hiddenAtOpen: e.hiddenAtOpen,
+						visibility: await readVisibility(),
+						retry,
+					});
+					if (!retry) throw e;
+					forgetMaterial(m.name);
+				}
 			}
-			offsets[m.name] = { p5: headDiffs['5%']!, p50: headDiffs['50%']!, p95: headDiffs['95%']! };
-			report(REPORT, { gate: '41g-0-ii', material: m.name, kind, ...Object.fromEntries(Object.entries(offsets[m.name]!).map(([k, v]) => [k, r3(v)])), shape: shape(offsets[m.name]!) });
-
-			// 等倍: thumb centre vs marker peak at 2 / 5 / 8 s (and the playhead vs the peak, for the record).
-			for (const t of MARKS) {
-				const s = await seek(t);
-				const th = await measureThumb(kind, `req41-${tag}-mark-${t}s`);
-				const peak = await peakX(kind, s.headX!);
-				report(REPORT, { gate: '41g-d-peak', material: m.name, t, head: r3(s.headX!), peak: peak.x === null ? null : r3(peak.x), weight: peak.weight, baseline: peak.baseline });
-				expect(peak.x).not.toBeNull();
-				check(m.name, `1x thumb - peak @ ${t}s`, th.center - peak.x!, TOLERANCE_PX, { thumb: r3(th.center), peak: r3(peak.x!) });
-				check(m.name, `1x head - peak @ ${t}s`, s.headX! - peak.x!, TOLERANCE_PX, { head: r3(s.headX!), peak: r3(peak.x!) });
-			}
-
-			// 余白のクリック (等倍): the band's left / right edge lands where releasing the seek bar at 0 / D lands.
-			const band = opened.band!;
-			const by = (band.top + band.bottom) / 2;
-			const seekLanding0 = await scrubCommit(kind, 0);
-			const leftClick = await clickBandAt(kind, band.left + 2, by);
-			const seekLandingMax = await scrubCommit(kind, D);
-			const rightClick = await clickBandAt(kind, band.right - 2, by);
-			report(REPORT, { gate: '41g-d-margin-1x', material: m.name, seekLanding0, leftClick, seekLandingMax, rightClick });
-			check(m.name, '1x left margin click - seek bar released at 0 (s)', leftClick.landed - seekLanding0, TOLERANCE_S, { target: leftClick.target });
-			check(m.name, '1x right margin click - seek bar released at D (s)', rightClick.landed - seekLandingMax, TOLERANCE_S, { target: rightClick.target });
-
-			// 拡大 ×4 (window sent to the middle: zoom twice with the position at D/2).
-			await seek(D / 2);
-			await pressZoom('Zoom In Waveform');
-			await pressZoom('Zoom In Waveform');
-			let s = await readState(kind);
-			expect(s.indicator).not.toBeNull();
-			const indicatorAtZoom = s.indicator!;
-			// Derive the window from the band's own axis: two playhead positions (at the bar's values, which for a
-			// video are presented-frame times) give px/s and the time at the canvas' left edge.
-			const a = await seek(0.4 * D);
-			const b = await seek(0.6 * D);
-			const ta = a.seek!.value;
-			const tb = b.seek!.value;
-			const pps = (b.headX! - a.headX!) / (tb - ta);
-			const windowStart = ta - (a.headX! - a.canvas!.left) / pps;
-			const windowSeconds = a.canvas!.width / pps;
-			const windowEnd = windowStart + windowSeconds;
-			report(REPORT, { gate: '41g-d-zoom-window', material: m.name, windowStart: r3(windowStart), windowSeconds: r3(windowSeconds), pxPerSecond: r3(pps), indicator: s.indicator });
-			expect(Math.abs(windowSeconds - D / 4)).toBeLessThan(0.01);
-
-			// Playhead vs the 5 s marker inside the zoomed band: the playhead goes on the marker's own
-			// time (追補h 契約2), not D / 2 — the two differ when the element's reported duration is
-			// not 10 s (ffmpeg m4a: D = 9.977 s). The window [3D/8, 5D/8] holds 5 s for D in 8–13.3 s.
-			const zoomMark = MARKS[1]!;
-			expect(zoomMark).toBe(5);
-			expect(zoomMark).toBeGreaterThan(windowStart);
-			expect(zoomMark).toBeLessThan(windowEnd);
-			s = await seek(zoomMark);
-			const zoomPeak = await peakX(kind, s.headX!);
-			expect(zoomPeak.x).not.toBeNull();
-			check(m.name, '4x head - peak @ 5s', s.headX! - zoomPeak.x!, TOLERANCE_PX, { head: r3(s.headX!), peak: r3(zoomPeak.x!) });
-
-			// Thumb centre vs the window indicator's ends with the position at the window's start / end.
-			// A video's bar can only show frame times, and a position outside the window makes the window follow
-			// it, so the position is put one frame (25 fps + 1 ms) inside each end and the thumb's centre is
-			// carried to the end itself with the thumb's travel rate measured in (i): at most 0.08 s = 13 px of
-			// extrapolation on a rate known to ~0.1 %. The window must not have moved (indicator unchanged).
-			const GUARD_S = 0.041;
-			s = await seek(windowStart + GUARD_S);
-			let v = s.seek!.value;
-			thumb = await measureThumb(kind, `req41-${tag}-4x-window-start`, true);
-			let shift = (v - windowStart) * thumbRate;
-			expect(Math.abs(s.indicator!.left - indicatorAtZoom.left)).toBeLessThan(0.01);
-			check(m.name, '4x thumb @ window start - indicator.left', thumb.center - shift - s.indicator!.left, TOLERANCE_PX, {
-				thumb: r3(thumb.center),
-				barValue: v,
-				carriedBy: r3(-shift),
-				indicator: s.indicator,
-				windowStart: r3(windowStart),
-			});
-			await zoomedShot(`req41-${tag}-4x-window-start-seekrow-x4`, { x: thumb.center - 60, y: seekRect.top - 4, width: 120, height: seekRect.height + 8 }, 4);
-			s = await seek(windowEnd - GUARD_S);
-			v = s.seek!.value;
-			thumb = await measureThumb(kind, `req41-${tag}-4x-window-end`, true);
-			shift = (v - windowEnd) * thumbRate;
-			expect(Math.abs(s.indicator!.left - indicatorAtZoom.left)).toBeLessThan(0.01);
-			check(m.name, '4x thumb @ window end - indicator.right', thumb.center - shift - s.indicator!.right, TOLERANCE_PX, {
-				thumb: r3(thumb.center),
-				barValue: v,
-				carriedBy: r3(-shift),
-				indicator: s.indicator,
-				windowEnd: r3(windowEnd),
-			});
-
-			// 余白のクリック (拡大中): the ends are the window's ends (判断4). The reference is the window the zoom
-			// rule puts there, [3D/8, 5D/8] — exact — not the band-pixel estimate above (≈ ±1.5 ms, coarser than
-			// TOLERANCE_S) rounded to the bar's 1 ms step. The indicator must put the window at the same place
-			// (cross-check in bar px) before the rule's window is trusted as the reference.
-			s = await seek(D / 2);
-			expect(Math.abs(s.indicator!.left - indicatorAtZoom.left)).toBeLessThan(0.01);
-			const rule = zoomWindowByRule(s.seek!.max);
-			/** The window must be where the rule says (read back from the indicator) right before each margin click. */
-			const expectRuleWindow = async (stage: 'before left click' | 'before right click'): Promise<void> => {
-				const st = await readState(kind);
-				expect(st.indicator).not.toBeNull();
-				expect(st.track).not.toBeNull();
-				const fromIndicator = windowFromIndicator(st.indicator!, st.track!, st.canvas!.left - st.band!.left, rule.seconds);
-				const barPxPerSecond = st.indicator!.width / rule.seconds;
-				const agreement = {
-					startPx: (fromIndicator.start - rule.start) * barPxPerSecond,
-					endPx: (fromIndicator.end - rule.end) * barPxPerSecond,
-				};
-				report(REPORT, {
-					gate: '41g-d-zoom-window-reference',
-					material: m.name,
-					stage,
-					barMax: st.seek!.max,
-					rule: { start: rule.start, end: rule.end, seconds: rule.seconds },
-					fromIndicator: { start: fromIndicator.start, end: fromIndicator.end, inset: r3(fromIndicator.inset) },
-					fromBandEstimate: { start: windowStart, end: windowEnd },
-					indicator: st.indicator,
-					track: st.track,
-					canvasLeft: st.canvas!.left,
-					bandLeft: st.band!.left,
-					agreementPx: { start: r3(agreement.startPx), end: r3(agreement.endPx) },
-				});
-				expect(Math.abs(agreement.startPx)).toBeLessThanOrEqual(ZOOM_WINDOW_AGREE_PX);
-				expect(Math.abs(agreement.endPx)).toBeLessThanOrEqual(ZOOM_WINDOW_AGREE_PX);
-			};
-
-			await expectRuleWindow('before left click');
-			const zoomLeft = await clickBandAt(kind, band.left + 2, by);
-			// The landing may legitimately pull the window along (要件#47 契約⑥: a video presents a frame, and for
-			// webm the frame at s sits before the window's start), so the zoom is rebuilt from 1× for the right
-			// margin instead of assuming the window stayed put.
-			await pressZoom('Reset Waveform Zoom');
-			await seek(D / 2);
-			await pressZoom('Zoom In Waveform');
-			await pressZoom('Zoom In Waveform');
-			await expectRuleWindow('before right click');
-			const zoomRight = await clickBandAt(kind, band.right - 2, by);
-			await pressZoom('Reset Waveform Zoom');
-			// Expected landing: a material with a frame index snaps (契約5: nearestFrame → seekTimeForFrame), and so
-			// does the seek bar released at the same time — so the reference is that release, at exactly
-			// rule.start / rule.end (step bypassed). Without an index both go straight to s / s + w.
-			const seekLandingStart = m.indexed ? await scrubCommit(kind, rule.start, true) : null;
-			const seekLandingEnd = m.indexed ? await scrubCommit(kind, rule.end, true) : null;
-			const expectedStart = seekLandingStart ?? rule.start;
-			const expectedEnd = seekLandingEnd ?? rule.end;
-			const reference = m.indexed
-				? 'seek bar released at exactly the zoom-rule window end (frame snap; step bypassed)'
-				: 'zoom-rule window end itself (no frame index)';
-			report(REPORT, {
-				gate: '41g-d-margin-4x',
-				material: m.name,
-				reference,
-				windowStart: rule.start,
-				windowEnd: rule.end,
-				expectedStart,
-				expectedEnd,
-				zoomLeft,
-				seekLandingStart,
-				zoomRight,
-				seekLandingEnd,
-			});
-			check(m.name, '4x left margin click - window start (s)', zoomLeft.landed - expectedStart, TOLERANCE_S, {
-				target: zoomLeft.target,
-				landed: zoomLeft.landed,
-				expected: expectedStart,
-				reference,
-			});
-			check(m.name, '4x right margin click - window end (s)', zoomRight.landed - expectedEnd, TOLERANCE_S, {
-				target: zoomRight.target,
-				landed: zoomRight.landed,
-				expected: expectedEnd,
-				reference,
-			});
-
-			await seek(0);
-			expectChecks(m.name);
 		});
+	}
+
+	/** The whole measurement of one material, from the open to `expectChecks`. */
+	async function measureMaterial(m: Material): Promise<void> {
+		const tag = m.name.replace('.', '-');
+		const kind = m.kind;
+		const seek = (t: number) => seekTo(kind, t, m.name);
+		const opened = await openMaterial(m);
+		const seekRect = opened.seek!.rect;
+		const D = opened.seek!.max;
+		report(REPORT, {
+			gate: '41g-open',
+			material: m.name,
+			...(attempt > 0 ? { attempt } : {}),
+			barMax: D,
+			mediaDuration: opened.media!.duration,
+			seekRect,
+			band: opened.band,
+			canvas: opened.canvas,
+			frameReadout: opened.frameReadout,
+		});
+		// The band and the seek bar share their outer left edge and width (the contract's premise).
+		check(m.name, 'premise: band.left - seek.left', opened.band!.left - seekRect.left, 0.5);
+		check(m.name, 'premise: band.width - seek.width', opened.band!.width - seekRect.width, 0.5);
+
+		// (i) SEEK_THUMB_INSET_PX: the thumb centre's distance from the box's ends with the value at 0 and at max.
+		const widths: number[] = [];
+		await seek(0);
+		const valueAtZero = await setBarValue(kind, 0);
+		let thumb = await measureThumb(kind, `req41-${tag}-value0`, true);
+		widths.push(thumb.width);
+		const thumbAtZero = thumb.center;
+		const leftDistance = thumbAtZero - seekRect.left;
+		await zoomedShot(`req41-${tag}-value0-seekrow-x4`, { x: seekRect.left - 8, y: seekRect.top - 4, width: 120, height: seekRect.height + 8 }, 4);
+		const valueAtMax = await setBarValue(kind, D);
+		thumb = await measureThumb(kind, `req41-${tag}-valueMax`, true);
+		widths.push(thumb.width);
+		const rightDistance = seekRect.right - thumb.center;
+		/** CSS px the thumb's centre moves per second of bar value (its travel is linear in the value). */
+		const thumbRate = (thumb.center - thumbAtZero) / (valueAtMax - valueAtZero);
+		await zoomedShot(`req41-${tag}-valueMax-seekrow-x4`, { x: seekRect.right - 112, y: seekRect.top - 4, width: 120, height: seekRect.height + 8 }, 4);
+		await setBarValue(kind, 0);
+		insets[m.name] = { leftDistance, rightDistance, thumbWidth: widths };
+		report(REPORT, {
+			gate: '41g-0-i',
+			material: m.name,
+			valueAtZero,
+			valueAtMax,
+			barMax: D,
+			leftDistance: r3(leftDistance),
+			rightDistance: r3(rightDistance),
+			mean: r3((leftDistance + rightDistance) / 2),
+			meanRoundedHalfPx: Math.round(leftDistance + rightDistance) / 2,
+			thumbWidth: widths.map(r3),
+			thumbRows: [thumb.rowsUsed, thumb.rowsDropped],
+			thumbPxPerSecond: r3(thumbRate),
+			dpr: thumb.dpr,
+		});
+
+		// 等倍: thumb centre vs playhead at 0 / 0.5 / D/2 / D−0.5 / D, plus 5 / 50 / 95 % for step 0 (ii).
+		const positions: [string, number][] = [
+			['0', 0],
+			['0.5s', 0.5],
+			['5%', 0.05 * D],
+			['50%', 0.5 * D],
+			['95%', 0.95 * D],
+			['D-0.5s', D - 0.5],
+			['D', D],
+		];
+		const headDiffs: Record<string, number> = {};
+		for (const [label, t] of positions) {
+			const s = await seek(t);
+			const th = await measureThumb(kind, `req41-${tag}-at-${label}`);
+			const diff = th.center - s.headX!;
+			headDiffs[label] = diff;
+			check(m.name, `1x thumb - head @ ${label}`, diff, TOLERANCE_PX, {
+				t,
+				barValue: s.seek!.value,
+				thumb: r3(th.center),
+				head: r3(s.headX!),
+				thumbWidth: r3(th.width),
+			});
+		}
+		offsets[m.name] = { p5: headDiffs['5%']!, p50: headDiffs['50%']!, p95: headDiffs['95%']! };
+		report(REPORT, { gate: '41g-0-ii', material: m.name, kind, ...Object.fromEntries(Object.entries(offsets[m.name]!).map(([k, v]) => [k, r3(v)])), shape: shape(offsets[m.name]!) });
+
+		// 等倍: thumb centre vs marker peak at 2 / 5 / 8 s (and the playhead vs the peak, for the record).
+		for (const t of MARKS) {
+			const s = await seek(t);
+			const th = await measureThumb(kind, `req41-${tag}-mark-${t}s`);
+			const peak = await peakX(kind, s.headX!);
+			report(REPORT, { gate: '41g-d-peak', material: m.name, t, head: r3(s.headX!), peak: peak.x === null ? null : r3(peak.x), weight: peak.weight, baseline: peak.baseline });
+			expect(peak.x).not.toBeNull();
+			check(m.name, `1x thumb - peak @ ${t}s`, th.center - peak.x!, TOLERANCE_PX, { thumb: r3(th.center), peak: r3(peak.x!) });
+			check(m.name, `1x head - peak @ ${t}s`, s.headX! - peak.x!, TOLERANCE_PX, { head: r3(s.headX!), peak: r3(peak.x!) });
+		}
+
+		// 余白のクリック (等倍): the band's left / right edge lands where releasing the seek bar at 0 / D lands.
+		const band = opened.band!;
+		const by = (band.top + band.bottom) / 2;
+		const seekLanding0 = await scrubCommit(kind, 0);
+		const leftClick = await clickBandAt(kind, band.left + 2, by);
+		const seekLandingMax = await scrubCommit(kind, D);
+		const rightClick = await clickBandAt(kind, band.right - 2, by);
+		report(REPORT, { gate: '41g-d-margin-1x', material: m.name, seekLanding0, leftClick, seekLandingMax, rightClick });
+		check(m.name, '1x left margin click - seek bar released at 0 (s)', leftClick.landed - seekLanding0, TOLERANCE_S, { target: leftClick.target });
+		check(m.name, '1x right margin click - seek bar released at D (s)', rightClick.landed - seekLandingMax, TOLERANCE_S, { target: rightClick.target });
+
+		// 拡大 ×4 (window sent to the middle: zoom twice with the position at D/2).
+		await seek(D / 2);
+		await pressZoom('Zoom In Waveform');
+		await pressZoom('Zoom In Waveform');
+		let s = await readState(kind);
+		expect(s.indicator).not.toBeNull();
+		const indicatorAtZoom = s.indicator!;
+		// Derive the window from the band's own axis: two playhead positions (at the bar's values, which for a
+		// video are presented-frame times) give px/s and the time at the canvas' left edge.
+		const a = await seek(0.4 * D);
+		const b = await seek(0.6 * D);
+		const ta = a.seek!.value;
+		const tb = b.seek!.value;
+		const pps = (b.headX! - a.headX!) / (tb - ta);
+		const windowStart = ta - (a.headX! - a.canvas!.left) / pps;
+		const windowSeconds = a.canvas!.width / pps;
+		const windowEnd = windowStart + windowSeconds;
+		report(REPORT, { gate: '41g-d-zoom-window', material: m.name, windowStart: r3(windowStart), windowSeconds: r3(windowSeconds), pxPerSecond: r3(pps), indicator: s.indicator });
+		expect(Math.abs(windowSeconds - D / 4)).toBeLessThan(0.01);
+
+		// Playhead vs the 5 s marker inside the zoomed band: the playhead goes on the marker's own
+		// time (追補h 契約2), not D / 2 — the two differ when the element's reported duration is
+		// not 10 s (ffmpeg m4a: D = 9.977 s). The window [3D/8, 5D/8] holds 5 s for D in 8–13.3 s.
+		const zoomMark = MARKS[1]!;
+		expect(zoomMark).toBe(5);
+		expect(zoomMark).toBeGreaterThan(windowStart);
+		expect(zoomMark).toBeLessThan(windowEnd);
+		s = await seek(zoomMark);
+		const zoomPeak = await peakX(kind, s.headX!);
+		expect(zoomPeak.x).not.toBeNull();
+		check(m.name, '4x head - peak @ 5s', s.headX! - zoomPeak.x!, TOLERANCE_PX, { head: r3(s.headX!), peak: r3(zoomPeak.x!) });
+
+		// Thumb centre vs the window indicator's ends with the position at the window's start / end.
+		// A video's bar can only show frame times, and a position outside the window makes the window follow
+		// it, so the position is put one frame (25 fps + 1 ms) inside each end and the thumb's centre is
+		// carried to the end itself with the thumb's travel rate measured in (i): at most 0.08 s = 13 px of
+		// extrapolation on a rate known to ~0.1 %. The window must not have moved (indicator unchanged).
+		const GUARD_S = 0.041;
+		s = await seek(windowStart + GUARD_S);
+		let v = s.seek!.value;
+		thumb = await measureThumb(kind, `req41-${tag}-4x-window-start`, true);
+		let shift = (v - windowStart) * thumbRate;
+		expect(Math.abs(s.indicator!.left - indicatorAtZoom.left)).toBeLessThan(0.01);
+		check(m.name, '4x thumb @ window start - indicator.left', thumb.center - shift - s.indicator!.left, TOLERANCE_PX, {
+			thumb: r3(thumb.center),
+			barValue: v,
+			carriedBy: r3(-shift),
+			indicator: s.indicator,
+			windowStart: r3(windowStart),
+		});
+		await zoomedShot(`req41-${tag}-4x-window-start-seekrow-x4`, { x: thumb.center - 60, y: seekRect.top - 4, width: 120, height: seekRect.height + 8 }, 4);
+		s = await seek(windowEnd - GUARD_S);
+		v = s.seek!.value;
+		thumb = await measureThumb(kind, `req41-${tag}-4x-window-end`, true);
+		shift = (v - windowEnd) * thumbRate;
+		expect(Math.abs(s.indicator!.left - indicatorAtZoom.left)).toBeLessThan(0.01);
+		check(m.name, '4x thumb @ window end - indicator.right', thumb.center - shift - s.indicator!.right, TOLERANCE_PX, {
+			thumb: r3(thumb.center),
+			barValue: v,
+			carriedBy: r3(-shift),
+			indicator: s.indicator,
+			windowEnd: r3(windowEnd),
+		});
+
+		// 余白のクリック (拡大中): the ends are the window's ends (判断4). The reference is the window the zoom
+		// rule puts there, [3D/8, 5D/8] — exact — not the band-pixel estimate above (≈ ±1.5 ms, coarser than
+		// TOLERANCE_S) rounded to the bar's 1 ms step. The indicator must put the window at the same place
+		// (cross-check in bar px) before the rule's window is trusted as the reference.
+		s = await seek(D / 2);
+		expect(Math.abs(s.indicator!.left - indicatorAtZoom.left)).toBeLessThan(0.01);
+		const rule = zoomWindowByRule(s.seek!.max);
+		/** The window must be where the rule says (read back from the indicator) right before each margin click. */
+		const expectRuleWindow = async (stage: 'before left click' | 'before right click'): Promise<void> => {
+			const st = await readState(kind);
+			expect(st.indicator).not.toBeNull();
+			expect(st.track).not.toBeNull();
+			const fromIndicator = windowFromIndicator(st.indicator!, st.track!, st.canvas!.left - st.band!.left, rule.seconds);
+			const barPxPerSecond = st.indicator!.width / rule.seconds;
+			const agreement = {
+				startPx: (fromIndicator.start - rule.start) * barPxPerSecond,
+				endPx: (fromIndicator.end - rule.end) * barPxPerSecond,
+			};
+			report(REPORT, {
+				gate: '41g-d-zoom-window-reference',
+				material: m.name,
+				stage,
+				barMax: st.seek!.max,
+				rule: { start: rule.start, end: rule.end, seconds: rule.seconds },
+				fromIndicator: { start: fromIndicator.start, end: fromIndicator.end, inset: r3(fromIndicator.inset) },
+				fromBandEstimate: { start: windowStart, end: windowEnd },
+				indicator: st.indicator,
+				track: st.track,
+				canvasLeft: st.canvas!.left,
+				bandLeft: st.band!.left,
+				agreementPx: { start: r3(agreement.startPx), end: r3(agreement.endPx) },
+			});
+			expect(Math.abs(agreement.startPx)).toBeLessThanOrEqual(ZOOM_WINDOW_AGREE_PX);
+			expect(Math.abs(agreement.endPx)).toBeLessThanOrEqual(ZOOM_WINDOW_AGREE_PX);
+		};
+
+		await expectRuleWindow('before left click');
+		const zoomLeft = await clickBandAt(kind, band.left + 2, by);
+		// The landing may legitimately pull the window along (要件#47 契約⑥: a video presents a frame, and for
+		// webm the frame at s sits before the window's start), so the zoom is rebuilt from 1× for the right
+		// margin instead of assuming the window stayed put.
+		await pressZoom('Reset Waveform Zoom');
+		await seek(D / 2);
+		await pressZoom('Zoom In Waveform');
+		await pressZoom('Zoom In Waveform');
+		await expectRuleWindow('before right click');
+		const zoomRight = await clickBandAt(kind, band.right - 2, by);
+		await pressZoom('Reset Waveform Zoom');
+		// Expected landing: a material with a frame index snaps (契約5: nearestFrame → seekTimeForFrame), and so
+		// does the seek bar released at the same time — so the reference is that release, at exactly
+		// rule.start / rule.end (step bypassed). Without an index both go straight to s / s + w.
+		const seekLandingStart = m.indexed ? await scrubCommit(kind, rule.start, true) : null;
+		const seekLandingEnd = m.indexed ? await scrubCommit(kind, rule.end, true) : null;
+		const expectedStart = seekLandingStart ?? rule.start;
+		const expectedEnd = seekLandingEnd ?? rule.end;
+		const reference = m.indexed
+			? 'seek bar released at exactly the zoom-rule window end (frame snap; step bypassed)'
+			: 'zoom-rule window end itself (no frame index)';
+		report(REPORT, {
+			gate: '41g-d-margin-4x',
+			material: m.name,
+			reference,
+			windowStart: rule.start,
+			windowEnd: rule.end,
+			expectedStart,
+			expectedEnd,
+			zoomLeft,
+			seekLandingStart,
+			zoomRight,
+			seekLandingEnd,
+		});
+		check(m.name, '4x left margin click - window start (s)', zoomLeft.landed - expectedStart, TOLERANCE_S, {
+			target: zoomLeft.target,
+			landed: zoomLeft.landed,
+			expected: expectedStart,
+			reference,
+		});
+		check(m.name, '4x right margin click - window end (s)', zoomRight.landed - expectedEnd, TOLERANCE_S, {
+			target: zoomRight.target,
+			landed: zoomRight.landed,
+			expected: expectedEnd,
+			reference,
+		});
+
+		await seek(0);
+		expectChecks(m.name);
 	}
 
 	it('step 0 record: (i) the inset is consistent across ends and viewers; (ii) the audio viewer’s offset shape', () => {

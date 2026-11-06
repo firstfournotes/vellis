@@ -272,6 +272,77 @@ export async function emitMenu(event: string): Promise<void> {
 	if (res !== 'ok') throw new Error(`emit ${event} failed: ${res}`);
 }
 
+/**
+ * Emit a Tauri event to this window with a payload (`emitMenu` sends null) —
+ * for events the app listens to with a body, such as `update_available`.
+ */
+export async function emitEvent(event: string, payload: unknown): Promise<void> {
+	const res = await browser.executeAsync<string, [string, unknown]>((ev, body, done) => {
+		const internals = (window as unknown as {
+			__TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+		}).__TAURI_INTERNALS__;
+		internals.invoke('plugin:event|emit', { event: ev, payload: body }).then(
+			() => done('ok'),
+			(e) => done(String(e)),
+		);
+	}, event, payload);
+	if (res !== 'ok') throw new Error(`emit ${event} failed: ${res}`);
+}
+
+/**
+ * One CSS colour in a canonical form, `r,g,b,a` with the alpha rounded to 3
+ * decimals, so a token's raw value (`rgba(15,18,30,.045)`, `#4256e8`) and a
+ * computed value (`rgba(15, 18, 30, 0.045)`, `rgb(66, 86, 232)`) compare
+ * equal. Returns null for anything that is not a colour literal (`none`,
+ * `currentcolor`, a `var()`).
+ */
+export function colorKey(css: string): string | null {
+	const s = css.trim().toLowerCase();
+	const hex = /^#([0-9a-f]{3,8})$/.exec(s);
+	if (hex) {
+		const h = hex[1] ?? '';
+		let r: number;
+		let g: number;
+		let b: number;
+		let a = 1;
+		if (h.length === 3 || h.length === 4) {
+			r = parseInt((h[0] ?? '0').repeat(2), 16);
+			g = parseInt((h[1] ?? '0').repeat(2), 16);
+			b = parseInt((h[2] ?? '0').repeat(2), 16);
+			if (h.length === 4) a = parseInt((h[3] ?? 'f').repeat(2), 16) / 255;
+		} else if (h.length === 6 || h.length === 8) {
+			r = parseInt(h.slice(0, 2), 16);
+			g = parseInt(h.slice(2, 4), 16);
+			b = parseInt(h.slice(4, 6), 16);
+			if (h.length === 8) a = parseInt(h.slice(6, 8), 16) / 255;
+		} else {
+			return null;
+		}
+		return `${r},${g},${b},${Math.round(a * 1000) / 1000}`;
+	}
+	const fn = /^rgba?\(([^)]+)\)$/.exec(s);
+	if (fn) {
+		const parts = (fn[1] ?? '')
+			.split(/[,\s/]+/)
+			.filter(Boolean)
+			.map((p) => (p.endsWith('%') ? (Number(p.slice(0, -1)) / 100) * 255 : Number(p)));
+		if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) return null;
+		const a = parts.length >= 4 ? parts[3]! : 1;
+		return `${Math.round(parts[0]!)},${Math.round(parts[1]!)},${Math.round(parts[2]!)},${Math.round(a * 1000) / 1000}`;
+	}
+	return null;
+}
+
+/** Every colour literal inside a CSS value (`box-shadow` carries several), as `colorKey`s. */
+export function colorsIn(cssValue: string): string[] {
+	const out: string[] = [];
+	for (const m of cssValue.matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g)) {
+		const k = colorKey(m[0]);
+		if (k !== null) out.push(k);
+	}
+	return out;
+}
+
 export async function explorerNames(): Promise<string[]> {
 	return browser.execute(() =>
 		Array.from(document.querySelectorAll('.explorer-item .name')).map((el) => el.textContent ?? ''),

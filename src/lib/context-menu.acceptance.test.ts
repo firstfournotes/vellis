@@ -74,6 +74,52 @@
  * 下の「意味論」1・3・5・6 の「6項目」は本追補により7項目と読み替える(過去の記述は
  * 書き換えない=本追補が正)。
  *
+ * ## 要件#80 追補(docs/requirements/req-80.md・2026-11-04 由谷決定・契約 9・12・14)
+ * 「Reload File」(id 'reload-file')をファイル・symlink の行の **Open in New Window の直後・
+ * Copy Path の直前**に足す。有効なのはその行の URI が今の窓で開いている文書の URI と
+ * **文字列で一致する**ときだけ(`buildContextMenu(entry, openDocUri?)` の第2引数。省略・null は
+ * 「開いていない」=出したまま無効)。ssh でも有効(アプリの中で完結する)。
+ * 「Reload Folder」(id 'reload-folder')をフォルダの行の **Open in New Window の直後**に足す
+ * (常に有効・ssh でも)。ツリーの空白(buildTreePaneMenu)は **Reload Folder・Duplicate Window** の
+ * 2項目(Duplicate Window は末尾のまま=要件#34)。
+ * 本要件により #19/#21/#34/#59/#62 の項目数固定(ファイル/symlink 7項目・フォルダ4項目・空白1項目)は
+ * ファイル/symlink 8項目・フォルダ5項目・空白2項目へ**要件側更新**(承認済み=契約12。更新は項目数・
+ * 順序・ラベル・enabled の列挙だけ。ファイルの「すべて有効」は第2引数に entry.uri を渡す形で保つ)。
+ * `planContextAction('reload-file', entry)` → `{ command: 'reload-file', uri: entry.uri }`・
+ * `planContextAction('reload-folder', dir)` → `{ command: 'reload-folder', uri: dir.uri }`(どちらも
+ * リモート判定より手前=ssh でも null にしない)。本文のメニュー `buildViewerMenu()` と判定の純関数は
+ * reload-file.acceptance.test.ts の持ち場。新規の判定は本ファイル末尾の「要件#80」describe に足す。
+ *
+ * ## 要件#83 追補(docs/requirements/req-83.md・2026-11-05 由谷決定・契約 7・14【(e)(ab)(ae) 決定】)
+ * 「Pin to Bookmarks」(id 'pin-to-bookmarks')をファイル・symlink の行の **Copy Path の直後・Duplicate Window の
+ * 直前**(9 項目)と、フォルダの行の **Copy Path の直後**(6 項目)に足す。常に有効(ssh でも=アプリの中で完結する)。
+ * 済み(`buildContextMenu(entry, openDocUri, pinned)` の第3引数が true)なら同じ位置が 'unpin-from-bookmarks' /
+ * 'Unpin from Bookmarks'。第3引数の省略= false。ツリーの空白(buildTreePaneMenu)には置かない。本文のメニューは
+ * `buildViewerMenu(pinned?)` で Reload File の後に Pin / Unpin(2 項目)。
+ * `planContextAction('pin-to-bookmarks', entry)` → `{ command: 'pin-bookmark', uri: entry.uri, kind: 'file' | 'folder' }`
+ * (dir= 'folder'・file / symlink= 'file')・`planContextAction('unpin-from-bookmarks', entry)` → `{ command: 'unpin-bookmark', uri: entry.uri }`
+ * (どちらもリモート判定より手前=ssh でも null にしない)。
+ * Dashboard のメニュー(契約 14): `buildBookmarkTileMenu(index, count)`・`buildRecentFolderMenu(pinned)`・
+ * `buildAddBookmarkMenu()`。項目の区切り線は `separatorBefore?: boolean`(省略= false)で示す(描画側が線を引く)。
+ * 本要件により #19/#21/#34/#59/#62/#80 の項目数固定(ファイル/symlink 8項目・フォルダ5項目)はファイル/symlink 9項目・
+ * フォルダ6項目へ**要件側更新**(承認済み=契約 17 承認 3。更新は項目数・順序・ラベル・enabled の列挙だけ)。
+ * 新規の判定は本ファイル末尾の「要件#83」describe(AC-83-22・23)に足す。
+ *
+ * ```ts
+ * export type ContextMenuItem = { id: ContextMenuItemId; label: string; enabled: boolean; separatorBefore?: boolean };
+ * export function buildContextMenu(entry: ContextMenuEntry, openDocUri?: string | null, pinned?: boolean): ContextMenuItem[];
+ * export function buildViewerMenu(pinned?: boolean): ContextMenuItem[];
+ * export function buildBookmarkTileMenu(index: number, count: number): ContextMenuItem[];
+ * //   dashboard-open 'Open'・dashboard-open-in-new-window 'Open in New Window'・move-up 'Move Up'(separatorBefore)・
+ * //   move-down 'Move Down'・unpin-from-bookmarks 'Unpin from Bookmarks'(separatorBefore)。index 0 → move-up 無効・
+ * //   末尾 → move-down 無効
+ * export function buildRecentFolderMenu(pinned: boolean): ContextMenuItem[];
+ * //   dashboard-open・dashboard-open-in-new-window・pin-to-bookmarks(済みなら unpin-from-bookmarks・separatorBefore)・
+ * //   remove-from-recent-folders 'Remove from Recent Folders'(separatorBefore)
+ * export function buildAddBookmarkMenu(): ContextMenuItem[];
+ * //   add-folder-bookmark 'Add Folder…'・add-file-bookmark 'Add File…'
+ * ```
+ *
  * ## 確定契約(公開 API・implementer はこれに従う)
  *
  * ```ts
@@ -187,8 +233,12 @@ import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 
 import {
+	buildAddBookmarkMenu,
+	buildBookmarkTileMenu,
 	buildContextMenu,
+	buildRecentFolderMenu,
 	buildTreePaneMenu,
+	buildViewerMenu,
 	clampMenuPosition,
 	pathForCopy,
 	pathForReveal,
@@ -228,32 +278,42 @@ const sshDir: ContextMenuEntry = {
 // ---------------------------------------------------------------------------
 
 describe('buildContextMenu — local アイテムの項目構成', () => {
-	test('local ファイル → reveal・open・open-with・open-in-new-tab・open-in-new-window・copy-path・duplicate-window の7項目・この順・すべて有効', () => {
-		const items = buildContextMenu(localFile);
+	// 要件#80 契約12(2026-11-04 承認の要件側更新): open-in-new-window の直後に reload-file が増えて
+	// 7項目→8項目。「すべて有効」は第2引数に entry.uri(=その行を開いている)を渡す形で保つ。
+	// 要件#83 契約 7(2026-11-05 承認 3 の要件側更新): copy-path の直後に pin-to-bookmarks が増えて 8項目→9項目。
+	// 第3引数(済みか)の省略= false= Pin to Bookmarks(常に有効)。
+	test('local ファイル → reveal・open・open-with・open-in-new-tab・open-in-new-window・reload-file・copy-path・pin-to-bookmarks・duplicate-window の9項目・この順・すべて有効', () => {
+		const items = buildContextMenu(localFile, localFile.uri);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
 			'open-in-new-tab',
 			'open-in-new-window',
+			'reload-file',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('local フォルダ → reveal・open-in-new-window・copy-path・duplicate-window の4項目(open は出さない)・すべて有効', () => {
+	// 要件#80 契約12: open-in-new-window の直後に reload-folder が増えて 4項目→5項目。
+	// 要件#83 契約 7(承認 3): copy-path の直後に pin-to-bookmarks が増えて 5項目→6項目。
+	test('local フォルダ → reveal・open-in-new-window・reload-folder・copy-path・pin-to-bookmarks・duplicate-window の6項目(open は出さない)・すべて有効', () => {
 		const items = buildContextMenu(localDir);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open-in-new-window',
+			'reload-folder',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
 		expect(items.every((i) => i.enabled)).toBe(true);
 	});
 
-	test('ラベル文言は英語の推奨文言(要件#35①・#59①・#62=local ファイルの7項目)', () => {
+	test('ラベル文言は英語の推奨文言(要件#35①・#59①・#62・#80・#83=local ファイルの9項目)', () => {
 		const labels = buildContextMenu(localFile).map((i) => i.label);
 		expect(labels).toEqual([
 			'Reveal in Finder',
@@ -261,20 +321,24 @@ describe('buildContextMenu — local アイテムの項目構成', () => {
 			'Open With…',
 			'Open in New Tab',
 			'Open in New Window',
+			'Reload File',
 			'Copy Path',
+			'Pin to Bookmarks',
 			'Duplicate Window',
 		]);
 	});
 
-	test('symlink はファイルと同じ7項目に固定(実装裁量の確定=一貫性)', () => {
-		const items = buildContextMenu(localSymlink);
+	test('symlink はファイルと同じ9項目に固定(実装裁量の確定=一貫性)', () => {
+		const items = buildContextMenu(localSymlink, localSymlink.uri);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
 			'open-in-new-tab',
 			'open-in-new-window',
+			'reload-file',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
 		expect(items.every((i) => i.enabled)).toBe(true);
@@ -282,7 +346,10 @@ describe('buildContextMenu — local アイテムの項目構成', () => {
 });
 
 describe('buildContextMenu — ssh リモートは reveal / open をグレーアウト(契約⑤)', () => {
-	test('ssh ファイル → 7項目とも出すが reveal / open / open-with は disabled・open-in-new-tab / open-in-new-window / copy-path / duplicate-window は有効', () => {
+	// 要件#80 契約12(2026-11-04 承認の要件側更新): reload-file(6番目)が増えて 8項目。開いている URI を
+	// 渡さない呼び方なので reload-file は false(ssh だからではなく「開いていない」から=要件#80 の describe が対にする)。
+	// 要件#83 契約 7(2026-11-05 承認 3): copy-path の直後に pin-to-bookmarks(ssh でも有効=アプリの中で完結する)が増えて 9項目。
+	test('ssh ファイル → 9項目とも出すが reveal / open / open-with は disabled・open-in-new-tab / open-in-new-window / copy-path / pin-to-bookmarks / duplicate-window は有効(reload-file は開いていないので disabled)', () => {
 		const items = buildContextMenu(sshFile);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
@@ -290,24 +357,29 @@ describe('buildContextMenu — ssh リモートは reveal / open をグレーア
 			'open-with',
 			'open-in-new-tab',
 			'open-in-new-window',
+			'reload-file',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, false, true, true, true]);
 	});
 
-	test('ssh フォルダ → reveal(disabled)+open-in-new-window・copy-path・duplicate-window(有効)の4項目', () => {
+	// 要件#80 契約12: reload-folder(3番目・ssh でも有効)が増えて 5項目。要件#83 契約 7(承認 3): pin-to-bookmarks が増えて 6項目。
+	test('ssh フォルダ → reveal(disabled)+open-in-new-window・reload-folder・copy-path・pin-to-bookmarks・duplicate-window(有効)の6項目', () => {
 		const items = buildContextMenu(sshDir);
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
 			'open-in-new-window',
+			'reload-folder',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
-		expect(items.map((i) => i.enabled)).toEqual([false, true, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, true, true, true, true, true]);
 	});
 
-	test('ssh symlink もファイル同等(7項目・reveal / open / open-with disabled)=一貫性', () => {
+	test('ssh symlink もファイル同等(9項目・reveal / open / open-with disabled)=一貫性', () => {
 		const items = buildContextMenu({ ...sshFile, kind: 'symlink' });
 		expect(items.map((i) => i.id)).toEqual([
 			'reveal',
@@ -315,10 +387,12 @@ describe('buildContextMenu — ssh リモートは reveal / open をグレーア
 			'open-with',
 			'open-in-new-tab',
 			'open-in-new-window',
+			'reload-file',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, false, true, true, true]);
 	});
 
 	test('判別は URI スキーム(user なし・ポートなしの ssh URI でも disabled)', () => {
@@ -327,7 +401,7 @@ describe('buildContextMenu — ssh リモートは reveal / open をグレーア
 			name: 'plan.md',
 			kind: 'file',
 		});
-		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, true, true]);
+		expect(items.map((i) => i.enabled)).toEqual([false, false, false, true, true, false, true, true, true]);
 	});
 });
 
@@ -529,10 +603,12 @@ describe('要件#34: buildContextMenu — "Duplicate Window" は末尾・全種�
 });
 
 describe('要件#34: buildTreePaneMenu — ツリー空白部の右クリック(契約#34③)', () => {
-	test('duplicate-window 1項目のみ・ラベル "Duplicate Window"(要件#35)・enabled', () => {
+	// 要件#80 契約12・14(2026-11-04 承認の要件側更新): 先頭に reload-folder が増えて 1項目→2項目。
+	// Duplicate Window が末尾・有効・ラベルどおりであることは保つ(要件#34 の「末尾」)。
+	test('duplicate-window は末尾(2項目のうち最後)・ラベル "Duplicate Window"(要件#35)・enabled', () => {
 		const items = buildTreePaneMenu();
-		expect(items).toHaveLength(1);
-		expect(items[0]).toMatchObject({
+		expect(items).toHaveLength(2);
+		expect(items[items.length - 1]).toMatchObject({
 			id: 'duplicate-window',
 			label: 'Duplicate Window',
 			enabled: true,
@@ -588,11 +664,14 @@ describe('要件#62 AC-62-12: buildContextMenu — "Open in New Tab" はファ�
 		expect(items[idx + 1]?.id).toBe('open-in-new-window');
 	});
 
-	test('フォルダには出さない(local / ssh とも4項目のまま)', () => {
+	// 要件#80 契約12(2026-11-04 承認の要件側更新): フォルダは reload-folder が増えて 4項目→5項目。
+	// 要件#83 契約 7(2026-11-05 承認 3): pin-to-bookmarks が増えて 5項目→6項目。
+	// open-in-new-tab がフォルダに無いことの assert はそのまま。
+	test('フォルダには出さない(local / ssh とも6項目のまま)', () => {
 		expect(newTabIndex(localDir)).toBe(-1);
 		expect(newTabIndex(sshDir)).toBe(-1);
-		expect(buildContextMenu(localDir)).toHaveLength(4);
-		expect(buildContextMenu(sshDir)).toHaveLength(4);
+		expect(buildContextMenu(localDir)).toHaveLength(6);
+		expect(buildContextMenu(sshDir)).toHaveLength(6);
 	});
 
 	test('ssh のファイル / symlink でも enabled: true(アプリの中で完結する=契約#59⑥と同じ理由)', () => {
@@ -639,6 +718,213 @@ describe("要件#62 AC-62-12: planContextAction('open-in-new-tab', file) → { c
 			command: 'new-tab',
 			path: 'ssh://alice@host:22/srv/notes/plan.md',
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#80 — 「Reload File」(ファイルの行・AC-80-11・契約 9)【(h) 決定】
+// ---------------------------------------------------------------------------
+
+describe('要件#80 AC-80-11: buildContextMenu(entry, openDocUri) — ファイル・symlink の行の "Reload File"(契約 9)', () => {
+	// 要件#83 契約 7(2026-11-05 承認 3 の要件側更新): copy-path の直後に pin-to-bookmarks(常に有効)が増えて 9つ。
+	const FILE_IDS = [
+		'reveal',
+		'open',
+		'open-with',
+		'open-in-new-tab',
+		'open-in-new-window',
+		'reload-file',
+		'copy-path',
+		'pin-to-bookmarks',
+		'duplicate-window',
+	];
+	const reloadFile = (entry: ContextMenuEntry, openDocUri?: string | null) =>
+		buildContextMenu(entry, openDocUri).find((i) => i.id === 'reload-file');
+
+	test('1. local のファイルで開いている(第2引数が entry.uri)→ 9つ・この順・すべて有効', () => {
+		const items = buildContextMenu(localFile, localFile.uri);
+		expect(items.map((i) => i.id)).toEqual(FILE_IDS);
+		expect(items.map((i) => i.enabled)).toEqual([true, true, true, true, true, true, true, true, true]);
+	});
+
+	test('2. 第2引数が別の URI・省略・null → 同じ9つで、reload-file だけが無効(ほかの有効/無効は今と同じ)', () => {
+		for (const openDocUri of ['file:///Users/x/notes/other.md', undefined, null] as const) {
+			const items = buildContextMenu(localFile, openDocUri);
+			expect(items.map((i) => i.id), String(openDocUri)).toEqual(FILE_IDS);
+			expect(items.map((i) => i.enabled), String(openDocUri)).toEqual([
+				true,
+				true,
+				true,
+				true,
+				true,
+				false,
+				true,
+				true,
+				true,
+			]);
+		}
+	});
+
+	test('3. ssh のファイルで開いている → [false, false, false, true, true, true, true, true, true]。開いていない → reload-file だけ false', () => {
+		expect(buildContextMenu(sshFile, sshFile.uri).map((i) => i.enabled)).toEqual([
+			false,
+			false,
+			false,
+			true,
+			true,
+			true,
+			true,
+			true,
+			true,
+		]);
+		expect(buildContextMenu(sshFile, 'ssh://alice@host:22/srv/notes/other.md').map((i) => i.enabled)).toEqual([
+			false,
+			false,
+			false,
+			true,
+			true,
+			false,
+			true,
+			true,
+			true,
+		]);
+		expect(buildContextMenu(sshFile).map((i) => i.enabled)).toEqual([false, false, false, true, true, false, true, true, true]);
+	});
+
+	test('4. シンボリックリンクはファイルと同じ(local・ssh とも)', () => {
+		const sshSymlink: ContextMenuEntry = { ...sshFile, kind: 'symlink' };
+		expect(buildContextMenu(localSymlink, localSymlink.uri).map((i) => i.id)).toEqual(FILE_IDS);
+		expect(buildContextMenu(localSymlink, localSymlink.uri).every((i) => i.enabled)).toBe(true);
+		expect(reloadFile(localSymlink)).toMatchObject({ enabled: false });
+		expect(buildContextMenu(sshSymlink, sshSymlink.uri).map((i) => i.id)).toEqual(FILE_IDS);
+		expect(buildContextMenu(sshSymlink, sshSymlink.uri).map((i) => i.enabled)).toEqual([
+			false,
+			false,
+			false,
+			true,
+			true,
+			true,
+			true,
+			true,
+			true,
+		]);
+		expect(reloadFile(sshSymlink)).toMatchObject({ enabled: false });
+	});
+
+	test('5. ファイル・symlink の行に reload-folder は無い。フォルダの行(第2引数がそのフォルダの URI でも)と buildTreePaneMenu() に reload-file は無い', () => {
+		for (const entry of [localFile, localSymlink, sshFile, { ...sshFile, kind: 'symlink' as const }]) {
+			expect(buildContextMenu(entry, entry.uri).some((i) => i.id === 'reload-folder'), entry.uri).toBe(false);
+		}
+		for (const dir of [localDir, sshDir]) {
+			expect(buildContextMenu(dir, dir.uri).some((i) => i.id === 'reload-file'), dir.uri).toBe(false);
+			expect(buildContextMenu(dir).some((i) => i.id === 'reload-file'), dir.uri).toBe(false);
+		}
+		expect(buildTreePaneMenu().some((i) => i.id === 'reload-file')).toBe(false);
+	});
+
+	test('6. 比べ方は文字列の一致(file:///r/a%20b.md の行に file:///r/a b.md を渡すと無効。同じ字面なら有効)', () => {
+		const encoded: ContextMenuEntry = { uri: 'file:///r/a%20b.md', name: 'a b.md', kind: 'file' };
+		expect(reloadFile(encoded, 'file:///r/a b.md')).toMatchObject({ id: 'reload-file', enabled: false });
+		expect(reloadFile(encoded, 'file:///r/a%20b.md')).toMatchObject({ id: 'reload-file', enabled: true });
+	});
+
+	test("7. ラベルは 'Reload File'。planContextAction('reload-file', entry) は { command: 'reload-file', uri: entry.uri }(local・ssh とも null にしない)", () => {
+		expect(reloadFile(localFile, localFile.uri)).toEqual({ id: 'reload-file', label: 'Reload File', enabled: true });
+		expect(reloadFile(sshFile)).toEqual({ id: 'reload-file', label: 'Reload File', enabled: false });
+		expect(planContextAction('reload-file', localFile)).toEqual({
+			command: 'reload-file',
+			uri: 'file:///Users/x/notes/plan.md',
+		});
+		expect(planContextAction('reload-file', localSymlink)).toEqual({
+			command: 'reload-file',
+			uri: 'file:///Users/x/notes/link',
+		});
+		expect(planContextAction('reload-file', sshFile)).toEqual({
+			command: 'reload-file',
+			uri: 'ssh://alice@host:22/srv/notes/plan.md',
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#80 — 「Reload Folder」(フォルダの行・空白・AC-80-15・契約 14)【(i)(m)(n)(p)(v) 決定】
+// ---------------------------------------------------------------------------
+
+describe('要件#80 AC-80-15: buildContextMenu(dir) / buildTreePaneMenu() — "Reload Folder"(契約 14)', () => {
+	// 要件#83 契約 7(2026-11-05 承認 3 の要件側更新): copy-path の直後に pin-to-bookmarks(常に有効)が増えて 6つ。
+	const DIR_IDS = ['reveal', 'open-in-new-window', 'reload-folder', 'copy-path', 'pin-to-bookmarks', 'duplicate-window'];
+
+	test('1. local のフォルダ → 6つ・この順・すべて有効', () => {
+		const items = buildContextMenu(localDir);
+		expect(items.map((i) => i.id)).toEqual(DIR_IDS);
+		expect(items.map((i) => i.enabled)).toEqual([true, true, true, true, true, true]);
+	});
+
+	test('2. ssh のフォルダ → 同じ6つで、enabled が [false, true, true, true, true, true]', () => {
+		const items = buildContextMenu(sshDir);
+		expect(items.map((i) => i.id)).toEqual(DIR_IDS);
+		expect(items.map((i) => i.enabled)).toEqual([false, true, true, true, true, true]);
+	});
+
+	test('3. フォルダの行は第2引数(開いている文書の URI)に左右されない(そのフォルダの URI・別の URI・省略・null で同じ)', () => {
+		const variants = [localDir.uri, 'file:///Users/x/notes/plan.md', undefined, null] as const;
+		const local = variants.map((v) => buildContextMenu(localDir, v));
+		const ssh = variants.map((v) => buildContextMenu(sshDir, v));
+		for (const items of local) {
+			expect(items.map((i) => i.id)).toEqual(DIR_IDS);
+			expect(items.map((i) => i.enabled)).toEqual([true, true, true, true, true, true]);
+		}
+		for (const items of ssh) {
+			expect(items.map((i) => i.id)).toEqual(DIR_IDS);
+			expect(items.map((i) => i.enabled)).toEqual([false, true, true, true, true, true]);
+		}
+	});
+
+	test("4. ラベルは 'Reload Folder'。planContextAction('reload-folder', dir) は { command: 'reload-folder', uri: dir.uri }(local・ssh とも null にしない)", () => {
+		expect(buildContextMenu(localDir).find((i) => i.id === 'reload-folder')).toEqual({
+			id: 'reload-folder',
+			label: 'Reload Folder',
+			enabled: true,
+		});
+		expect(buildContextMenu(sshDir).find((i) => i.id === 'reload-folder')).toEqual({
+			id: 'reload-folder',
+			label: 'Reload Folder',
+			enabled: true,
+		});
+		expect(planContextAction('reload-folder', localDir)).toEqual({
+			command: 'reload-folder',
+			uri: 'file:///Users/x/notes',
+		});
+		expect(planContextAction('reload-folder', sshDir)).toEqual({
+			command: 'reload-folder',
+			uri: 'ssh://alice@host:22/srv/notes',
+		});
+	});
+
+	test('5. buildTreePaneMenu() → [reload-folder "Reload Folder" 有効, duplicate-window "Duplicate Window" 有効](この順)', () => {
+		expect(buildTreePaneMenu()).toEqual([
+			{ id: 'reload-folder', label: 'Reload Folder', enabled: true },
+			{ id: 'duplicate-window', label: 'Duplicate Window', enabled: true },
+		]);
+	});
+
+	test('6. 全種(local / ssh × file / dir / symlink・空白)のラベルに CJK が無い', () => {
+		const cjk = /[　-〿぀-ヿ一-鿿＀-￯]/;
+		const entries: ContextMenuEntry[] = [
+			localFile,
+			localDir,
+			localSymlink,
+			sshFile,
+			sshDir,
+			{ ...sshFile, kind: 'symlink' },
+		];
+		const labels = [
+			...entries.flatMap((e) => buildContextMenu(e, e.uri).map((i) => i.label)),
+			...buildTreePaneMenu().map((i) => i.label),
+		];
+		expect(labels).toContain('Reload File');
+		expect(labels).toContain('Reload Folder');
+		for (const label of labels) expect(label).not.toMatch(cjk);
 	});
 });
 
@@ -712,5 +998,188 @@ describe('capability(src-tauri/capabilities/default.json)— opener permission',
 		expect(openUrl).toBeDefined();
 		const urls = (openUrl as { allow?: Array<{ url?: string }> }).allow?.map((a) => a.url);
 		expect(urls).toEqual(['https://*', 'http://*', 'mailto:*', 'tel:*']);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#83 — 「Pin to Bookmarks」(Explorer の行・本文=AC-83-22・契約 7)【(e) 決定・(ab) 決定】
+// ---------------------------------------------------------------------------
+
+describe('要件#83 AC-83-22: buildContextMenu(entry, openDocUri, pinned) / buildViewerMenu(pinned) — Pin / Unpin(契約 7)', () => {
+	const FILE_IDS = [
+		'reveal',
+		'open',
+		'open-with',
+		'open-in-new-tab',
+		'open-in-new-window',
+		'reload-file',
+		'copy-path',
+		'pin-to-bookmarks',
+		'duplicate-window',
+	];
+	const FILE_IDS_PINNED = FILE_IDS.map((id) => (id === 'pin-to-bookmarks' ? 'unpin-from-bookmarks' : id));
+	const DIR_IDS = ['reveal', 'open-in-new-window', 'reload-folder', 'copy-path', 'pin-to-bookmarks', 'duplicate-window'];
+	const DIR_IDS_PINNED = DIR_IDS.map((id) => (id === 'pin-to-bookmarks' ? 'unpin-from-bookmarks' : id));
+	const pinItem = (items: ReturnType<typeof buildContextMenu>) =>
+		items.find((i) => i.id === 'pin-to-bookmarks' || i.id === 'unpin-from-bookmarks');
+
+	test('1. local のファイル buildContextMenu(entry, entry.uri, false) → 9 つ・すべて有効。true → 同じ位置が unpin-from-bookmarks。省略= false', () => {
+		const items = buildContextMenu(localFile, localFile.uri, false);
+		expect(items.map((i) => i.id)).toEqual(FILE_IDS);
+		expect(items.every((i) => i.enabled)).toBe(true);
+		expect(items[7]).toMatchObject({ id: 'pin-to-bookmarks', label: 'Pin to Bookmarks', enabled: true });
+
+		const pinned = buildContextMenu(localFile, localFile.uri, true);
+		expect(pinned.map((i) => i.id)).toEqual(FILE_IDS_PINNED);
+		expect(pinned.every((i) => i.enabled)).toBe(true);
+		expect(pinned[7]).toMatchObject({ id: 'unpin-from-bookmarks', label: 'Unpin from Bookmarks', enabled: true });
+
+		expect(buildContextMenu(localFile, localFile.uri).map((i) => i.id)).toEqual(FILE_IDS);
+		expect(buildContextMenu(localFile).map((i) => i.id)).toEqual(FILE_IDS);
+		expect(buildContextMenu(localFile, null, undefined).map((i) => i.id)).toEqual(FILE_IDS);
+	});
+
+	test('2. local のフォルダ → 6 つ・すべて有効。true → unpin-from-bookmarks', () => {
+		const items = buildContextMenu(localDir, null, false);
+		expect(items.map((i) => i.id)).toEqual(DIR_IDS);
+		expect(items.every((i) => i.enabled)).toBe(true);
+		expect(items[4]).toMatchObject({ id: 'pin-to-bookmarks', label: 'Pin to Bookmarks', enabled: true });
+
+		const pinned = buildContextMenu(localDir, null, true);
+		expect(pinned.map((i) => i.id)).toEqual(DIR_IDS_PINNED);
+		expect(pinned.every((i) => i.enabled)).toBe(true);
+		expect(pinned[4]).toMatchObject({ id: 'unpin-from-bookmarks', label: 'Unpin from Bookmarks', enabled: true });
+		expect(buildContextMenu(localDir).map((i) => i.id)).toEqual(DIR_IDS);
+	});
+
+	test('3. ssh のファイル・フォルダ・シンボリックリンクでも Pin / Unpin は有効(位置も同じ)', () => {
+		const sshSymlink: ContextMenuEntry = { ...sshFile, kind: 'symlink' };
+		for (const entry of [sshFile, sshSymlink, localSymlink]) {
+			const items = buildContextMenu(entry, entry.uri, false);
+			expect(items.map((i) => i.id), entry.uri).toEqual(FILE_IDS);
+			expect(pinItem(items), entry.uri).toMatchObject({ id: 'pin-to-bookmarks', label: 'Pin to Bookmarks', enabled: true });
+			const pinned = buildContextMenu(entry, entry.uri, true);
+			expect(pinned.map((i) => i.id), entry.uri).toEqual(FILE_IDS_PINNED);
+			expect(pinItem(pinned), entry.uri).toMatchObject({ id: 'unpin-from-bookmarks', label: 'Unpin from Bookmarks', enabled: true });
+		}
+		expect(buildContextMenu(sshDir, null, false).map((i) => i.id)).toEqual(DIR_IDS);
+		expect(pinItem(buildContextMenu(sshDir, null, false))).toMatchObject({ id: 'pin-to-bookmarks', label: 'Pin to Bookmarks', enabled: true });
+		expect(buildContextMenu(sshDir, null, true).map((i) => i.id)).toEqual(DIR_IDS_PINNED);
+		expect(pinItem(buildContextMenu(sshDir, null, true))).toMatchObject({ id: 'unpin-from-bookmarks', label: 'Unpin from Bookmarks', enabled: true });
+		// ssh の reveal / open / open-with の無効は今のまま(第3引数に左右されない)。
+		expect(buildContextMenu(sshFile, sshFile.uri, true).map((i) => i.enabled)).toEqual([false, false, false, true, true, true, true, true, true]);
+	});
+
+	test('4. buildTreePaneMenu() は今の 2 つのまま(Pin が無い)', () => {
+		expect(buildTreePaneMenu()).toEqual([
+			{ id: 'reload-folder', label: 'Reload Folder', enabled: true },
+			{ id: 'duplicate-window', label: 'Duplicate Window', enabled: true },
+		]);
+		expect(buildTreePaneMenu().some((i) => i.id === 'pin-to-bookmarks' || i.id === 'unpin-from-bookmarks')).toBe(false);
+	});
+
+	test("5. buildViewerMenu(false) → [reload-file, pin-to-bookmarks]。true → 2 つ目が unpin-from-bookmarks。省略= false", () => {
+		expect(buildViewerMenu(false)).toHaveLength(2);
+		expect(buildViewerMenu(false)).toMatchObject([
+			{ id: 'reload-file', label: 'Reload File', enabled: true },
+			{ id: 'pin-to-bookmarks', label: 'Pin to Bookmarks', enabled: true },
+		]);
+		expect(buildViewerMenu(true)).toHaveLength(2);
+		expect(buildViewerMenu(true)).toMatchObject([
+			{ id: 'reload-file', label: 'Reload File', enabled: true },
+			{ id: 'unpin-from-bookmarks', label: 'Unpin from Bookmarks', enabled: true },
+		]);
+		expect(buildViewerMenu()).toEqual(buildViewerMenu(false));
+		// 区切り線の印は付けない(今の規則=Duplicate Window の前だけ)。
+		for (const item of [...buildViewerMenu(false), ...buildContextMenu(localFile, localFile.uri, true)]) {
+			expect(item.separatorBefore ?? false, item.id).toBe(false);
+		}
+	});
+
+	test("6. planContextAction('pin-to-bookmarks', file) → { command: 'pin-bookmark', uri, kind: 'file' }・フォルダ → 'folder'・symlink → 'file'・unpin → { command: 'unpin-bookmark', uri }。ssh でも null にしない", () => {
+		expect(planContextAction('pin-to-bookmarks', localFile)).toEqual({ command: 'pin-bookmark', uri: localFile.uri, kind: 'file' });
+		expect(planContextAction('pin-to-bookmarks', localDir)).toEqual({ command: 'pin-bookmark', uri: localDir.uri, kind: 'folder' });
+		expect(planContextAction('pin-to-bookmarks', localSymlink)).toEqual({ command: 'pin-bookmark', uri: localSymlink.uri, kind: 'file' });
+		expect(planContextAction('pin-to-bookmarks', sshFile)).toEqual({ command: 'pin-bookmark', uri: sshFile.uri, kind: 'file' });
+		expect(planContextAction('pin-to-bookmarks', sshDir)).toEqual({ command: 'pin-bookmark', uri: sshDir.uri, kind: 'folder' });
+		expect(planContextAction('pin-to-bookmarks', { ...sshFile, kind: 'symlink' })).toEqual({ command: 'pin-bookmark', uri: sshFile.uri, kind: 'file' });
+		expect(planContextAction('unpin-from-bookmarks', localFile)).toEqual({ command: 'unpin-bookmark', uri: localFile.uri });
+		expect(planContextAction('unpin-from-bookmarks', localDir)).toEqual({ command: 'unpin-bookmark', uri: localDir.uri });
+		expect(planContextAction('unpin-from-bookmarks', sshFile)).toEqual({ command: 'unpin-bookmark', uri: sshFile.uri });
+		expect(planContextAction('unpin-from-bookmarks', sshDir)).toEqual({ command: 'unpin-bookmark', uri: sshDir.uri });
+		// URI は変形しない(符号化も復号もしない)。
+		const encoded: ContextMenuEntry = { uri: 'file:///r/a%20b.md', name: 'a b.md', kind: 'file' };
+		expect(planContextAction('pin-to-bookmarks', encoded)).toEqual({ command: 'pin-bookmark', uri: 'file:///r/a%20b.md', kind: 'file' });
+	});
+
+	test('7. ラベルは英語(CJK なし)・既存の項目の相対の並びは変わらない(Duplicate Window は末尾のまま)', () => {
+		const cjk = /[　-〿぀-ヿ一-鿿＀-￯]/;
+		const entries: ContextMenuEntry[] = [localFile, localDir, localSymlink, sshFile, sshDir, { ...sshFile, kind: 'symlink' }];
+		for (const e of entries) {
+			for (const pinned of [false, true]) {
+				const items = buildContextMenu(e, e.uri, pinned);
+				for (const item of items) expect(item.label).not.toMatch(cjk);
+				expect(items[items.length - 1]!.id).toBe('duplicate-window');
+				const copyIdx = items.findIndex((i) => i.id === 'copy-path');
+				expect(items[copyIdx + 1]!.id).toBe(pinned ? 'unpin-from-bookmarks' : 'pin-to-bookmarks');
+				expect(items[copyIdx + 2]!.id).toBe('duplicate-window');
+			}
+		}
+		for (const item of [...buildViewerMenu(false), ...buildViewerMenu(true)]) expect(item.label).not.toMatch(cjk);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 要件#83 — Dashboard の右クリック(AC-83-23・契約 14)【(f)(n) 決定・(ae) 決定】
+// ---------------------------------------------------------------------------
+
+describe('要件#83 AC-83-23: buildBookmarkTileMenu / buildRecentFolderMenu / buildAddBookmarkMenu(契約 14)', () => {
+	const TILE_IDS = ['dashboard-open', 'dashboard-open-in-new-window', 'move-up', 'move-down', 'unpin-from-bookmarks'];
+	const TILE_LABELS = ['Open', 'Open in New Window', 'Move Up', 'Move Down', 'Unpin from Bookmarks'];
+
+	test('タイル: id・ラベル・move-up と unpin-from-bookmarks の前に区切りの印', () => {
+		const items = buildBookmarkTileMenu(1, 3);
+		expect(items.map((i) => i.id)).toEqual(TILE_IDS);
+		expect(items.map((i) => i.label)).toEqual(TILE_LABELS);
+		expect(items.map((i) => i.separatorBefore ?? false)).toEqual([false, false, true, false, true]);
+		expect(items.map((i) => i.enabled)).toEqual([true, true, true, true, true]);
+	});
+
+	test('タイル: index 0 → move-up 無効・末尾 → move-down 無効・1 件 → 両方無効(ほかは有効)', () => {
+		expect(buildBookmarkTileMenu(0, 3).map((i) => i.enabled)).toEqual([true, true, false, true, true]);
+		expect(buildBookmarkTileMenu(2, 3).map((i) => i.enabled)).toEqual([true, true, true, false, true]);
+		expect(buildBookmarkTileMenu(0, 1).map((i) => i.enabled)).toEqual([true, true, false, false, true]);
+		expect(buildBookmarkTileMenu(0, 3).map((i) => i.id)).toEqual(TILE_IDS);
+	});
+
+	test('Recent Folders の行: Open・Open in New Window / Pin to Bookmarks(済みなら Unpin) / Remove from Recent Folders', () => {
+		const fresh = buildRecentFolderMenu(false);
+		expect(fresh.map((i) => i.id)).toEqual(['dashboard-open', 'dashboard-open-in-new-window', 'pin-to-bookmarks', 'remove-from-recent-folders']);
+		expect(fresh.map((i) => i.label)).toEqual(['Open', 'Open in New Window', 'Pin to Bookmarks', 'Remove from Recent Folders']);
+		expect(fresh.map((i) => i.separatorBefore ?? false)).toEqual([false, false, true, true]);
+		expect(fresh.every((i) => i.enabled)).toBe(true);
+
+		const pinned = buildRecentFolderMenu(true);
+		expect(pinned.map((i) => i.id)).toEqual(['dashboard-open', 'dashboard-open-in-new-window', 'unpin-from-bookmarks', 'remove-from-recent-folders']);
+		expect(pinned.map((i) => i.label)).toEqual(['Open', 'Open in New Window', 'Unpin from Bookmarks', 'Remove from Recent Folders']);
+		expect(pinned.map((i) => i.separatorBefore ?? false)).toEqual([false, false, true, true]);
+		expect(pinned.every((i) => i.enabled)).toBe(true);
+	});
+
+	test("Add Bookmark…: add-folder-bookmark 'Add Folder…'・add-file-bookmark 'Add File…'(区切りなし・有効)", () => {
+		expect(buildAddBookmarkMenu()).toHaveLength(2);
+		expect(buildAddBookmarkMenu()).toMatchObject([
+			{ id: 'add-folder-bookmark', label: 'Add Folder…', enabled: true },
+			{ id: 'add-file-bookmark', label: 'Add File…', enabled: true },
+		]);
+	});
+
+	test('Dashboard のメニューのラベルに CJK が無い・既存のメニューに区切りの印は無い(今の線の規則のまま)', () => {
+		const cjk = /[　-〿぀-ヿ一-鿿＀-￯]/;
+		const all = [...buildBookmarkTileMenu(0, 2), ...buildRecentFolderMenu(false), ...buildRecentFolderMenu(true), ...buildAddBookmarkMenu()];
+		for (const item of all) expect(item.label).not.toMatch(cjk);
+		for (const item of [...buildContextMenu(localFile, localFile.uri), ...buildContextMenu(localDir), ...buildTreePaneMenu()]) {
+			expect(item.separatorBefore ?? false, item.id).toBe(false);
+		}
 	});
 });

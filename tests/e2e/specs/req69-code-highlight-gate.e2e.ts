@@ -321,14 +321,46 @@ async function preStyle(): Promise<{ pre: Record<string, string>; code: Record<s
 }
 
 /**
+ * Wait until fences.md is the document on screen and the fence holding
+ * `marker` is coloured: the body's `<h1>` reads "Fences" (fences.md's own
+ * heading; a code file has none) and a `<pre>` that is not the code file's
+ * own holds `marker` with at least one coloured span. The code file's `<pre>`
+ * is tagged by `markCurrentPre` before the click: it holds the same text, so a
+ * bare "some `<pre>` has the marker" wait is satisfied by it while the view is
+ * still switching, and the measurement that follows can land on the moment
+ * neither document is in the DOM (Issue #768, `fenceChars 0`).
+ */
+async function waitForFence(marker: string, fence: string): Promise<void> {
+	await browser.waitUntil(
+		async () =>
+			browser.execute(
+				(body, m) => {
+					if ((document.querySelector(`${body} h1`)?.textContent ?? '') !== 'Fences') return false;
+					const pre = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre:not([data-gate-old])`)).find((p) =>
+						(p.textContent ?? '').includes(m),
+					);
+					return !!pre && pre.querySelector('span[style*="color"]') !== null;
+				},
+				BODY,
+				marker,
+			),
+		{ timeout: 15_000, timeoutMsg: `fence for ${fence} not rendered in fences.md` },
+	);
+}
+
+/**
  * Per non-whitespace character: [char, colour] for the `<pre>` that contains
- * `marker` (the file view's `<pre>` when `marker` is null).
+ * `marker` (the file view's `<pre>` when `marker` is null). With a marker, a
+ * `<pre>` tagged by `markCurrentPre` (the previous document's) is skipped.
  */
 async function charColours(marker: string | null): Promise<Array<[string, string]>> {
 	const pairs: string[][] = await browser.execute(
 		(body, m) => {
 			const pres = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre`));
-			const pre = m === null ? pres[0] : pres.find((p) => (p.textContent ?? '').includes(m));
+			const pre =
+				m === null
+					? pres[0]
+					: pres.find((p) => !p.hasAttribute('data-gate-old') && (p.textContent ?? '').includes(m));
 			if (!pre) return [];
 			const out: string[][] = [];
 			const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT);
@@ -525,12 +557,12 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 			const fileColours = await charColours(null);
 			await shot(`req69-gate1-${key}`);
 
+			// Tag the code file's `<pre>` so neither the wait nor the measurement
+			// can take it for the fence (Issue #768).
+			await markCurrentPre();
 			await clickExplorerRow(uri(path.join(gateDir, 'fences.md')));
 			const marker = s.code.split('\n').find((l) => l.trim().length > 12)!.trim();
-			await browser.waitUntil(
-				async () => (await charColours(marker)).length > 0,
-				{ timeout: 15_000, timeoutMsg: `fence for ${s.fence} not rendered` },
-			);
+			await waitForFence(marker, s.fence);
 			const fenceColours = await charColours(marker);
 			const diffs = fileColours
 				.map(([ch, c], i) => ({ i, ch, file: c, fence: fenceColours[i]?.[1], fenceCh: fenceColours[i]?.[0] }))
@@ -710,8 +742,14 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		expect((eq.coloured as { highlights: number }).highlights).toBe((eq.plain as { highlights: number }).highlights + 1);
 
 		// Legibility: each token colour against the find highlight colours.
+		// 要件56 の見た目に合わせた(2026-11-06 由谷承認): the `::highlight()` rules
+		// now say `background-color: var(--color-find-match)` instead of a literal
+		// colour, so a `var(--name)` is resolved through the root's computed custom
+		// properties (following nested var() references). A value that cannot be
+		// resolved is kept as read, listed under `unresolved` in the report, and
+		// left out of the contrast table rather than thrown on.
 		const hl = await browser.execute(() => {
-			const out: Record<string, string> = {};
+			const raw: Record<string, string> = {};
 			for (const sheet of Array.from(document.styleSheets)) {
 				let rules: CSSRuleList;
 				try {
@@ -721,10 +759,24 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 				}
 				for (const r of Array.from(rules)) {
 					const m = /::highlight\((vellis-find(?:-current)?)\)\s*\{[^}]*background-color:\s*([^;}]+)/.exec(r.cssText);
-					if (m) out[m[1]!] = m[2]!.trim();
+					if (m) raw[m[1]!] = m[2]!.trim();
 				}
 			}
-			return out;
+			const cs = getComputedStyle(document.documentElement);
+			const resolve = (value: string): string => {
+				let v = value;
+				for (let i = 0; i < 8; i++) {
+					const m = /^var\(\s*(--[\w-]+)\s*(?:,\s*([^)]*))?\)$/.exec(v);
+					if (!m) return v;
+					const next = cs.getPropertyValue(m[1]!).trim() || (m[2] ?? '').trim();
+					if (!next) return v;
+					v = next;
+				}
+				return v;
+			};
+			const resolved: Record<string, string> = {};
+			for (const [name, value] of Object.entries(raw)) resolved[name] = resolve(value);
+			return { raw, resolved };
 		});
 		await openFile(path.join(gateDir, 'sample.ts'), samples.ts!.code.length + 'export const added = 42; // saved by the gate check\n'.length);
 		const tokenColours = await browser.execute((body) => {
@@ -734,13 +786,23 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 			}
 			return Array.from(set);
 		}, BODY);
-		const legibility = Object.fromEntries(
-			Object.entries(hl).map(([name, bg]) => [
-				name,
-				Object.fromEntries(tokenColours.map((c) => [c, contrastRatio(c, bg)])),
-			]),
-		);
-		report(REPORT, { gate: '69-4-find', results, highlightColours: hl, contrastTokenVsHighlight: legibility });
+		const unresolved: Record<string, string> = {};
+		const legibility: Record<string, Record<string, number>> = {};
+		for (const [name, bg] of Object.entries(hl.resolved)) {
+			try {
+				legibility[name] = Object.fromEntries(tokenColours.map((c) => [c, contrastRatio(c, bg)]));
+			} catch {
+				unresolved[name] = hl.raw[name] ?? bg;
+			}
+		}
+		report(REPORT, {
+			gate: '69-4-find',
+			results,
+			highlightColours: hl.resolved,
+			highlightColoursRaw: hl.raw,
+			unresolved,
+			contrastTokenVsHighlight: legibility,
+		});
 	});
 
 	it('gate 4: viewer zoom scales the coloured <pre> without re-rendering it', async () => {

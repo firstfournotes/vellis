@@ -5,6 +5,8 @@
  * 発見: backlog 242 の修正時の reviewer P3。Markdown / テキストのソース編集中・ブロック編集中に
  * 印刷すると、編集中の印(ソース編集の青い縦帯 `box-shadow: inset 3px 0 0 #93c5fd`・ブロック編集の
  * 枠 `outline: 2px solid #93c5fd`)が `print-color-adjust: exact` で紙に残る。
+ * (要件#56 第2段・2026-11-03 要件側更新: 印の色は `#93c5fd` の直書きから `var(--color-focus-ring)` に
+ * 変わる=契約 2 のハードコード色ゼロ。下の (c) の期待値も同じ。規則の数・セレクタ・置き場の判定は不変)
  *
  * 判断(要件側): 紙に載せるのは今のまま「画面の本文」(ソース編集中はソース・ブロック編集中は
  * 編集中の中身=要件#48 契約②)。編集中の**印だけ**を紙から消す。
@@ -15,10 +17,10 @@
  * 2. 不変: 画面の印(印刷のとき以外は今のまま)・紙に載る中身・ほかの印刷の規則
  *
  * ## 画面の印の規則(Viewer.svelte の `<style>`・本テストが比較の基準にするもの)
- * - ソース編集: `.vellis-plaintext[contenteditable='true'] { outline: none; box-shadow: inset 3px 0 0 #93c5fd }`
+ * - ソース編集: `.vellis-plaintext[contenteditable='true'] { outline: none; box-shadow: inset 3px 0 0 var(--color-focus-ring) }`
  *   (要件#48 契約②。要素は `.markdown-body` の中の `<pre class="vellis-plaintext" contenteditable="true">`
  *   = Viewer.svelte の sourceEditing 分岐)
- * - ブロック編集: `.markdown-body :global([contenteditable='true']) { outline: 2px solid #93c5fd; outline-offset: 2px; border-radius: 2px }`
+ * - ブロック編集: `.markdown-body :global([contenteditable='true']) { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; border-radius: 2px }`
  *   (要件#49 契約①。要素は `.markdown-body` の中で `setAttribute('contenteditable', 'true')` された
  *   ブロック 1 つ= 段落・フェンス・入れ子のブロックなど)
  * - Svelte 5 は scoped な規則に `.svelte-xxxx` を **1 回だけ**足す(2 回目以降は `:where()` で
@@ -754,14 +756,14 @@ const EXPECTED_VIEWER_MARK_RULES: ViewerMarkRule[] = [
 		atRules: [],
 		declarations: sortDecls([
 			{ prop: 'outline', value: 'none' },
-			{ prop: 'box-shadow', value: 'inset 3px 0 0 #93c5fd' },
+			{ prop: 'box-shadow', value: 'inset 3px 0 0 var(--color-focus-ring)' },
 		]),
 	},
 	{
 		selector: VIEWER_BLOCK_EDIT_SELECTOR,
 		atRules: [],
 		declarations: sortDecls([
-			{ prop: 'outline', value: '2px solid #93c5fd' },
+			{ prop: 'outline', value: '2px solid var(--color-focus-ring)' },
 			{ prop: 'outline-offset', value: '2px' },
 			{ prop: 'border-radius', value: '2px' },
 		]),

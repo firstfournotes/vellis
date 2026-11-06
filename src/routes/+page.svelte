@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, tick, untrack } from 'svelte';
+	import { flushSync, onMount, tick, untrack } from 'svelte';
 	import Explorer from '../components/Explorer.svelte';
 	import FindInFolder from '../components/FindInFolder.svelte';
 	import RecentFiles from '../components/RecentFiles.svelte';
@@ -16,7 +16,7 @@
 	import MarkList from '../components/MarkList.svelte';
 	import ProvenancePanel from '../components/ProvenancePanel.svelte';
 	import DiffView from '../components/DiffView.svelte';
-	import RootPicker from '../components/RootPicker.svelte';
+	import Dashboard from '../components/Dashboard.svelte';
 	import UpdateBanner from '../components/UpdateBanner.svelte';
 	import { invoke } from '$lib/ipc';
 	import { listen } from '$lib/events';
@@ -39,14 +39,12 @@
 	} from '$lib/pane-resize';
 	import {
 		initWindowOrPicker,
-		loadHistory,
 		openFolderFailedMessage,
-		openHistoryEntry,
 		pickFolderAndSetRoot,
-		toPickerEntries,
-		versionAfterFailedInit,
-		type RootPickerEntry
+		versionAfterFailedInit
 	} from '$lib/root-picker';
+	import { registerDashboardListener, toggleDashboard } from '$lib/dashboard';
+	import { bookmarks } from '../stores/bookmarks.svelte';
 	import { getBuildInfo } from '$lib/buildInfo';
 	import {
 		clearSnapshot,
@@ -58,7 +56,8 @@
 	import {
 		SELECT_FOLDER_DIALOG_TITLE,
 		openFailedMessage,
-		registerMenuOpenListeners
+		registerMenuOpenListeners,
+		runMenuOpen
 	} from '$lib/menu-open';
 	import {
 		duplicateWindow,
@@ -81,6 +80,12 @@
 		shouldShowRecentFiles
 	} from '$lib/recent-files';
 	import { SETTINGS_CHANGED_EVENT, reloadTree } from '$lib/settings';
+	import {
+		createFileReloader,
+		registerReloadFileListener,
+		viewerContextMenuMode
+	} from '$lib/reload-file';
+	import { contextMenu } from '../stores/context-menu.svelte';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { registerRootSwitchRequestListener, switchRootConfirmed } from '$lib/root-switch-request';
 	import { handleCloseRequested } from '$lib/close-window';
@@ -103,10 +108,131 @@
 	} from '$lib/video-provenance';
 	import type { BuiltAnchor } from '../markdown/selection';
 	import type { Mark } from '$lib/annotation';
+	import {
+		DEFAULT_CODE_THEMES,
+		applyTheme,
+		codeThemeFor,
+		registerThemeChangedListener,
+		type ResolvedTheme
+	} from '$lib/theme';
+	import { effectiveMode, registerUiChromeListeners, restoreUiChrome } from '$lib/ui-chrome';
+	import type { PageData } from './$types';
 	import '../styles/theme.css';
 	import '../styles/app.css';
 	import '../styles/markdown.css';
 	import '../styles/print.css';
+
+	let { data }: { data: PageData } = $props();
+
+	// --- Theme and mode (要件#56 契約 3・4) ----------------------------------
+	// The mode (<html data-theme>) and the full-width switch (<html data-doc-measure>)
+	// are put back from localStorage before anything is drawn, so the first paint
+	// already has them. Choosing, saving and following other windows live in
+	// `$lib/ui-chrome`; the theme itself (resolved in Rust) in `$lib/theme`.
+	restoreUiChrome();
+
+	// The resolved theme now in effect. `null` = the Default of theme.css
+	// (`get_theme` was unavailable). Not drawn from, so not `$state`.
+	let currentTheme: ResolvedTheme | null = untrack(() => data.theme);
+
+	// The theme goes into a `vellis-theme` style element of its own, appended as
+	// the last one of the head so it wins over theme.css (判断 (k)). Written here,
+	// before the component is drawn, so the first paint carries it (判断 (j)).
+	if (currentTheme) applyTheme(currentTheme);
+
+	// While a main-frame print is being prepared and runs, code is coloured with the
+	// Default light theme: the paper is light whatever the mode (判断 (p)).
+	let printingCode = false;
+
+	/** The Shiki theme for the current theme and effective mode (判断 (n)(o)). */
+	function pickCodeTheme(): string {
+		if (printingCode) return DEFAULT_CODE_THEMES.light;
+		const mode = effectiveMode();
+		return currentTheme ? codeThemeFor(currentTheme, mode) : DEFAULT_CODE_THEMES[mode];
+	}
+
+	// Read by the render effect below: a change re-renders the document's code
+	// (fences and code files) in the new theme. An unchanged name re-renders nothing.
+	let codeTheme = $state(pickCodeTheme());
+
+	/** Redraw the code highlighting when the theme or the effective mode changed. */
+	function redrawCodeHighlight() {
+		codeTheme = pickCodeTheme();
+	}
+
+	/**
+	 * Before File ▸ Print… of a Markdown or text document (判断 (p)): redraw the code
+	 * in the light theme and wait until it is on screen, so the paper gets it; put
+	 * the screen's colours back once printing ends. theme.css carries the light
+	 * token values for print on its own.
+	 */
+	async function redrawCodeHighlightForPrint(): Promise<void> {
+		printingCode = true;
+		const before = codeTheme;
+		redrawCodeHighlight();
+		if (codeTheme === before) {
+			printingCode = false;
+			return;
+		}
+		flushSync();
+		await pendingRender;
+		flushSync();
+		afterPrinting(() => {
+			printingCode = false;
+			redrawCodeHighlight();
+		});
+	}
+
+	/**
+	 * Call `onEnd` once printing is over: on `afterprint`, or when the `print`
+	 * media query stops matching (the way WebKit reports the end of printing), or
+	 * — should neither come — at the first key or click in the window, which the
+	 * print sheet blocks while it is up.
+	 */
+	function afterPrinting(onEnd: () => void): void {
+		const query = typeof window.matchMedia === 'function' ? window.matchMedia('print') : null;
+		let ended = false;
+		const onQuery = (e: MediaQueryListEvent) => {
+			if (!e.matches) end();
+		};
+		const end = () => {
+			if (ended) return;
+			ended = true;
+			window.removeEventListener('afterprint', end);
+			window.removeEventListener('pointerdown', end, true);
+			window.removeEventListener('keydown', end, true);
+			query?.removeEventListener('change', onQuery);
+			onEnd();
+		};
+		window.addEventListener('afterprint', end);
+		window.addEventListener('pointerdown', end, true);
+		window.addEventListener('keydown', end, true);
+		query?.addEventListener('change', onQuery);
+	}
+
+	// The theme is rewritten whenever Rust broadcasts `theme_changed`; the mode
+	// switches and OS appearance changes only ask for the code to be redrawn. Kept
+	// free of `await` so the cleanup is returned to Svelte.
+	onMount(() => {
+		const unlisteners: Array<() => void> = [];
+		let disposed = false;
+		const keep = (off: () => void) => {
+			if (disposed) off();
+			else unlisteners.push(off);
+		};
+		void registerThemeChangedListener((theme) => {
+			currentTheme = theme;
+			applyTheme(theme);
+			redrawCodeHighlight();
+		}).then(keep);
+		void registerUiChromeListeners({
+			onEffectiveModeChange: () => redrawCodeHighlight()
+		}).then(keep);
+		return () => {
+			disposed = true;
+			for (const off of unlisteners) off();
+		};
+	});
 
 	let showMarks = $state(false);
 	let markFilter = $state<MarkFilterMode>('all');
@@ -131,13 +257,16 @@
 		open: false,
 		mark: null,
 	});
-	// History picker screen (要件#4): shown instead of the normal body when
-	// the app was launched without a path / root argument.
+	// The Dashboard (要件#83 — it replaced the history picker of 要件#4): shown instead of
+	// the normal body when the app was launched without a path / root argument, and
+	// whenever Go ▸ Dashboard swaps the window's view for it. `returnable` = there is a
+	// root the user chose behind it to go back to (Go ▸ Dashboard / Escape, 契約4).
+	// The launch's, a failed init's and New Window's Dashboard cannot go back (w).
 	let rootPicker = $state<{
 		open: boolean;
-		entries: RootPickerEntry[];
+		returnable: boolean;
 		error: string | null;
-	}>({ open: false, entries: [], error: null });
+	}>({ open: false, returnable: false, error: null });
 	// 要件#14: 新版の告知バナー。null = 出ていない。ウインドウごとの state
 	// なので、閉じるのはこの窓のバナーだけ(他の窓は出たまま)。保存しない
 	// ので、次回起動時のチェックでまた出る。
@@ -218,8 +347,10 @@
 
 	// いま表示しているのがズーム対象のビューアか(契約①⑧)。文書を開いていない
 	// (履歴選択画面・EmptyState)ときも対象外で、⌘+ / ⌘− / ⌘0 は何もしない。
+	// 要件#83 契約15: Dashboard の間は画面に文書が無いので、後ろの文書もズームしない。
 	let zoomTarget = $derived(
-		windowState.currentDocument !== null &&
+		!rootPicker.open &&
+			windowState.currentDocument !== null &&
 			isZoomTarget(detectFileType(windowState.currentDocument.uri))
 	);
 
@@ -311,6 +442,8 @@
 	let findInitialIndex = $state(0);
 
 	function handleMenuFind() {
+		// 要件#83 契約15: Dashboard の間は探す文書が画面に無い。
+		if (rootPicker.open) return;
 		if (windowState.editMode !== 'view') return;
 		const doc = windowState.currentDocument;
 		if (!doc || detectFileType(doc.uri) !== 'html') return;
@@ -722,6 +855,7 @@
 			// 「文書あり」を確かめるので、ここで空になるのは行き違いのときだけ。
 			getDocumentUri: () => windowState.currentDocument?.uri ?? '',
 			canPrint: () => isPrintAvailable(windowState.currentDocument, rootPicker.open),
+			beforeMainFramePrint: redrawCodeHighlightForPrint,
 			onError: (err) => alert(printFailedMessage(err))
 		}).then((off) => {
 			if (disposed) off();
@@ -766,6 +900,8 @@
 	// アプリまで届かない)。編集に入れない文書では beginEdit が false を返して
 	// 何も起きない。
 	async function toggleEditMode() {
+		// 要件#83 契約15 (y): Dashboard の間は後ろの文書を編集の面にしない(Save だけは効く)。
+		if (rootPicker.open) return;
 		if (windowState.editMode !== 'edit') {
 			windowState.beginEdit();
 			return;
@@ -861,6 +997,105 @@
 			unlisten?.();
 		};
 	});
+
+	// --- Reload File(要件#80) ------------------------------------------------
+	// View ▸ Reload File(Command + R)・本文の右クリック・Explorer のファイルの行の右クリックの
+	// 3 つの入口が、この窓に 1 つの実行列を呼ぶ。未保存の確認を通してから、開いたときと
+	// 同じ command で開き直し(監視も張り直される)、あわせてツリーを要件#65 の
+	// `reloadTree` で読み直す。手順そのものは `$lib/reload-file` の持ち場。
+
+	/**
+	 * 今の文書に外部変更が当たった回数(要件#80 契約 11)。`file_changed` の apply と
+	 * `binary_file_changed` の購読が進め、実行列が読み始めと読み終わりで比べる(読んでいる間に
+	 * 当たった変更のほうが新しいので、読み直しの結果を当てない)。描画には使わない。
+	 */
+	let documentChangeStamp = 0;
+
+	/** 表示中のバイナリの版数を 1 つ進める(`binary_file_changed` と Reload File の共通部=要件#22・#80)。 */
+	function bumpBinaryVersion(uri: string) {
+		binaryVersion =
+			binaryVersion.uri === uri
+				? { uri, version: binaryVersion.version + 1 }
+				: { uri, version: 1 };
+	}
+
+	const fileReloader = createFileReloader({
+		// 履歴選択画面では文書が無いのと同じ(何もしない=契約 2)。
+		current: () => (rootPicker.open ? null : (windowState.currentDocument?.uri ?? null)),
+		confirm: confirmDiscardEdits,
+		open: openForDisplay,
+		applyText: (doc) => windowState.applyReloadedText(doc),
+		bumpBinary: bumpBinaryVersion,
+		notify: (message) => alert(message),
+		changeStamp: () => documentChangeStamp,
+		refreshTree: () =>
+			reloadTree(windowState.root, windowState.expandedDirs, {
+				listDir: (uri) => invoke<Entry[]>('list_dir', { uri }),
+				apply: (uri, entries) => windowState.applyDirectoryEvent(uri, entries)
+			})
+	});
+
+	/** 3 つの入口の受け口。`target` は Explorer の行の URI(null=今の文書)。 */
+	function reloadCurrentFile(target: string | null = null) {
+		void fileReloader.reload(target);
+	}
+
+	// View ▸ Reload File。購読の解除があるので await を挟まない専用の onMount に分けている。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void registerReloadFileListener(() => fileReloader.reload()).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
+	/** 右クリックした場所が編集の面か(contenteditable の中・input・textarea=既定のメニューを残す)。 */
+	function isEditableTarget(target: Element | null): boolean {
+		if (!target) return false;
+		if (target instanceof HTMLElement && target.isContentEditable) return true;
+		return target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])') !== null;
+	}
+
+	/**
+	 * ボタンを押した時点の選択(要件#80 契約 8 の「文字を選んでいない」)。macOS の WebKit は
+	 * 文字の上の右クリックで、contextmenu を送る前にその語を選ぶので、contextmenu の時点の選択
+	 * では「利用者が選んでいたか」が分からない。押した時点の選択で判定する(押さずに来た
+	 * contextmenu=キーボードからは、今の選択)。
+	 */
+	let selectionAtPress: string | null = null;
+
+	function rememberSelectionAtPress() {
+		selectionAtPress = window.getSelection()?.toString() ?? '';
+	}
+
+	/**
+	 * 本文(閲覧面)の右クリック(要件#80 契約 8)。条件が揃うときだけ既定のメニューを止めて
+	 * 自前のメニュー(Reload File)を出す。揃わなければイベントに触らない(選択中の Copy・
+	 * 編集の面の Paste などの既定のメニューのまま)。中の部品が先に受けて止めた右クリック
+	 * (3D の描画面の右ドラッグ=パン)にも割り込まない。メニューを描く部品は Explorer の中に
+	 * あるので、Find in Folder のパネルを出している間は出さない(【(s) 決定】)。
+	 */
+	function handleViewerContextMenu(e: MouseEvent) {
+		const pressed = selectionAtPress;
+		selectionAtPress = null;
+		if (e.defaultPrevented) return;
+		const target = e.target instanceof Element ? e.target : null;
+		const mode = viewerContextMenuMode({
+			hasDocument: windowState.currentDocument !== null,
+			selectionText: pressed ?? window.getSelection()?.toString() ?? '',
+			targetEditable: isEditableTarget(target),
+			targetInModel: target?.closest('.model-stage') != null,
+			menuAvailable: !showFindInFolder
+		});
+		if (mode !== 'app') return;
+		e.preventDefault();
+		contextMenu.openViewerAt(e.clientX, e.clientY);
+	}
 
 	function handleRequestAddMark(anchor: BuiltAnchor) {
 		dialog = { open: true, anchor };
@@ -960,7 +1195,7 @@
 	 */
 	function applyRoot(res: RootPayload) {
 		windowState.applyRoot(res.root_uri, res.entries, res.document_retained);
-		rootPicker = { ...rootPicker, open: false, error: null };
+		rootPicker = { ...rootPicker, open: false, returnable: false, error: null };
 	}
 
 	/**
@@ -986,20 +1221,82 @@
 		else if (outcome.kind === 'failed') rootPicker = { ...rootPicker, error: outcome.message };
 	}
 
+	// --- Dashboard(要件#83) ----------------------------------------------------
+	// 開く列(確認 → set_root → 文書)は Dashboard が自分で回し、開けたものをここで画面へ移す。
+	// 出す・戻るの判定は `$lib/dashboard` の `toggleDashboard`(契約4)。
+
 	/**
-	 * Open a folder chosen from the history list. A stale entry (folder
-	 * moved or deleted) keeps the picker open with the reason shown, so
-	 * the user can pick another one.
+	 * Dashboard から開けた(契約5)。root が替わったら applyRoot(Dashboard も閉じる)、替わら
+	 * なければ閉じるだけ。文書を開いたら Recent Files の行と同じく祖先を展開して行へ運ぶ((z))。
 	 */
-	async function openFromHistory(uri: string) {
-		// 要件#48 契約④: 履歴からの root 切替も編集を捨てる操作。
-		if (!(await confirmDiscardEdits())) return;
-		try {
-			applyRoot(await openHistoryEntry<RootPayload>(uri));
-		} catch (err) {
-			rootPicker = { ...rootPicker, error: openFolderFailedMessage(err) };
+	function handleDashboardOpened(root: RootPayload | null, doc: DocumentPayload | null) {
+		if (root) applyRoot(root);
+		else closeDashboard();
+		if (doc) {
+			windowState.setDocument(doc);
+			void handleRecentFileOpened(doc.uri);
 		}
 	}
+
+	/**
+	 * root を表示している窓を Dashboard に入れ替える(契約4)。右クリックのメニューと Go to バーは
+	 * 閉じる(Explorer が消えた後に古いメニューや Escape を先に食う購読を残さない)。Find in Folder の
+	 * パネルと Recent Files の区画の開閉は保つ(戻ると元のまま)。
+	 */
+	function openDashboard() {
+		contextMenu.close();
+		closeGoTo();
+		rootPicker = { ...rootPicker, open: true, returnable: true, error: null };
+	}
+
+	/** 戻れる Dashboard を閉じて後ろの画面に戻る(root も文書も読み直さない)。 */
+	function closeDashboard() {
+		contextMenu.close();
+		rootPicker = { ...rootPicker, open: false, returnable: false, error: null };
+	}
+
+	/** Go ▸ Dashboard と Escape(契約4)。戻る先の無い Dashboard では何もしない((w))。 */
+	function handleDashboardTrigger(trigger: 'menu' | 'escape') {
+		const next = toggleDashboard({ open: rootPicker.open, returnable: rootPicker.returnable }, trigger);
+		if (next.open === rootPicker.open) return;
+		if (next.open) openDashboard();
+		else closeDashboard();
+	}
+
+	// Go ▸ Dashboard(Shift + Command + H)。購読の解除があるので await を挟まない専用の onMount。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void registerDashboardListener(() => handleDashboardTrigger('menu')).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	});
+
+	/**
+	 * Dashboard の Open…(要件#83 契約2)= File ▸ Open… と同じ手順(関門 → ダイアログ → ファイルの
+	 * 親を root に → 文書)。結果の移し方もメニューの購読(下の registerMenuOpenListeners)と同じ。
+	 */
+	function openFileFromDashboard() {
+		void runMenuOpen<RootPayload, DocumentPayload>('file', {
+			canProceed: confirmDiscardEdits,
+			onOpened: (opened) => {
+				applyRoot(opened.root);
+				if (opened.document) windowState.setDocument(opened.document);
+			},
+			onError: (err) => alert(openFailedMessage(err))
+		});
+	}
+
+	// 窓の Bookmark の一覧(要件#83 契約9)。起動時に 1 回読み、以後は `bookmarks_changed` で
+	// 置き換わる。Dashboard のタイルと、Explorer の行・本文の右クリックの Pin / Unpin が見る。
+	onMount(() => {
+		void bookmarks.init();
+	});
 
 	// 要件#11: File メニューの Open… / Open Folder…。ダイアログ・root の導出
 	// (ファイルなら親フォルダ)・コマンド列は `$lib/menu-open` の持ち場で、
@@ -1016,8 +1313,8 @@
 			// ダイアログを出す前に編集の始末を聞く。
 			canProceed: confirmDiscardEdits,
 			onOpened: (opened) => {
-				// applyRoot が履歴選択画面(要件#4)も閉じるので、選択中に
-				// メニューから開いた場合もそのまま本体へ移る。文書は root 切替の
+				// applyRoot が Dashboard(要件#83・旧 履歴選択画面=要件#4)も閉じるので、
+				// 出ている間にメニューから開いた場合もそのまま本体へ移る。文書は root 切替の
 				// 後に入れる(applyRoot は切替時に現在の文書を落とすため)。
 				// スナップショット(要件#10)は windowState を見ている $effect が拾う。
 				applyRoot(opened.root);
@@ -1154,7 +1451,10 @@
 	// 文書を開く・閉じる・消えるたびに Rust へ伝え、NSWindow の tab.title を差し替える
 	// (窓タイトルは root 名のまま=要件#17)。$derived で値が変わったときだけ呼ぶ
 	// (同じ文書の再読み込みでは呼ばない)。失敗は見出しが古いままになるだけなので黙る。
-	const tabTitleRoot = $derived(rootPicker.open ? null : windowState.root || null);
+	// 要件#83 契約15 (y): 戻れる Dashboard では後ろの root のまま(見出しを Dashboard に替えない)。
+	const tabTitleRoot = $derived(
+		rootPicker.open && !rootPicker.returnable ? null : windowState.root || null
+	);
 	const tabTitleDoc = $derived(windowState.currentDocument?.uri ?? null);
 	$effect(() => {
 		const root = tabTitleRoot;
@@ -1186,7 +1486,7 @@
 			// 本体へ移る(applyRoot が画面を閉じる)。
 			rootPicker = {
 				open: true,
-				entries: toPickerEntries(await loadHistory()),
+				returnable: false,
 				error: windowInit.message
 			};
 			// 要件#71 追補c(1)(backlog 290): init_window の version が無いので、選び直したあとの
@@ -1260,7 +1560,7 @@
 			if (shouldShowRootPicker(init.needs_root_selection, snapshot, restored?.ok === true)) {
 				rootPicker = {
 					open: true,
-					entries: toPickerEntries(await loadHistory()),
+					returnable: false,
 					error: null
 				};
 			}
@@ -1285,7 +1585,8 @@
 		// (Viewer が衝突表示を出す)。それ以外は従来どおり差し替わる。
 		await listen<FileChangedPayload>('file_changed', (e) => {
 			if (e.payload.uri === windowState.currentDocument?.uri) {
-				windowState.applyFileChanged(e.payload);
+				// 要件#80 契約 11: 当たった外部変更を数える(読み直しの最中なら、その結果は当てない)。
+				if (windowState.applyFileChanged(e.payload) === 'apply') documentChangeStamp += 1;
 			}
 		});
 
@@ -1295,10 +1596,9 @@
 		// 持つ — 別のファイルへ移れば版数0の素の URI に戻る。
 		await listen<BinaryFileChangedPayload>('binary_file_changed', (e) => {
 			if (e.payload.uri !== windowState.currentDocument?.uri) return;
-			binaryVersion =
-				binaryVersion.uri === e.payload.uri
-					? { uri: e.payload.uri, version: binaryVersion.version + 1 }
-					: { uri: e.payload.uri, version: 1 };
+			// 要件#80 契約 11: 読み直しの最中なら、その結果で版数を重ねて進めない。
+			documentChangeStamp += 1;
+			bumpBinaryVersion(e.payload.uri);
 		});
 
 		// File removed event(ラスタ画像も同じ経路で表示が閉じる=要件#22 ②)。
@@ -1346,6 +1646,9 @@
 		if (startupOpenFailure !== null) alert(startupOpenFailure);
 	});
 
+	// The render the effect below started last (awaited before printing, 判断 (p)).
+	let pendingRender: Promise<void> = Promise.resolve();
+
 	// Build the viewer body whenever the active document changes.
 	// `renderForDisplay` dispatches on file type (要件#2): Markdown goes
 	// through the unified pipeline, text files are shown verbatim as plain
@@ -1362,8 +1665,13 @@
 		// 要件#36 ⑥: HTML のズームは srcdoc に焼き込むしかない(sandbox の
 		// 不透明オリジンには外から style を差せない)ので、倍率が変われば作り直す。
 		// 他の型はここで倍率を読まない = 拡大縮小しても再レンダーは走らない。
-		const zoom = detectFileType(uri) === 'html' ? zoomLevel : undefined;
-		renderForDisplay(uri, content, zoom).then((result) => {
+		const type = detectFileType(uri);
+		const zoom = type === 'html' ? zoomLevel : undefined;
+		// 要件#56 契約 3: only Markdown fences and code files are coloured by Shiki, so
+		// only they re-render when the code theme changes (an HTML preview would
+		// otherwise rebuild its srcdoc for nothing).
+		const code = type === 'markdown' || type === 'text' ? codeTheme : undefined;
+		pendingRender = renderForDisplay(uri, content, zoom, code).then((result) => {
 			windowState.setRenderResult(uri, result);
 		});
 	});
@@ -1459,6 +1767,41 @@
 	});
 </script>
 
+<!--
+	アイコンの字形(要件#56 契約 5・判断 (i))。正本はモック docs/review/ui-mock.html の symbol で、
+	使うものだけをそのまま写す(字形を変えるならモックと一緒に)。各コンポーネントは
+	`Icon.svelte` から名前で参照する。画面には場所を取らず、読み上げにも出さない。
+-->
+<svg class="icon-sprite" aria-hidden="true" width="0" height="0" style="position:absolute">
+	<symbol id="i-chev-d" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></symbol>
+	<symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+	<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+	<symbol id="i-arrow-u" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+	<symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+	<symbol id="i-zoom-in" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5M11 8.5v5"/></symbol>
+	<symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5"/></symbol>
+	<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 20h14"/></symbol>
+	<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+	<symbol id="i-folder-open" viewBox="0 0 24 24"><path d="M3.5 17V7.5a2 2 0 0 1 2-2h3.6l2 2h6.4a2 2 0 0 1 2 2v1"/><path d="M3.5 17l2.2-5.6a1.5 1.5 0 0 1 1.4-.9h13a1 1 0 0 1 .9 1.4l-2 4.9a2 2 0 0 1-1.8 1.2H5.5a2 2 0 0 1-2-2z"/></symbol>
+	<!-- Dashboard(要件#83 契約2・6・12)が使う字形。 -->
+	<symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/></symbol>
+	<symbol id="i-file-text" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5M9 12.5h6M9 16h4"/></symbol>
+	<symbol id="i-file-code" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5M10.5 11.5l-2 2 2 2M13.5 11.5l2 2-2 2"/></symbol>
+	<symbol id="i-file-pdf" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/><rect x="8" y="12" width="8" height="4.5" rx="1"/></symbol>
+	<symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 15.5l-4.5-4.5-8.5 8.5"/></symbol>
+	<symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="M16 10.5l5-3v9l-5-3"/></symbol>
+	<symbol id="i-audio" viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 10.5v3"/></symbol>
+	<symbol id="i-cube" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol>
+	<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+	<symbol id="i-restart" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.5H15"/></symbol>
+	<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4.5 19.5l1-4L16 5a2.1 2.1 0 0 1 3 3L8.5 18.5z"/><path d="M14 7l3 3"/></symbol>
+	<symbol id="i-history" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7L4 8.5"/><path d="M4 4.5v4h4M12 8v4.2l2.8 1.8"/></symbol>
+	<symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4.5h6l-.6 6 3.1 3V15H6.5v-1.5l3.1-3z"/><path d="M12 15v5.5"/></symbol>
+	<symbol id="i-server" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="7" rx="2"/><rect x="3.5" y="13" width="17" height="7" rx="2"/><path d="M7.5 7.5h.1M7.5 16.5h.1"/></symbol>
+	<symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9h18M6.5 6.8h.1M9 6.8h.1"/></symbol>
+	<symbol id="i-grip" viewBox="0 0 24 24"><circle cx="9" cy="6.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="6.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="17.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></symbol>
+</svg>
+
 <div
 	class="app"
 	class:resizing-pane={resizingPane}
@@ -1474,11 +1817,13 @@
 	{/if}
 	<div class="app-body" bind:this={appBody}>
 		{#if rootPicker.open}
-			<RootPicker
-				entries={rootPicker.entries}
+			<Dashboard
 				error={rootPicker.error}
-				onSelect={openFromHistory}
+				currentRoot={rootPicker.returnable ? windowState.root || null : null}
+				onOpened={handleDashboardOpened}
+				onClose={() => handleDashboardTrigger('escape')}
 				onPickFolder={selectFolderFromPicker}
+				onOpenFile={openFileFromDashboard}
 			/>
 		{:else}
 			{#if showFindInFolder}
@@ -1520,6 +1865,7 @@
 						onDuplicateWindow={duplicateCurrentWindow}
 						onOpenInNewWindow={openPlanInNewWindow}
 						onFindInFolder={() => void handleMenuFindInFolder()}
+						onReloadFile={reloadCurrentFile}
 					/>
 					{#if showRecentFiles}
 						<RecentFiles
@@ -1567,7 +1913,17 @@
 						onComposingChange={(composing) => (goToComposing = composing)}
 					/>
 				{/if}
-				<div class="viewer-main">
+				<!--
+					要件#80 契約 8: 閲覧面の右クリック(文書があれば Reload File の自前メニュー)。
+					マウスの近道でしかなく、キーボードでは View ▸ Reload File(Command + R)が同じものを呼ぶ。
+				-->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div
+					class="viewer-main"
+					onpointerdowncapture={rememberSelectionAtPress}
+					onpointerupcapture={() => (selectionAtPress = null)}
+					oncontextmenu={handleViewerContextMenu}
+				>
 					{#if windowState.currentDocument}
 						<!--
 							srcdoc がある=HTML ファイル(要件#8)。生の content は {@html} 経路に載せない。

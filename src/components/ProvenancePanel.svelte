@@ -14,6 +14,7 @@
 	 * のいずれでも再生は止めず、ボタンも生きたまま。**マップは読むだけで書き込まない**。
 	 */
 	import { revealItemInDir } from '@tauri-apps/plugin-opener';
+	import Icon from './Icon.svelte';
 	import {
 		describeSegment,
 		formatMapFrame,
@@ -158,7 +159,7 @@
 <aside class="provenance-panel" aria-label="Sources">
 	<header>
 		<h2>Sources</h2>
-		<button type="button" class="ghost" onclick={onClose} aria-label="Close">×</button>
+		<button type="button" class="ghost" onclick={onClose} aria-label="Close"><Icon name="x" size={14} /></button>
 	</header>
 
 	{#if warnings.length > 0}
@@ -337,7 +338,7 @@
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
-		background-color: var(--color-bg-secondary);
+		background-color: var(--color-bg-surface);
 		border-top: 1px solid var(--color-border);
 		overflow: hidden;
 	}
@@ -359,40 +360,47 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 8px 12px;
-		background-color: var(--color-bg-primary);
+		padding: 4px 6px 4px 12px;
+		background-color: var(--color-bg-surface);
 		border-bottom: 1px solid var(--color-border);
 		z-index: 1;
 	}
 
+	/* 区画の見出し(モックの `.sh`= 大文字・小さく・薄く。素材パネルの見出しと同じ)。 */
 	h2 {
 		margin: 0;
-		font-size: 14px;
-		font-weight: 600;
-		color: var(--color-text-primary);
+		font-size: var(--pane-header-font-size);
+		font-weight: var(--pane-header-font-weight);
+		letter-spacing: var(--pane-header-letter-spacing);
+		text-transform: uppercase;
+		color: var(--color-text-muted);
 	}
 
 	h3 {
 		margin: 0 0 6px;
-		font-size: 11px;
+		font-size: var(--text-xs);
 		font-weight: 600;
 		letter-spacing: 0.04em;
 		color: var(--color-text-secondary);
 	}
 
 	.ghost {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
 		border: 1px solid transparent;
-		border-radius: 4px;
+		border-radius: 5px;
 		background-color: transparent;
-		font-size: 16px;
-		padding: 0 8px;
 		color: var(--color-text-secondary);
 		cursor: pointer;
 	}
 
 	.ghost:hover {
 		background-color: var(--color-bg-hover);
-		color: var(--color-text-hover);
+		color: var(--color-text-primary);
 	}
 
 	.notice {
@@ -413,7 +421,7 @@
 		margin: 0;
 		font-size: 11px;
 		line-height: 1.5;
-		color: var(--color-text-danger);
+		color: var(--color-danger);
 	}
 
 	/*
@@ -469,8 +477,8 @@
 	.source {
 		padding: 8px;
 		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-primary);
+		border-radius: var(--radius-sm);
+		background-color: var(--color-bg-base);
 	}
 
 	.source-head {
@@ -533,7 +541,7 @@
 
 	/* 数字は等幅で桁を固定する(再生中に幅が動くと読み取る前に位置が変わる)。 */
 	.mono {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -557,11 +565,13 @@
 	}
 
 	.actions button {
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
+		font-weight: 500;
 		padding: 2px 8px;
-		border: 1px solid var(--color-border);
-		border-radius: 3px;
-		background-color: var(--color-bg-secondary);
+		border: 1px solid var(--color-border-strong);
+		border-radius: 4px;
+		background-color: var(--color-bg-raised);
 		color: var(--color-text-primary);
 		cursor: pointer;
 	}
@@ -573,7 +583,7 @@
 	/* 実ファイルの無い素材(合成素材)では導線を押せるように見せない。 */
 	.actions button:disabled,
 	.actions button:disabled:hover {
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-raised);
 		color: var(--color-text-muted);
 		cursor: default;
 	}
@@ -591,9 +601,10 @@
 		width: 100%;
 		padding: 4px 6px;
 		border: 1px solid transparent;
-		border-radius: 3px;
+		border-radius: 4px;
 		background-color: transparent;
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
 		color: var(--color-text-primary);
 		text-align: left;
 		cursor: pointer;
@@ -605,8 +616,8 @@
 
 	/* 現在の区間。再生に合わせて動くので、色だけでなく縁でも判るようにする。 */
 	.segment.current {
-		background-color: var(--color-bg-tree-active);
-		border-color: var(--color-border);
+		background-color: var(--color-accent-soft);
+		border-color: var(--color-accent);
 	}
 
 	.seg-time {

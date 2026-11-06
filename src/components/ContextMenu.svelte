@@ -4,8 +4,10 @@
 	 * 自前の div を絶対配置する(契約①)。開いているメニューは常に1つで、
 	 * 状態は `stores/context-menu.svelte` が持つ。
 	 *
-	 * アイテムを右クリックしたメニューと、ツリーの空白部分のメニュー(要件#34)の
-	 * どちらもここが描く。違いは項目だけ(空白部は entry を持たない)。
+	 * アイテムを右クリックしたメニューと、ツリーの空白部分のメニュー(要件#34)と、
+	 * 文書の本文のメニュー(要件#80 契約 8)のどれもここが描く。違いは項目だけ
+	 * (空白部と本文は entry を持たない)。Dashboard のタイルと行のメニュー(要件#83 契約 14)
+	 * も、Dashboard の中に置いたもう 1 つのこの部品が描く(項目の実行は `onDashboardItem`)。
 	 */
 	import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 	import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -13,17 +15,23 @@
 		clampMenuPosition,
 		planContextAction,
 		planOpenWith,
+		type BookmarkAction,
 		type ContextAction,
 		type ContextMenuEntry,
 		type ContextMenuItemId,
+		type DashboardMenuTarget,
 		type NewWindowAction
 	} from '$lib/context-menu';
+	import { addBookmark, bookmarkSaveFailedMessage, removeBookmark } from '$lib/bookmarks';
 	import { contextMenu } from '../stores/context-menu.svelte';
 
 	let {
 		onDuplicateWindow,
 		onOpenInNewWindow,
-		onOpenInNewTab
+		onOpenInNewTab,
+		onReloadFile,
+		onReloadFolder,
+		onDashboardItem
 	}: {
 		/**
 		 * 「ウィンドウを複製」(要件#34)。中身(root・文書・展開)を知っているのは
@@ -42,6 +50,21 @@
 		 * 同じ関数を通る。省略時は何もしない(メニュー単体のマウント用)。
 		 */
 		onOpenInNewTab?: (path: string) => void;
+		/**
+		 * 「Reload File」(要件#80 契約 8・9)。行の URI(本文のメニューは null=今の文書)を
+		 * 渡すだけで、確認・読み直し・ツリーの読み直しはページ側の実行列。省略時は何もしない。
+		 */
+		onReloadFile?: (uri: string | null) => void;
+		/**
+		 * 「Reload Folder」(要件#80 契約 14・15)。フォルダの行の URI(空白は null=root)を
+		 * 渡すだけで、一覧の読み直しは Explorer 側の実行列。省略時は何もしない。
+		 */
+		onReloadFolder?: (uri: string | null) => void;
+		/**
+		 * Dashboard のメニューの項目(要件#83 契約 14・7)。押した項目と、メニューを開いた対象
+		 * (タイル・行・Add Bookmark…)を渡すだけで、実行は Dashboard 側。省略時は何もしない。
+		 */
+		onDashboardItem?: (id: ContextMenuItemId, target: DashboardMenuTarget) => void;
 	} = $props();
 
 	let el = $state<HTMLDivElement | null>(null);
@@ -74,18 +97,56 @@
 	/**
 	 * 押された項目の実行計画。ツリーの空白部から開いたメニュー(要件#34)は
 	 * entry を持たないが、そこに並ぶのは entry を読まない窓操作だけなので、
-	 * アイテムから開いたときと同じ計画に落ちる。
+	 * アイテムから開いたときと同じ計画に落ちる。本文のメニューの Reload File と
+	 * 空白部の Reload Folder(要件#80)は URI を null にする(=今の文書・root)。
 	 */
-	function planFor(id: ContextMenuItemId, entry: ContextMenuEntry | null): ContextAction | null {
+	function planFor(
+		id: ContextMenuItemId,
+		entry: ContextMenuEntry | null,
+		viewerUri: string | null
+	): ContextAction | null {
 		if (entry !== null) return planContextAction(id, entry);
-		return id === 'duplicate-window' ? { command: 'duplicate-window' } : null;
+		if (id === 'duplicate-window') return { command: 'duplicate-window' };
+		if (id === 'reload-file') return { command: 'reload-file', uri: null };
+		if (id === 'reload-folder') return { command: 'reload-folder', uri: null };
+		// 本文のメニューの Pin / Unpin(要件#83 契約 7)= 今の文書をファイルとして。
+		if (id === 'pin-to-bookmarks' && viewerUri !== null) {
+			return { command: 'pin-bookmark', uri: viewerUri, kind: 'file' };
+		}
+		if (id === 'unpin-from-bookmarks' && viewerUri !== null) {
+			return { command: 'unpin-bookmark', uri: viewerUri };
+		}
+		return null;
+	}
+
+	/**
+	 * Bookmark に足す・外す(要件#83 契約 7)。一覧の反映は Rust の `bookmarks_changed` が全窓へ
+	 * 届けるので、ここは呼ぶだけ。書けなかったら 1 回知らせる(一覧は前のまま)。
+	 */
+	async function changeBookmark(action: BookmarkAction) {
+		try {
+			if (action.command === 'pin-bookmark') await addBookmark(action.uri, action.kind);
+			else await removeBookmark(action.uri);
+		} catch (err) {
+			alert(bookmarkSaveFailedMessage(err));
+		}
 	}
 
 	async function activate(id: ContextMenuItemId) {
 		const entry = contextMenu.entry;
+		const viewerUri = contextMenu.viewerUri;
+		const dashboardTarget = contextMenu.dashboardTarget;
 		contextMenu.close();
-		const action = planFor(id, entry);
+		if (dashboardTarget !== null) {
+			onDashboardItem?.(id, dashboardTarget);
+			return;
+		}
+		const action = planFor(id, entry, viewerUri);
 		if (!action) return;
+		if (action.command === 'pin-bookmark' || action.command === 'unpin-bookmark') {
+			await changeBookmark(action);
+			return;
+		}
 		try {
 			if (action.command === 'duplicate-window') {
 				onDuplicateWindow();
@@ -93,6 +154,10 @@
 				onOpenInNewWindow(action);
 			} else if (action.command === 'new-tab') {
 				onOpenInNewTab?.(action.path);
+			} else if (action.command === 'reload-file') {
+				onReloadFile?.(action.uri);
+			} else if (action.command === 'reload-folder') {
+				onReloadFolder?.(action.uri);
 			} else if (action.command === 'reveal_item_in_dir') {
 				await revealItemInDir(action.path);
 			} else if (action.command === 'open_path') {
@@ -104,7 +169,7 @@
 				await navigator.clipboard.writeText(action.text);
 			}
 		} catch (err) {
-			console.warn(`context menu action ${id} failed for ${entry?.uri ?? '(tree pane)'}:`, err);
+			console.warn(`context menu action ${id} failed for ${entry?.uri ?? '(no item)'}:`, err);
 		}
 	}
 
@@ -168,7 +233,7 @@
 		oncontextmenu={(e) => e.preventDefault()}
 	>
 		{#each contextMenu.items as item, i (item.id)}
-			{#if item.id === 'duplicate-window' && i > 0}
+			{#if item.separatorBefore || (item.id === 'duplicate-window' && i > 0)}
 				<!--
 					アイテムに効く項目と窓に効く項目の境目(要件#34③)。区切りは見た目
 					だけのものなので VM の項目には現れない。空白部のメニュー(項目が
@@ -176,11 +241,17 @@
 				-->
 				<div class="context-menu-separator" role="separator"></div>
 			{/if}
+			<!--
+				無効の項目は押しても何もしない(メニューも閉じない)。WebKit は disabled のボタンに
+				click を送らないが、届いた場合も同じにする(要件#80 契約 9 の Reload File=開いていない行)。
+			-->
 			<button
 				class="context-menu-item"
 				role="menuitem"
 				disabled={!item.enabled}
-				onclick={() => activate(item.id)}
+				onclick={() => {
+					if (item.enabled) void activate(item.id);
+				}}
 			>
 				{item.label}
 			</button>
@@ -189,40 +260,55 @@
 {/if}
 
 <style>
+	/*
+	 * 重なりの 1 段(要件#56 契約 4= `--color-bg-raised` + `--shadow-2` + `--radius-md`)。
+	 * 縁の線は `--shadow-2` の 1px の輪が持つ(モックの右クリックメニュー)。
+	 */
 	.context-menu {
 		position: fixed;
 		z-index: 100;
-		min-width: 160px;
-		padding: 4px 0;
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		background-color: var(--color-bg-primary);
-		box-shadow: 0 4px 16px var(--color-shadow);
+		min-width: 200px;
+		padding: 5px;
+		border-radius: var(--radius-md);
+		background-color: var(--color-bg-raised);
+		box-shadow: var(--shadow-2);
+		outline: none;
 	}
 
+	/* 項目(モックの `.mi`= 26px・角丸)。選ぶ行はアクセントの面に白い文字(macOS のメニューと同じ)。 */
 	.context-menu-item {
-		display: block;
+		display: flex;
+		align-items: center;
+		box-sizing: border-box;
 		width: 100%;
-		padding: 5px 14px;
+		height: 26px;
+		padding: 0 8px;
 		border: none;
+		border-radius: var(--radius-sm);
 		background: none;
 		color: var(--color-text-primary);
 		font: inherit;
-		font-size: 13px;
+		font-size: var(--text-md);
+		line-height: 1.2;
 		text-align: left;
 		white-space: nowrap;
 		cursor: pointer;
 	}
 
 	.context-menu-item:hover:not(:disabled) {
-		background-color: var(--color-bg-hover);
-		color: var(--color-text-hover);
+		background-color: var(--color-accent);
+		color: var(--color-on-accent);
+	}
+
+	.context-menu-item:focus-visible {
+		outline: 2px solid var(--color-focus-ring);
+		outline-offset: -2px;
 	}
 
 	/* 「ウィンドウを複製」(要件#34)を他の項目から切る線。 */
 	.context-menu-separator {
 		height: 1px;
-		margin: 4px 0;
+		margin: 5px 6px;
 		background-color: var(--color-border);
 	}
 

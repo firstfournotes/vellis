@@ -721,17 +721,23 @@
 		height: 100%;
 		min-height: 0;
 		overflow: hidden;
-		font-size: 13px;
+		font-size: var(--text-md);
+		color: var(--color-text-primary);
 	}
 
-	/* 見出し行は Explorer の `.explorer-header` と同じ見た目に揃える(文字は theme.css のトークン=要件#64 追補b)。 */
+	/*
+	 * 見出し行は Explorer の `.explorer-header` と同じ見た目に揃える(文字は theme.css のトークン=
+	 * 要件#64 追補b。高さ・色はモックの区画の見出し=要件#56 第2段)。
+	 */
 	.find-in-folder-header {
-		padding: 6px 8px 6px 12px;
+		box-sizing: border-box;
+		min-height: 34px;
+		padding: 3px 6px 3px 14px;
 		font-size: var(--pane-header-font-size);
 		font-weight: var(--pane-header-font-weight);
 		text-transform: uppercase;
 		letter-spacing: var(--pane-header-letter-spacing);
-		color: var(--color-text-secondary);
+		color: var(--color-text-muted);
 		border-bottom: 1px solid var(--color-border);
 		flex-shrink: 0;
 		display: flex;
@@ -740,45 +746,56 @@
 		gap: 8px;
 	}
 
+	/* 見出しの右端の小さな文字ボタン(Recent Files の Clear と同じ)。 */
 	.find-in-folder-close {
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
 		text-transform: none;
 		letter-spacing: normal;
-		font-weight: 400;
-		padding: 2px 8px;
-		border: 1px solid var(--color-border);
+		font-weight: 500;
+		padding: 2px 6px;
+		border: none;
 		border-radius: 4px;
 		background: transparent;
-		color: var(--color-text-secondary);
+		color: var(--color-text-muted);
 		cursor: pointer;
 	}
 
 	.find-in-folder-close:hover {
 		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 
 	.find-in-folder-query {
 		flex-shrink: 0;
-		padding: 8px;
+		padding: 8px 10px 8px 10px;
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 6px;
 		border-bottom: 1px solid var(--color-border);
 	}
 
+	/* 入力欄(モックの `.inp`= 28px・角丸 6px・地は raised・縁は border-strong)。 */
 	.find-in-folder-input {
 		width: 100%;
+		height: 28px;
 		box-sizing: border-box;
-		font-size: 12px;
-		padding: 4px 8px;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-primary);
+		font: inherit;
+		font-size: var(--text-sm);
+		padding: 0 8px;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
 		color: var(--color-text-primary);
 	}
 
+	.find-in-folder-input::placeholder {
+		color: var(--color-text-muted);
+	}
+
 	.find-in-folder-input:focus {
-		outline: 2px solid #93c5fd;
+		border-color: var(--color-accent);
+		outline: 2px solid var(--color-focus-ring);
 		outline-offset: -1px;
 	}
 
@@ -800,7 +817,7 @@
 	}
 
 	.find-in-folder-input[aria-invalid='true'] {
-		border-color: #ef4444;
+		border-color: var(--color-danger);
 	}
 
 	.find-in-folder-match-toggles {
@@ -826,8 +843,8 @@
 	}
 
 	.find-in-folder-field-label {
-		font-size: 11px;
-		color: var(--color-text-secondary);
+		font-size: var(--text-xs);
+		color: var(--color-text-muted);
 	}
 
 	/* 歯車を欄の右端の内側に重ねる。文字が歯車の下に潜らないよう右を空ける。 */
@@ -850,7 +867,7 @@
 		border: 1px solid transparent;
 		border-radius: 4px;
 		background: transparent;
-		color: var(--color-text-secondary);
+		color: var(--color-text-muted);
 		font: inherit;
 		font-size: 12px;
 		line-height: 1;
@@ -859,11 +876,11 @@
 
 	.find-in-folder-icon-button:hover {
 		background-color: var(--color-bg-hover);
-		color: var(--color-text-hover);
+		color: var(--color-text-primary);
 	}
 
 	.find-in-folder-icon-button:focus-visible {
-		outline: 2px solid #93c5fd;
+		outline: 2px solid var(--color-focus-ring);
 		outline-offset: -1px;
 	}
 
@@ -881,39 +898,47 @@
 		width: 20px;
 		height: 20px;
 		font-size: 11px;
+		font-family: var(--font-mono);
+		font-weight: 600;
 	}
 
-	/* ON(既定)は押し込んだ見た目。OFF は素の歯車に戻る(Cursor のトグルと同じ)。Aa / ab / .* も同じ(要件#66)。 */
+	/*
+	 * ON(既定)は押し込んだ見た目。OFF は素の歯車に戻る(Cursor のトグルと同じ)。Aa / ab / .* も同じ(要件#66)。
+	 * 色はモックのトグル(`.tg.on`= アクセントの淡い面・アクセントの文字・内側の細い縁)。
+	 */
 	.find-in-folder-use-exclude-settings[aria-pressed='true'],
 	.find-in-folder-match-toggle[aria-pressed='true'] {
-		background-color: var(--color-bg-tree-active);
-		border-color: var(--color-border);
-		color: var(--color-text-primary);
+		background-color: var(--color-accent-soft);
+		border-color: var(--color-accent);
+		color: var(--color-accent-text);
 	}
 
 	.find-in-folder-status {
 		min-height: 1.2em;
-		font-size: 11px;
+		font-size: var(--text-xs);
 		color: var(--color-text-muted);
 		font-variant-numeric: tabular-nums;
 	}
 
+	/* 行の角丸の選択色を区画の縁から離す(モックの `.fres`= 左右 6px)。 */
 	.find-in-folder-results {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
-		padding: 4px 0;
+		padding: 4px 6px;
 	}
 
 	.find-in-folder-group + .find-in-folder-group {
 		margin-top: 4px;
 	}
 
+	/* ファイルの行(モックの `.fg`)。件数は右端の札。 */
 	.find-in-folder-group-header {
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		padding: 3px 8px 3px 12px;
+		min-height: 24px;
+		padding: 2px 8px 2px 6px;
 		font-weight: 600;
 		color: var(--color-text-primary);
 	}
@@ -928,30 +953,45 @@
 
 	.find-in-folder-group-count {
 		flex-shrink: 0;
-		font-size: 11px;
-		font-weight: 400;
-		color: var(--color-text-muted);
+		min-width: 18px;
+		box-sizing: border-box;
+		padding: 0 5px;
+		border-radius: 8px;
+		background-color: var(--color-bg-active);
+		font-size: 10.5px;
+		font-weight: 600;
+		line-height: 16px;
+		text-align: center;
+		color: var(--color-text-secondary);
 		font-variant-numeric: tabular-nums;
 	}
 
+	/* 一致の行(モックの `.fl`= 角丸・地の文字は secondary・ホバーで面)。 */
 	.find-in-folder-hit {
 		display: flex;
 		align-items: baseline;
 		gap: 8px;
 		width: 100%;
-		padding: 2px 8px 2px 20px;
+		padding: 3px 8px 3px 14px;
 		border: none;
+		border-radius: var(--radius-sm);
 		background: transparent;
 		color: var(--color-text-secondary);
 		font: inherit;
-		font-size: 12px;
+		font-size: var(--text-sm);
 		text-align: left;
 		cursor: pointer;
 	}
 
 	.find-in-folder-hit:hover {
-		background-color: var(--color-bg-tree-hover);
-		color: var(--color-text-hover);
+		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
+	}
+
+	/* 一覧はスクロールで切れるので、リングは行の内側に描く。 */
+	.find-in-folder-hit:focus-visible {
+		outline: 2px solid var(--color-focus-ring);
+		outline-offset: -2px;
 	}
 
 	.find-in-folder-hit-line {
@@ -964,14 +1004,15 @@
 
 	.find-in-folder-show-more {
 		display: block;
-		margin: 6px 8px 4px 20px;
-		padding: 2px 8px;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
+		margin: 6px 8px 4px 14px;
+		padding: 3px 10px;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
 		background: transparent;
 		color: var(--color-text-secondary);
 		font: inherit;
-		font-size: 11px;
+		font-size: var(--text-xs);
+		font-weight: 500;
 		cursor: pointer;
 	}
 

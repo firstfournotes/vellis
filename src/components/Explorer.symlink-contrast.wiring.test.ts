@@ -13,7 +13,13 @@
  *   `color: var(--color-text-muted)` のまま
  * - (b) `theme.css` のトークンの値で計算したコントラスト比(WCAG 2.x の相対輝度):
  *   `--color-text-secondary` と `--color-bg-primary`・`--color-bg-secondary`・`--color-bg-tree-hover`・
- *   `--color-bg-tree-active` のどれとも 3.0 以上
+ *   `--color-bg-tree-active` のどれとも 3.0 以上。
+ *   **要件側更新(2026-11-03・要件#56 契約 2=由谷承認)**: theme.css は `themes/default.json` からの生成物になり、
+ *   (1) 要件#7 の別名 7 個は `var()` で定義され、(2) hover / accent-soft(tree-hover / tree-active の別名先)は
+ *   `rgba()` の半透明、(3) ダークの組(`:root[data-theme="dark"]` と `@media (prefers-color-scheme: dark)`)が
+ *   後ろに並ぶ。そこで判定を「**ライトの組(at-rule の外・属性なしの `:root{}`)だけ**を読み、`var()` の別名を
+ *   解決し、半透明の値はツリーの行が載る面(`--color-bg-secondary`=Explorer の地)に合成してから比を計算する」に
+ *   改めた。要件#70 の趣旨(印の文字色と各面のコントラスト 3:1)は不変。ダークの組は判定しない(人間ゲート)
  * - (c) リンク切れの `.link-badge` に `--color-text-muted` を当てる規則が残っていない
  *
  * ## 判断の記録(test-writer 2026-10-06)
@@ -105,43 +111,129 @@ const hasColor = (decls: Decl[], value: string) => decls.some((d) => d.prop === 
 // theme.css のトークンとコントラスト比(WCAG 2.x)
 // ---------------------------------------------------------------------------
 
-function themeTokens(): Map<string, string> {
+/**
+ * theme.css の**ライトの組**だけのトークン(最後の宣言が勝つ)。生成物の theme.css は
+ * `:root{}`(ライト)・`:root[data-theme="dark"]{}`・`@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){} }`
+ * の 3 ブロックを持つ(要件#56 契約 2)。at-rule の中と `data-theme` 属性付きのセレクタは読まない。
+ */
+function lightThemeTokens(): Map<string, string> {
 	const css = stripCssComments(readFileSync(THEME_CSS_PATH, 'utf8'));
 	const out = new Map<string, string>();
-	const re = /(--[-\w]+)\s*:\s*([^{};]+)(?=[;}])/g;
-	for (let m = re.exec(css); m !== null; m = re.exec(css)) {
-		out.set(m[1], m[2].trim());
+	let depth = 0; // at-rule の入れ子の深さ(0 = トップレベル)
+	let prelude = '';
+	let i = 0;
+	while (i < css.length) {
+		const ch = css[i];
+		if (ch === '{') {
+			const selector = prelude.replace(/\s+/g, ' ').trim();
+			prelude = '';
+			if (selector.startsWith('@')) {
+				depth++;
+				i++;
+				continue;
+			}
+			const end = css.indexOf('}', i);
+			const body = css.slice(i + 1, end < 0 ? css.length : end);
+			if (depth === 0 && /:root/.test(selector) && !/\[data-theme/.test(selector)) {
+				const re = /(--[-\w]+)\s*:\s*([^{};]+)(?=[;}]|$)/g;
+				for (let m = re.exec(body); m !== null; m = re.exec(body)) out.set(m[1], m[2].trim());
+			}
+			i = end < 0 ? css.length : end + 1;
+			continue;
+		}
+		if (ch === '}') {
+			if (depth > 0) depth--;
+			prelude = '';
+			i++;
+			continue;
+		}
+		prelude += ch;
+		i++;
 	}
 	return out;
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-	let h = hex.trim().replace(/^#/, '').toLowerCase();
-	if (h.length === 3) h = h.split('').map((c) => c + c).join('');
-	expect(h, `${hex} is an opaque #rgb / #rrggbb colour`).toMatch(/^[0-9a-f]{6}$/);
-	return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) as [number, number, number];
+type Rgba = { r: number; g: number; b: number; a: number };
+
+/** `#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa` / `rgb()` / `rgba()`(数値・0〜1 か % のアルファ)を読む。 */
+function parseColor(value: string): Rgba {
+	const v = value.trim().toLowerCase();
+	const hex = v.match(/^#([0-9a-f]{3,8})$/);
+	if (hex) {
+		let h = hex[1];
+		if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('');
+		expect(h, `${value} is a #rgb / #rgba / #rrggbb / #rrggbbaa colour`).toMatch(/^[0-9a-f]{6}([0-9a-f]{2})?$/);
+		const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+		const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+		return { r, g, b, a };
+	}
+	const fn = v.match(/^rgba?\(\s*([^)]*)\)$/);
+	expect(fn, `${value} is a hex or rgb()/rgba() colour`).not.toBeNull();
+	const parts = fn![1].split(/[\s,/]+/).filter((p) => p.length > 0);
+	expect(parts.length, `${value} has 3 or 4 components`).toBeGreaterThanOrEqual(3);
+	const channel = (p: string) => (p.endsWith('%') ? (parseFloat(p) * 255) / 100 : parseFloat(p));
+	const alpha = (p: string | undefined) => (p === undefined ? 1 : p.endsWith('%') ? parseFloat(p) / 100 : parseFloat(p));
+	return { r: channel(parts[0]), g: channel(parts[1]), b: channel(parts[2]), a: alpha(parts[3]) };
 }
 
-/** WCAG 2.x の相対輝度。 */
-function relativeLuminance(hex: string): number {
-	const [r, g, b] = hexToRgb(hex).map((c) => {
-		const s = c / 255;
+/** `var(--x)` / `var(--x, fallback)` の参照先(先頭の 1 つ)。参照でなければ null。 */
+function varTarget(value: string): string | null {
+	const m = value.trim().match(/^var\(\s*(--[-\w]+)/);
+	return m ? m[1] : null;
+}
+
+/** 別名(`var()`)を辿って値を得る(循環や未定義は失敗)。 */
+function resolveToken(tokens: Map<string, string>, name: string): string {
+	const seen = new Set<string>();
+	let current = name;
+	for (;;) {
+		expect(seen.has(current), `${name} does not reference itself (${[...seen].join(' -> ')})`).toBe(false);
+		seen.add(current);
+		const v = tokens.get(current);
+		expect(v, `theme.css (light block) defines ${current} (needed by ${name})`).toBeDefined();
+		const target = varTarget(v as string);
+		if (target === null) return v as string;
+		current = target;
+	}
+}
+
+/** 半透明の色を面 `base`(不透明)に合成した不透明の色。 */
+function compositeOver(top: Rgba, base: Rgba): Rgba {
+	const a = top.a;
+	return {
+		r: top.r * a + base.r * (1 - a),
+		g: top.g * a + base.g * (1 - a),
+		b: top.b * a + base.b * (1 - a),
+		a: 1,
+	};
+}
+
+/** WCAG 2.x の相対輝度(不透明の色)。 */
+function relativeLuminance(c: Rgba): number {
+	const [r, g, b] = [c.r, c.g, c.b].map((x) => {
+		const s = x / 255;
 		return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
 	});
 	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-function contrastRatio(a: string, b: string): number {
+function contrastRatio(a: Rgba, b: Rgba): number {
 	const la = relativeLuminance(a);
 	const lb = relativeLuminance(b);
 	return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
-function tokenValue(tokens: Map<string, string>, name: string): string {
-	const v = tokens.get(name);
-	expect(v, `theme.css defines ${name}`).toBeDefined();
-	return v as string;
+/** 面の色。半透明ならツリーの行が載る面(`--color-bg-secondary`= Explorer の地)に合成する。 */
+function opaqueSurface(tokens: Map<string, string>, name: string): Rgba {
+	const colour = parseColor(resolveToken(tokens, name));
+	if (colour.a >= 1) return colour;
+	const pane = parseColor(resolveToken(tokens, '--color-bg-secondary'));
+	expect(pane.a, '--color-bg-secondary (the Explorer pane) is opaque').toBe(1);
+	return compositeOver(colour, pane);
 }
+
+const hexOf = (c: Rgba) =>
+	'#' + [c.r, c.g, c.b].map((x) => Math.round(x).toString(16).padStart(2, '0')).join('');
 
 // ---------------------------------------------------------------------------
 // (a) リンク切れの印は secondary・名前は muted のまま
@@ -173,7 +265,7 @@ describe('AC-70-追a (a): ExplorerItem.svelte <style> draws the broken-link badg
 // (b) theme.css のトークン値で 3:1 以上
 // ---------------------------------------------------------------------------
 
-describe('AC-70-追a (b): --color-text-secondary reaches 3:1 against every row background (WCAG 1.4.11)', () => {
+describe('AC-70-追a (b): --color-text-secondary reaches 3:1 against every row background (WCAG 1.4.11, light set of theme.css)', () => {
 	const backgrounds = [
 		'--color-bg-primary',
 		'--color-bg-secondary',
@@ -181,12 +273,13 @@ describe('AC-70-追a (b): --color-text-secondary reaches 3:1 against every row b
 		'--color-bg-tree-active',
 	] as const;
 
-	it.each(backgrounds)('contrast(--color-text-secondary, %s) >= 3.0', (bg) => {
-		const tokens = themeTokens();
-		const fg = tokenValue(tokens, '--color-text-secondary');
-		const back = tokenValue(tokens, bg);
+	it.each(backgrounds)('contrast(--color-text-secondary, %s) >= 3.0 (aliases resolved, translucent surfaces composited over the pane)', (bg) => {
+		const tokens = lightThemeTokens();
+		const fg = parseColor(resolveToken(tokens, '--color-text-secondary'));
+		expect(fg.a, '--color-text-secondary is opaque').toBe(1);
+		const back = opaqueSurface(tokens, bg);
 		const ratio = contrastRatio(fg, back);
-		expect(ratio, `${fg} on ${back} = ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(3.0);
+		expect(ratio, `${hexOf(fg)} on ${bg} = ${hexOf(back)}: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(3.0);
 	});
 });
 

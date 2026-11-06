@@ -47,6 +47,7 @@
 		saveSectionHeight
 	} from '$lib/recent-files-section';
 	import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+	import Icon from './Icon.svelte';
 
 	let {
 		rootUri,
@@ -378,8 +379,9 @@
 		onclick={handleHeaderClick}
 		onkeydown={handleHeaderKeyDown}
 	>
+		<!-- 開閉の目印は SVG アイコン(要件#56 契約 5): 開=chev-d・閉=chev-r。 -->
 		<span class="recent-files-marker" data-testid="recent-files-marker" aria-hidden="true"
-			>{expanded ? '⌄' : '›'}</span
+			><Icon name={expanded ? 'chev-d' : 'chev-r'} size={14} /></span
 		>
 		<span class="recent-files-title" data-testid="recent-files-title">{RECENT_FILES_TITLE}</span>
 		<button
@@ -443,20 +445,21 @@
 		/* 1px は `$lib/recent-files-section` の SECTION_BORDER_TOP と同じ(高さの計算に入っている)。 */
 		border-top: 1px solid var(--color-border);
 		border-right: 1px solid var(--color-border);
-		background-color: var(--color-bg-secondary);
+		background-color: var(--color-bg-base);
 	}
 
 	/*
 	 * 見出し行の文字は大文字・色を Explorer の `.explorer-header` に揃える。高さは
 	 * `SECTION_HEADER_HEIGHT`(`$lib/recent-files-section`)と同じ 28px に固定する。
 	 * 追補b(2026-09-30)で文字の大きさ・太さ・字間を Explorer の見出しと同じトークン
-	 * (theme.css の `--pane-header-*`=13px・500・0.04em)にした(追補a の 16px・700 は撤回)。
+	 * (theme.css の `--pane-header-*`)にした(追補a の 16px・700 は撤回)。要件#56 第2段で
+	 * 色をモックの区画の見出し(`--color-text-muted`)にした。
 	 */
 	.recent-files-header {
 		flex: 0 0 auto;
 		box-sizing: border-box;
 		height: 28px;
-		padding: 0 8px 0 6px;
+		padding: 0 6px 0 6px;
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -464,14 +467,18 @@
 		font-weight: var(--pane-header-font-weight);
 		text-transform: uppercase;
 		letter-spacing: var(--pane-header-letter-spacing);
-		color: var(--color-text-secondary);
+		color: var(--color-text-muted);
 		cursor: pointer;
 		user-select: none;
 		touch-action: none; /* ドラッグがスクロールに取られないように */
 	}
 
+	.recent-files-header:hover {
+		color: var(--color-text-secondary);
+	}
+
 	.recent-files-header:focus-visible {
-		outline: 2px solid #93c5fd;
+		outline: 2px solid var(--color-focus-ring);
 		outline-offset: -2px;
 	}
 
@@ -501,24 +508,17 @@
 	}
 
 	/*
-	 * 開閉の目印 › / ⌄(大きさは見出し行の追補a に合わせて 24px・閉じたときは下の規則で 30px)。
-	 * Apple Symbols(macOS 標準)は › と ⌄ の形が揃う。見出し行の字の太さは継がない。
+	 * 開閉の目印(要件#56 契約 5= SVG の chev-d / chev-r)。字形が揃うので、開閉で大きさを
+	 * 変える手当て(文字の › と ⌄ の大きさの差)は要らない。
 	 */
 	.recent-files-marker {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		width: 18px;
-		font-family: 'Apple Symbols', 'STIX Two Math', sans-serif;
-		font-size: 24px;
-		font-weight: 400;
-		line-height: 1;
+		height: 18px;
 		flex-shrink: 0;
-	}
-
-	/* › の字形は ⌄ より小さいので、閉じたときだけ大きくして塗りを見出しの大文字の高さに揃える。 */
-	.recent-files-header[aria-expanded='false'] .recent-files-marker {
-		font-size: 30px;
+		color: var(--color-text-muted);
 	}
 
 	.recent-files-title {
@@ -528,33 +528,42 @@
 		text-overflow: ellipsis;
 	}
 
+	/* 見出しの右端の小さな文字ボタン(モックの区画の見出しのボタン)。 */
 	.recent-files-clear {
 		flex-shrink: 0;
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
 		text-transform: none;
 		letter-spacing: normal;
-		font-weight: 400;
-		padding: 1px 8px;
-		border: 1px solid var(--color-border);
+		font-weight: 500;
+		padding: 2px 6px;
+		border: none;
 		border-radius: 4px;
 		background: transparent;
-		color: var(--color-text-secondary);
+		color: var(--color-text-muted);
 		cursor: pointer;
 	}
 
 	.recent-files-clear:hover {
 		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 
-	/* 上下の余白の合計は `$lib/recent-files-section` の SECTION_LIST_PADDING(8px)と同じ。 */
+	/*
+	 * 上下の余白の合計は `$lib/recent-files-section` の SECTION_LIST_PADDING(8px)と同じ。
+	 * 左右の 6px は行の角丸の選択色を区画の縁から離すため(高さの計算には入らない)。
+	 */
 	.recent-files-list {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
-		padding: 4px 0;
+		padding: 4px 6px;
 	}
 
-	/* 1 行の高さは `SECTION_ROW_HEIGHT`(24px)。ツリーの行と同じ見た目の選択色とホバー。 */
+	/*
+	 * 1 行の高さは `SECTION_ROW_HEIGHT`(24px)。ツリーの行と同じ見た目の選択色とホバー
+	 * (要件#56 契約 4= ホバー `--color-bg-hover`・選択 `--color-accent-soft`・角丸)。
+	 */
 	.recent-files-row {
 		display: flex;
 		align-items: baseline;
@@ -562,46 +571,56 @@
 		box-sizing: border-box;
 		width: 100%;
 		height: 24px;
-		padding: 4px 12px 4px 24px;
+		padding: 4px 8px 4px 18px;
 		border: none;
+		border-radius: var(--radius-sm);
 		background: none;
-		color: inherit;
+		color: var(--color-text-secondary);
 		font: inherit;
-		font-size: 13px;
+		font-size: var(--text-md);
 		line-height: 16px;
 		text-align: left;
 		cursor: pointer;
 		white-space: nowrap;
 		overflow: hidden;
+		transition: background-color var(--duration-fast) var(--ease-out);
 	}
 
 	.recent-files-row:hover {
-		background-color: var(--color-bg-tree-hover);
+		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 
 	.recent-files-row.active {
-		background-color: var(--color-bg-tree-active);
+		background-color: var(--color-accent-soft);
+		color: var(--color-text-primary);
+	}
+
+	/* 一覧はスクロールで切れるので、リングは行の内側に描く。 */
+	.recent-files-row:focus-visible {
+		outline: 2px solid var(--color-focus-ring);
+		outline-offset: -2px;
 	}
 
 	.recent-files-row-name {
 		flex-shrink: 0;
 		max-width: 100%;
-		font-weight: 600;
+		font-weight: 500;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
 	.recent-files-row-folder {
 		min-width: 0;
-		font-size: 12px;
+		font-size: var(--text-xs);
 		color: var(--color-text-muted);
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
 	.recent-files-empty {
-		padding: 4px 12px 4px 24px;
-		font-size: 12px;
+		padding: 4px 8px 4px 18px;
+		font-size: var(--text-sm);
 		font-style: italic;
 		color: var(--color-text-muted);
 	}

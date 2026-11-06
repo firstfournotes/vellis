@@ -503,40 +503,53 @@
 		flex-direction: column;
 		min-width: 0;
 		overflow: hidden;
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-surface);
 	}
 
 	.model-toolbar {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		flex-shrink: 0;
-		padding: 6px 12px;
-		background-color: var(--color-bg-primary);
+		box-sizing: border-box;
+		min-height: 34px;
+		padding: 4px 8px 4px 12px;
+		background-color: var(--color-bg-surface);
 		border-bottom: 1px solid var(--color-border);
 	}
 
+	/*
+	 * 見出し行のボタン(Viewer の `.toolbar-button` と同じ= 24px・角丸 6px・縁は
+	 * border-strong・ホバーは地の上に `--color-bg-hover` を重ねる。要件#56 第2段)。
+	 */
 	.toolbar-button {
-		font-size: 12px;
-		padding: 4px 10px;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-secondary);
+		height: 24px;
+		box-sizing: border-box;
+		padding: 0 10px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		line-height: 1;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
 		color: var(--color-text-primary);
 		cursor: pointer;
+		white-space: nowrap;
 	}
 
 	.toolbar-button:hover:not(:disabled) {
-		background-color: var(--color-bg-hover);
+		background-image: linear-gradient(var(--color-bg-hover), var(--color-bg-hover));
 	}
 
 	.toolbar-button:disabled {
 		opacity: 0.5;
 		cursor: default;
+		background-image: none;
 	}
 
 	.model-name {
-		font-size: 12px;
+		font-size: var(--text-sm);
 		color: var(--color-text-secondary);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -545,8 +558,9 @@
 
 	.model-stats {
 		margin-left: auto;
-		font-size: 12px;
-		color: var(--color-text-secondary);
+		font-size: var(--text-sm);
+		font-variant-numeric: tabular-nums;
+		color: var(--color-text-muted);
 	}
 
 	/*
@@ -560,7 +574,7 @@
 		min-height: 0;
 		display: flex;
 		overflow: hidden;
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-base);
 		touch-action: none;
 	}
 
@@ -572,7 +586,7 @@
 
 	.model-message {
 		margin: auto;
-		font-size: 13px;
+		font-size: var(--text-md);
 		color: var(--color-text-secondary);
 	}
 </style>

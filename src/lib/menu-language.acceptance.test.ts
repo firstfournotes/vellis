@@ -149,7 +149,13 @@ describe('契約①: コンテキストメニューのラベルは英語の推�
 	// 要件#62 追補(契約12の要件側更新): open-with の直後・open-in-new-window の直前に
 	// open-in-new-tab / 'Open in New Tab' が1件増え、ファイル/symlink 6項目→7項目。
 	// フォルダは4項目のまま。更新は項目数・順序・ラベル・ssh の enabled の列挙のみ。
-	test('7項目の id → label 対応が推奨文言に一致する(local ファイル)', () => {
+	// 要件#80 追補(契約12の要件側更新・2026-11-04 承認): open-in-new-window の直後にファイルは
+	// reload-file / 'Reload File'、フォルダは reload-folder / 'Reload Folder' が1件ずつ増え、空白部の
+	// 先頭に reload-folder / 'Reload Folder' が増えた(ファイル/symlink 8項目・フォルダ5項目・空白2項目)。
+	// 更新は項目数・順序・ラベル・ssh の enabled の列挙のみ。
+	// 要件#83 追補(契約 7・承認 3の要件側更新・2026-11-05 承認): Copy Path の直後に pin-to-bookmarks / 'Pin to Bookmarks' が
+	// ファイルとフォルダの行に 1 件ずつ増えた(ファイル/symlink 9項目・フォルダ6項目)。更新は項目数・順序・ラベル・ssh の enabled の列挙のみ。
+	test('9項目の id → label 対応が推奨文言に一致する(local ファイル)', () => {
 		const labelById = Object.fromEntries(
 			buildContextMenu(localFile).map((i) => [i.id, i.label])
 		);
@@ -159,22 +165,26 @@ describe('契約①: コンテキストメニューのラベルは英語の推�
 			'open-with': 'Open With…',
 			'open-in-new-tab': 'Open in New Tab',
 			'open-in-new-window': 'Open in New Window',
+			'reload-file': 'Reload File',
 			'copy-path': 'Copy Path',
+			'pin-to-bookmarks': 'Pin to Bookmarks',
 			'duplicate-window': 'Duplicate Window',
 		});
 	});
 
-	test('フォルダも同じ対応表(reveal / open-in-new-window / copy-path / duplicate-window の4件)', () => {
+	test('フォルダも同じ対応表(reveal / open-in-new-window / reload-folder / copy-path / pin-to-bookmarks / duplicate-window の6件)', () => {
 		expect(buildContextMenu(localDir).map((i) => i.label)).toEqual([
 			'Reveal in Finder',
 			'Open in New Window',
+			'Reload Folder',
 			'Copy Path',
+			'Pin to Bookmarks',
 			'Duplicate Window',
 		]);
 	});
 
-	test('ツリー空白部メニューのラベルも "Duplicate Window"', () => {
-		expect(buildTreePaneMenu().map((i) => i.label)).toEqual(['Duplicate Window']);
+	test('ツリー空白部メニューのラベルは "Reload Folder"・"Duplicate Window"', () => {
+		expect(buildTreePaneMenu().map((i) => i.label)).toEqual(['Reload Folder', 'Duplicate Window']);
 	});
 });
 
@@ -190,31 +200,39 @@ describe('契約①+機械判定: ラベルに日本語(CJK)が残らない・�
 		}
 	});
 
-	test('項目の出し分け・順序は従来どおり(ファイル7項目・フォルダ4項目=要件#59/#62 の追加を除き英語化は label のみ)', () => {
+	test('項目の出し分け・順序は従来どおり(ファイル9項目・フォルダ6項目=要件#59/#62/#80/#83 の追加を除き英語化は label のみ)', () => {
 		expect(buildContextMenu(localFile).map((i) => i.id)).toEqual([
 			'reveal',
 			'open',
 			'open-with',
 			'open-in-new-tab',
 			'open-in-new-window',
+			'reload-file',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
 		expect(buildContextMenu(localDir).map((i) => i.id)).toEqual([
 			'reveal',
 			'open-in-new-window',
+			'reload-folder',
 			'copy-path',
+			'pin-to-bookmarks',
 			'duplicate-window',
 		]);
 		// ssh の enabled 出し分けも不変(context-menu.acceptance.test.ts が本判定を
 		// 持つが、「英語化で出し分けが動かない」ことを要件#35 の台帳にも固定する)。
 		// open-in-new-tab(4番目=要件#62 契約3)と open-in-new-window(5番目)は
-		// ssh でも有効=契約#59⑥と同じ理由。
+		// ssh でも有効=契約#59⑥と同じ理由。reload-file(6番目=要件#80 契約9)は
+		// 開いている URI を渡さないこの呼び方では false(ssh だからではない)。pin-to-bookmarks(8番目=要件#83 契約 7)は
+		// ssh でも有効(アプリの中で完結する)。
 		expect(buildContextMenu(sshFile).map((i) => i.enabled)).toEqual([
 			false,
 			false,
 			false,
 			true,
+			true,
+			false,
 			true,
 			true,
 			true,

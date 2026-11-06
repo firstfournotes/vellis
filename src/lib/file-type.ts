@@ -263,15 +263,20 @@ export interface DisplayResult {
  * `zoom` only reaches HTML (要件#36 ⑥): the sandboxed preview can only be
  * zoomed by rebuilding its `srcdoc`, while Markdown and plain text are zoomed
  * by the viewer element itself and so do not depend on this render at all.
+ *
+ * `codeTheme` is the Shiki theme for Markdown fences and code files, chosen by
+ * the window from the current theme and mode (要件#56 契約 3). Omitted: the
+ * Default theme's light one.
  */
 export async function renderForDisplay(
 	uri: string,
 	content: string,
 	zoom?: number,
+	codeTheme?: string,
 ): Promise<DisplayResult> {
 	switch (detectFileType(uri)) {
 		case 'markdown':
-			return await render(content, uri);
+			return await render(content, uri, { codeTheme });
 		case 'html':
 			return { html: '', index: null, srcdoc: buildSrcdoc(content, uri, zoom) };
 		case 'image':
@@ -309,7 +314,7 @@ export async function renderForDisplay(
 		default: {
 			// 言語の決まるコードのファイルは色付き(要件#69)。上限超え・失敗はプレーン。
 			const lang = languageForFile(uri);
-			const highlighted = lang ? await highlightCode(content, lang) : null;
+			const highlighted = lang ? await highlightCode(content, lang, codeTheme) : null;
 			return { html: highlighted ?? renderPlainText(content), index: null };
 		}
 	}

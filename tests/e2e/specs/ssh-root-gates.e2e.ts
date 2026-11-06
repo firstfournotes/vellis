@@ -938,19 +938,27 @@ describe('ssh root gates (#16 ⑤ #17 ⑥ #18 ⑦ #19 ⑦ #22 ④ #28 ⑤ #29 �
 			const rec = await readGateRecord();
 			report(REPORT, { gate: '19-7-context-menu', fileItems, folderItems, stillOpenAfterDisabledClicks: stillOpen, copied: copiedAll, openerCalls, dialogs: rec.dialogs });
 
+			// 要件#80 契約 9・12・14(2026-11-04 承認の要件側更新): ファイルの行に Reload File(直前の
+			// `#48 ⑥` で plain.txt を開いたままなので有効=契約 9)、フォルダの行に Reload Folder(ssh でも
+			// 有効=(n))が Open in New Window の直後に増えた。
+			// 要件#83 契約 7(2026-11-05 承認 4 の要件側更新): Copy Path の直後に Pin to Bookmarks(ssh でも有効)。
 			expect(fileItems).toEqual([
 				{ label: 'Reveal in Finder', disabled: true },
 				{ label: 'Open with Default App', disabled: true },
 				{ label: 'Open With…', disabled: true },
 				{ label: 'Open in New Tab', disabled: false },
 				{ label: 'Open in New Window', disabled: false },
+				{ label: 'Reload File', disabled: false },
 				{ label: 'Copy Path', disabled: false },
+				{ label: 'Pin to Bookmarks', disabled: false },
 				{ label: 'Duplicate Window', disabled: false },
 			]);
 			expect(folderItems).toEqual([
 				{ label: 'Reveal in Finder', disabled: true },
 				{ label: 'Open in New Window', disabled: false },
+				{ label: 'Reload Folder', disabled: false },
 				{ label: 'Copy Path', disabled: false },
+				{ label: 'Pin to Bookmarks', disabled: false },
 				{ label: 'Duplicate Window', disabled: false },
 			]);
 			expect(stillOpen).toBe(true);

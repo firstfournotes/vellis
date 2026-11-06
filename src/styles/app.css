@@ -17,12 +17,66 @@ body {
 	padding: 0;
 	height: 100%;
 	overflow: hidden;
-	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif,
-		'Apple Color Emoji', 'Segoe UI Emoji';
-	font-size: 14px;
-	line-height: 1.5;
-	color: #1f2328;
-	background-color: #ffffff;
+	/* Tokens from theme.css (要件#56 契約 2): the UI typeface and size, the page colours. */
+	font-family: var(--font-ui);
+	font-size: var(--text-md);
+	line-height: var(--leading-ui);
+	color: var(--color-text-primary);
+	background-color: var(--color-bg-surface);
+}
+
+/*
+ * Built-in controls (inputs, selects, scrollbars, the caret) follow the mode
+ * too (要件#56 契約 7 第2段 (e)): light by default, dark when the window is set
+ * to Dark, and with the OS while it is set to System. Same three selectors as
+ * theme.css, whose blocks may only redefine tokens (AC-56-5) — so it lives here.
+ */
+:root {
+	color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+	color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		color-scheme: dark;
+	}
+}
+
+/*
+ * Paper is always light (要件#56 判断 (p)・契約 7 第1段の追加 (2)): theme.css
+ * puts the light tokens back for print, and this puts the built-in controls
+ * (task-list checkboxes and the like) back to light too. Three :root win over
+ * the dark rules above, as the print block of theme.css does.
+ */
+@media print {
+	:root:root:root {
+		color-scheme: light;
+	}
+}
+
+/*
+ * Keyboard focus is always visible (要件#56 契約 4): one ring for every
+ * focusable element, in the focus-ring token. Components that draw their own
+ * ring (an inset one inside a row, say) do it in their own :focus-visible rule.
+ */
+:focus-visible {
+	outline: 2px solid var(--color-focus-ring);
+	outline-offset: 2px;
+}
+
+/*
+ * An HTML document keeps the paper it was written for in either mode (要件#56
+ * 契約 2・判断 (o)): its iframe is transparent where the document sets no
+ * background, so the box behind it shows the light canvas colour rather than
+ * the surface token. HtmlViewer.svelte itself stays untouched (契約 6); this
+ * outranks its scoped rule.
+ */
+.app iframe.html-viewer {
+	color-scheme: light;
+	background-color: Canvas;
 }
 
 /* App layout: Explorer (left) + Main (right) + StatusBar (bottom) */
@@ -50,10 +104,10 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-	background-color: #c0c8d0;
+	background-color: var(--color-border-strong);
 	border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-	background-color: #a0a8b0;
+	background-color: var(--color-text-muted);
 }

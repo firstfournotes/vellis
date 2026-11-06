@@ -156,6 +156,18 @@ class WindowState {
 		this.currentDocument = doc;
 	}
 
+	/**
+	 * 同じ URI の文書の中身を差し替える(Reload File のテキスト系の当て方=要件#80 契約 3 追補a)。
+	 * `setDocument` の同じ URI の扱いと同じだが、**ツリーの選択には触らない** —— フォルダの行・
+	 * 開けない種類のファイルの行を選んでいたら、読み直しの後もその行のまま(外の変更の自動追従・
+	 * バイナリの Reload File と同じ扱い)。編集状態は畳まない。
+	 */
+	applyReloadedText(doc: DocumentPayload): void {
+		// 実行列が今の文書の URI でだけ呼ぶので通らないが、別の文書へ編集状態を持ち越さない(契約④)。
+		if (this.currentDocument?.uri !== doc.uri) this.resetEditState();
+		this.currentDocument = doc;
+	}
+
 	/** ツリーの選択を移す(要件#60 契約⑤。フォルダ・開けない種類のファイル)。 */
 	selectTreeItem(uri: string): void {
 		this.selectedTreeUri = uri;

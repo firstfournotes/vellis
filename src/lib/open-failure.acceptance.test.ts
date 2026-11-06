@@ -290,14 +290,16 @@ describe('AC-71-3 / AC-71-5(ソース走査): +page.svelte が pickFolderAndSetR
 		throw new Error(`unbalanced call starting at ${start}`);
 	}
 
-	test('契約3: pickFolderAndSetRoot を $lib/root-picker から import して呼び、<RootPicker> には error と onPickFolder を渡したまま', () => {
+	// 要件#83 契約 1【(s) 決定】(2026-11-05 承認 7 の要件側更新): <RootPicker> は <Dashboard> に置き換わった(字面だけ。
+	// `error={rootPicker.error}` と `onPickFolder=` はそのまま)。
+	test('契約3: pickFolderAndSetRoot を $lib/root-picker から import して呼び、<Dashboard> には error と onPickFolder を渡したまま', () => {
 		const src = page();
 		expect(src).toMatch(/import\s*\{[^}]*\bpickFolderAndSetRoot\b[^}]*\}\s*from\s*'\$lib\/root-picker'/);
 		// import 文の外に呼び出しがある。
 		const importEnd = src.indexOf("'$lib/root-picker'");
 		expect(src.indexOf('pickFolderAndSetRoot(', importEnd)).toBeGreaterThan(-1);
-		expect(src).toMatch(/<RootPicker[\s\S]*?error=\{rootPicker\.error\}[\s\S]*?\/>/);
-		expect(src).toMatch(/<RootPicker[\s\S]*?onPickFolder=/);
+		expect(src).toMatch(/<Dashboard[\s\S]*?error=\{rootPicker\.error\}[\s\S]*?\/>/);
+		expect(src).toMatch(/<Dashboard[\s\S]*?onPickFolder=/);
 	});
 
 	// -----------------------------------------------------------------------

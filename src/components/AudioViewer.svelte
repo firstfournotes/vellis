@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
+	import Icon from './Icon.svelte';
 	import {
 		DEFAULT_AUDIO_WAVEFORM_HEIGHT,
 		audioAxisDuration,
@@ -22,6 +23,7 @@
 		type WaveformResult,
 	} from '$lib/audio-waveform';
 	import { clampWaveformHeight, dragWaveformHeight } from '$lib/waveform-resize';
+	import { observeAppearance } from '$lib/theme';
 	import {
 		SEEK_THUMB_INSET_PX,
 		followWaveformWindow,
@@ -300,6 +302,8 @@
 		const height = waveformHeight;
 		const zoom = waveformZoom;
 		const axisSeconds = barDuration;
+		// 見え方(テーマ・モード・OS の外観)が変わったら色を引き直して描き直す(要件#56 第2段 (e))。
+		void appearanceTick;
 		if (!canvas || width <= 0) return;
 		const ready = result?.state === 'ready' ? result : null;
 		// 等倍のレーンは解析したバッファ全体(末尾の詰め物込み)を割ったものなので、
@@ -308,6 +312,34 @@
 		// 解析中と縮退のときは `waveformLanes` が null =消す ―― 前のファイルの波形が
 		// 残ったまま「解析中」と出ていたら、どちらの音を見ているのか判らない。
 		drawWaveform(canvas, waveformLanes, width, height, laneWidth);
+	});
+
+	/**
+	 * 見え方(テーマ・モード・OS の外観)が変わった回数(要件#56 契約 7 第2段 (e))。canvas の
+	 * 中身はトークンの変化に自動では追従しないので、描画の effect がこれを読み、増えるたびに
+	 * `drawWaveform` が今の色を引き直す。
+	 */
+	let appearanceTick = $state(0);
+
+	/** 新しい色が当たってから(`theme_changed` なら `applyTheme` の後)描き直させる。 */
+	function redrawWaveform(): void {
+		requestAnimationFrame(() => {
+			appearanceTick += 1;
+		});
+	}
+
+	// マウント中だけ見え方の変化を購読する(解除は戻り値の関数)。
+	onMount(() => {
+		let stop: (() => void) | null = null;
+		let disposed = false;
+		void observeAppearance(() => redrawWaveform()).then((off) => {
+			if (disposed) off();
+			else stop = off;
+		});
+		return () => {
+			disposed = true;
+			stop?.();
+		};
 	});
 
 	// 保存値の復元と、ウインドウ高の変化への追従(契約⑪)。clamp をモジュールの
@@ -802,7 +834,7 @@
 				<div class="audio-buttons">
 					<button
 						type="button"
-						class="audio-button"
+						class="audio-button audio-play"
 						title={playing ? 'Pause (Space)' : 'Play (Space)'}
 						onclick={togglePlay}
 					>
@@ -827,7 +859,7 @@
 							aria-label="Zoom In Waveform"
 							onclick={() => zoomWaveformBy(2)}
 						>
-							+
+							<Icon name="zoom-in" size={16} />
 						</button>
 						<button
 							type="button"
@@ -836,7 +868,7 @@
 							aria-label="Zoom Out Waveform"
 							onclick={() => zoomWaveformBy(0.5)}
 						>
-							−
+							<Icon name="zoom-out" size={16} />
 						</button>
 						<button
 							type="button"
@@ -881,23 +913,26 @@
 		flex-direction: column;
 		min-width: 0;
 		overflow: hidden;
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-surface);
 	}
 
+	/* ペインの見出し行(Viewer の `.viewer-toolbar` と同じ寸法= モックの `.ph`)。 */
 	.audio-toolbar {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		flex-shrink: 0;
-		padding: 6px 12px;
-		background-color: var(--color-bg-primary);
+		box-sizing: border-box;
+		min-height: 34px;
+		padding: 4px 8px 4px 12px;
+		background-color: var(--color-bg-surface);
 		border-bottom: 1px solid var(--color-border);
 	}
 
 	.audio-name {
 		flex: 1;
 		min-width: 0;
-		font-size: 12px;
+		font-size: var(--text-sm);
 		color: var(--color-text-secondary);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -957,9 +992,10 @@
 		flex-shrink: 0;
 		overflow: hidden;
 		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-secondary);
-		color: var(--color-text-secondary);
+		border-radius: var(--radius-sm);
+		background-color: var(--color-bg-base);
+		/* 波形の塗り(モックの波形= 文字の薄い色)。 */
+		color: var(--color-text-muted);
 		cursor: pointer; /* 左右の余白もクリックでシークできる(要件#41 追補g 契約6) */
 	}
 
@@ -991,7 +1027,7 @@
 		z-index: 1;
 		width: 1px;
 		height: 100%;
-		background-color: var(--color-text-primary);
+		background-color: var(--color-accent-text);
 		pointer-events: none;
 	}
 
@@ -1003,11 +1039,13 @@
 		position: absolute;
 		left: 3px;
 		padding: 1px 3px;
-		border-radius: 2px;
+		border-radius: 3px;
 		font-size: 10px;
+		font-family: var(--font-mono);
+		font-weight: 600;
 		line-height: 1.2;
-		color: var(--color-text-secondary);
-		background-color: var(--color-bg-secondary);
+		color: var(--color-text-muted);
+		background-color: var(--color-bg-base);
 		pointer-events: none;
 	}
 
@@ -1018,8 +1056,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 12px;
-		color: var(--color-text-secondary);
+		font-size: var(--text-sm);
+		color: var(--color-text-muted);
 		pointer-events: none;
 	}
 
@@ -1030,7 +1068,7 @@
 		gap: 6px;
 		padding: 8px 12px 10px;
 		border-top: 1px solid var(--color-border);
-		background-color: var(--color-bg-primary);
+		background-color: var(--color-bg-surface);
 	}
 
 	/* シークバーの器(契約⑦)。窓指標を重ねるための位置基準。 */
@@ -1049,10 +1087,10 @@
 		top: 0;
 		bottom: 0;
 		box-sizing: border-box;
-		border: 1px solid var(--color-text-secondary);
+		border: 1px solid var(--color-accent-text);
 		border-radius: 3px;
-		background-color: var(--color-bg-hover);
-		opacity: 0.5;
+		background-color: var(--color-accent-soft);
+		opacity: 0.8;
 		pointer-events: none;
 	}
 
@@ -1060,7 +1098,7 @@
 		display: block;
 		width: 100%;
 		margin: 0;
-		accent-color: var(--color-text-secondary);
+		accent-color: var(--color-accent);
 		cursor: pointer;
 	}
 
@@ -1074,18 +1112,50 @@
 		gap: 6px;
 	}
 
+	/*
+	 * 操作部のボタン(モックの `.btn` を小さくしたもの= 28px・角丸 6px)。ホバーは地の上に
+	 * `--color-bg-hover` を重ねる。再生だけはアクセントの主ボタン(モックの `.play`)。
+	 */
 	.audio-button {
-		font-size: 12px;
-		padding: 4px 10px;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background-color: var(--color-bg-secondary);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: 28px;
+		box-sizing: border-box;
+		padding: 0 10px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		line-height: 1;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
 		color: var(--color-text-primary);
 		cursor: pointer;
+		white-space: nowrap;
 	}
 
 	.audio-button:hover {
-		background-color: var(--color-bg-hover);
+		background-image: linear-gradient(var(--color-bg-hover), var(--color-bg-hover));
+	}
+
+	.audio-play {
+		min-width: 64px;
+		background-color: var(--color-accent);
+		border-color: transparent;
+		color: var(--color-on-accent);
+	}
+
+	.audio-play:hover {
+		background-image: none;
+		filter: brightness(1.1);
+	}
+
+	/* 消音中は押し込んだ見た目(見出し行のトグルと同じ)。 */
+	.audio-mute[aria-pressed='true'] {
+		background-color: var(--color-accent-soft);
+		border-color: var(--color-accent);
+		color: var(--color-accent-text);
 	}
 
 	/*
@@ -1101,6 +1171,8 @@
 
 	.audio-zoom {
 		min-width: 32px;
+		padding: 0 6px;
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* 消音トグルは残りを右へ押しやる位置に置く。 */
@@ -1114,13 +1186,20 @@
 	 */
 	.audio-readout {
 		display: flex;
-		align-items: baseline;
-		gap: 10px;
+		align-items: stretch;
 		margin-left: 8px;
-		font-size: 12px;
+		border: 1px solid var(--color-border);
+		border-radius: 7px;
+		overflow: hidden;
+		font-size: var(--text-sm);
 		font-variant-numeric: tabular-nums;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		color: var(--color-text-secondary);
+		font-family: var(--font-mono);
+		color: var(--color-text-primary);
+	}
+
+	.audio-readout > span {
+		padding: 4px 10px;
+		white-space: nowrap;
 	}
 
 	.audio-placeholder {

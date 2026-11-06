@@ -47,7 +47,11 @@ import { vellisSchema } from './sanitize-schema';
 import { buildSourceIndex } from './source-index';
 import type { NodeMeta, SourceIndex } from './types';
 
-const SHIKI_THEME = 'github-light';
+/**
+ * Shiki theme used when the caller names none: the light code theme of the
+ * built-in Default theme (themes/default.json `code.light`, 要件#56 契約 2).
+ */
+const DEFAULT_SHIKI_THEME = 'github-light';
 
 const PRELOAD_LANGS: BundledLanguage[] = [
 	'typescript',
@@ -68,7 +72,21 @@ export interface RenderResult {
 	index: SourceIndex;
 }
 
-export async function render(source: string, baseUri: string): Promise<RenderResult> {
+export interface RenderOptions {
+	/**
+	 * Shiki theme for the code fences — one of Shiki's bundled themes, picked by
+	 * the window from the current theme and mode (要件#56 契約 3). Omitted: the
+	 * Default theme's light one.
+	 */
+	codeTheme?: string;
+}
+
+export async function render(
+	source: string,
+	baseUri: string,
+	options: RenderOptions = {},
+): Promise<RenderResult> {
+	const codeTheme = options.codeTheme ?? DEFAULT_SHIKI_THEME;
 	const metas: NodeMeta[] = [];
 	// 要件#52 契約④: Shiki は fence の <pre> を作り直して属性を落とすので、
 	// 前後で挟んで source-map の属性を引き継ぐ。控えはレンダーごとに作る。
@@ -86,9 +104,9 @@ export async function render(source: string, baseUri: string): Promise<RenderRes
 		.use(rehypeVellisMermaid)
 		.use(codeAttrs.hoist)
 		// 要件#69 契約9: 表の言語のフェンスは、出てきたものだけをここで読み込む。
-		.use(rehypeVellisFenceLangs, { theme: SHIKI_THEME })
+		.use(rehypeVellisFenceLangs, { theme: codeTheme })
 		.use(rehypeShiki, {
-			theme: SHIKI_THEME,
+			theme: codeTheme,
 			langs: PRELOAD_LANGS,
 		})
 		.use(codeAttrs.restore)

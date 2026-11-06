@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { windowState } from '../stores/window-state.svelte';
 	import { getBuildInfo, type BuildInfo } from '../lib/buildInfo';
+	import Icon from './Icon.svelte';
 
 	let buildInfo = $state<BuildInfo | null>(null);
 
@@ -35,6 +36,8 @@
 </script>
 
 <footer class="status-bar">
+	<!-- root の前にフォルダのアイコン(モックのステータスバー)。 -->
+	{#if rootDisplay}<span class="status-icon"><Icon name="folder" size={13} /></span>{/if}
 	<span class="status-root" title={windowState.root}>{rootDisplay}</span>
 	<span class="status-spacer"></span>
 	{#if fileName}
@@ -46,24 +49,35 @@
 </footer>
 
 <style>
+	/*
+	 * ステータスバー(モックの `.sb`= 24px・小さく薄い文字・窓の地の色)。本文の面との
+	 * 境目は上端の 1px の線(ダークで境界が沈まないように=第1段の人間ゲートの指摘)。
+	 */
 	.status-bar {
 		display: flex;
 		align-items: center;
+		box-sizing: border-box;
 		height: 24px;
-		padding: 0 10px;
-		font-size: 12px;
-		color: #ffffff;
-		background-color: #24292e;
+		padding: 0 12px 0 14px;
+		font-size: var(--text-xs);
+		color: var(--color-text-muted);
+		background-color: var(--color-bg-base);
+		border-top: 1px solid var(--color-border);
 		flex-shrink: 0;
-		gap: 8px;
+		gap: 14px;
 		white-space: nowrap;
 		overflow: hidden;
+	}
+
+	.status-icon {
+		display: inline-flex;
+		flex-shrink: 0;
+		margin-right: -9px; /* アイコンと root の間はモックの 5px(バーの gap 14px から詰める) */
 	}
 
 	.status-root {
 		overflow: hidden;
 		text-overflow: ellipsis;
-		opacity: 0.8;
 	}
 
 	.status-spacer {
@@ -73,12 +87,11 @@
 	.status-file {
 		flex-shrink: 0;
 		font-weight: 500;
+		color: var(--color-text-secondary);
 	}
 
 	.status-version {
 		flex-shrink: 0;
-		opacity: 0.55;
-		font-size: 11px;
 		font-variant-numeric: tabular-nums;
 	}
 </style>

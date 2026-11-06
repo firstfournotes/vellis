@@ -11,6 +11,7 @@
 	 * 表示専用。イベントの購読と開閉は +page.svelte が持つ(窓ごとに独立)。
 	 */
 	import { openUrl } from '@tauri-apps/plugin-opener';
+	import Icon from './Icon.svelte';
 
 	let {
 		version,
@@ -27,61 +28,96 @@
 	}
 </script>
 
+<!--
+	モック画面 7 の更新トースト(要件#56 第2段)。右下に浮かぶ 1 段(`--color-bg-raised` +
+	`--shadow-2` + `--radius-md`)で、本文の操作は止めない(非モーダルのまま)。
+-->
 <div class="update-banner" role="status">
 	<span class="update-message">A new version v{version} is available</span>
-	<button class="update-download" onclick={download}>Download</button>
-	<button class="update-close" onclick={onClose} aria-label="Dismiss" title="Close">✕</button>
+	<button class="update-download" onclick={download}
+		><Icon name="download" size={14} />Download</button
+	>
+	<button class="update-close" onclick={onClose} aria-label="Dismiss" title="Close"
+		><Icon name="x" size={14} /></button
+	>
 </div>
 
 <style>
+	/*
+	 * 右下のトースト(モックの `.toast`)。並びは文言・Download・閉じるのまま(DOM の順は
+	 * 変えない)で、grid で「文言 + 閉じる」の行と Download の行に置く。下端は StatusBar
+	 * (24px)の上に浮かせる。重なりの 1 段(要件#56 契約 4)。
+	 */
 	.update-banner {
-		display: flex;
+		position: fixed;
+		right: 18px;
+		bottom: 36px;
+		z-index: 150;
+		box-sizing: border-box;
+		width: min(340px, calc(100vw - 36px));
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-areas:
+			'message close'
+			'download .';
 		align-items: center;
-		gap: 12px;
-		flex-shrink: 0;
-		padding: 6px 12px;
-		font-size: 13px;
+		gap: 10px 8px;
+		padding: 12px 10px 12px 16px;
+		font-size: var(--text-md);
 		color: var(--color-text-primary);
-		background-color: var(--color-bg-secondary);
-		border-bottom: 1px solid var(--color-border);
+		background-color: var(--color-bg-raised);
+		border-radius: var(--radius-md);
+		box-shadow: var(--shadow-2);
 	}
 
 	.update-message {
-		flex: 1;
+		grid-area: message;
+		font-weight: 600;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
+	/* 主ボタン(モックの `.btn.pri`)。 */
 	.update-download {
-		background-color: var(--color-bg-primary);
-		border: 1px solid var(--color-border);
+		grid-area: download;
+		justify-self: start;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		height: 28px;
+		padding: 0 12px;
+		border: 1px solid transparent;
 		border-radius: 6px;
-		color: var(--color-text-primary);
+		background-color: var(--color-accent);
+		color: var(--color-on-accent);
 		cursor: pointer;
 		font: inherit;
-		font-size: 13px;
-		padding: 2px 12px;
+		font-size: var(--text-sm);
+		font-weight: 500;
 	}
 
 	.update-download:hover {
-		background-color: var(--color-bg-hover);
+		filter: brightness(1.1);
 	}
 
 	.update-close {
+		grid-area: close;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
 		background: transparent;
 		border: none;
-		border-radius: 4px;
-		color: var(--color-text-secondary);
+		border-radius: 5px;
+		color: var(--color-text-muted);
 		cursor: pointer;
-		font: inherit;
-		font-size: 13px;
-		line-height: 1;
-		padding: 4px 6px;
 	}
 
 	.update-close:hover {
 		background-color: var(--color-bg-hover);
-		color: var(--color-text-hover);
+		color: var(--color-text-primary);
 	}
 </style>

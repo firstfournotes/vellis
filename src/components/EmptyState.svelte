@@ -13,36 +13,41 @@
 </div>
 
 <style>
+	/*
+	 * 文書が無いときの面(要件#56 判断 (r)= 塗るだけ)。文字の組はモックの起動画面の
+	 * 銘(太い 30px・字間を詰める)・版(小さく薄く)・案内(15px・secondary)にそろえる。
+	 */
 	.empty-state {
 		flex: 1;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		min-width: 0;
-		background-color: #ffffff;
+		background-color: var(--color-bg-surface);
 	}
 
 	.empty-content {
 		text-align: center;
-		color: #656d76;
+		color: var(--color-text-secondary);
 	}
 
 	.app-name {
-		font-size: 2rem;
-		font-weight: 300;
-		color: #1f2328;
-		margin: 0 0 4px;
-		letter-spacing: 0.05em;
+		font-size: 30px;
+		font-weight: 700;
+		line-height: 1.1;
+		color: var(--color-text-primary);
+		margin: 0 0 6px;
+		letter-spacing: -0.02em;
 	}
 
 	.version {
-		font-size: 0.85rem;
-		color: #a0a8b0;
-		margin: 0 0 16px;
+		font-size: var(--text-sm);
+		color: var(--color-text-muted);
+		margin: 0 0 18px;
 	}
 
 	.hint {
-		font-size: 0.95rem;
+		font-size: var(--text-lg);
 		margin: 0;
 	}
 </style>

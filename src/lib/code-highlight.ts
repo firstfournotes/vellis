@@ -24,12 +24,17 @@ import {
 	getTokenStyleObject,
 	stringifyTokenStyle,
 	type BundledLanguage,
+	type BundledTheme,
 	type GrammarState,
 	type ThemedToken,
 } from 'shiki';
 
-/** フェンスと同じテーマ(起案時判断 (f))。 */
-const THEME = 'github-light';
+/**
+ * 呼び手がテーマを渡さないときのテーマ= Default のライトのコードのテーマ
+ * (themes/default.json の `code.light`)。フェンスと同じテーマを使う(起案時判断 (f)・
+ * 要件#56 契約 3= 窓がテーマとモードから選んで渡す)。
+ */
+const DEFAULT_THEME = 'github-light';
 
 /** 文字数(JavaScript の文字列の長さ)の上限。超えたら色付けしない。 */
 const MAX_CHARS = 524_288;
@@ -74,12 +79,17 @@ function renderLine(tokens: ThemedToken[]): string {
 
 /**
  * `content` を `lang`(Shiki の言語 id)で色付けした html。上限(契約6)に
- * 当たったとき・失敗したときは null。
+ * 当たったとき・失敗したときは null。`theme` は Shiki の同梱テーマの名前(省略時は
+ * Default のライト)。
  */
-export async function highlightCode(content: string, lang: string): Promise<string | null> {
+export async function highlightCode(
+	content: string,
+	lang: string,
+	theme: string = DEFAULT_THEME,
+): Promise<string | null> {
 	if (content.length > MAX_CHARS || lineCount(content) > MAX_LINES) return null;
 	try {
-		const highlighter = await getSingletonHighlighter({ themes: [THEME], langs: [lang] });
+		const highlighter = await getSingletonHighlighter({ themes: [theme], langs: [lang] });
 
 		const start = performance.now();
 		// Shiki と同じ行の割り方(`\r?\n`。単独の CR は行の中に残る)。
@@ -90,7 +100,8 @@ export async function highlightCode(content: string, lang: string): Promise<stri
 			const tokens = highlighter.codeToTokensBase(line, {
 				// 表(`$lib/code-language`)の id はどれも Shiki の言語名か別名。
 				lang: lang as BundledLanguage,
-				theme: THEME,
+				// 呼び手(窓)が同梱テーマの名前を選んで渡す(`$lib/theme` の resolveCodeTheme)。
+				theme: theme as BundledTheme,
 				grammarState,
 				tokenizeMaxLineLength: MAX_LINE_LENGTH,
 			});

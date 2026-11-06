@@ -1,7 +1,9 @@
 pub mod annotation;
 pub mod app;
 pub mod asset;
+pub mod bookmarks;
 pub mod build_info;
+pub mod dashboard;
 pub mod dir_watch;
 pub mod document;
 pub mod history;
@@ -12,6 +14,7 @@ pub mod root;
 pub mod search;
 #[cfg(feature = "webdriver")]
 pub mod test_helpers;
+pub mod theme;
 pub mod video;
 pub mod wav_waveform;
 pub mod waveform;

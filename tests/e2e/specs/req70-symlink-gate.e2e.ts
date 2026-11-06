@@ -370,12 +370,20 @@ describe('Requirement #70 human gates 1-4 (symlink rows in the Explorer)', () =>
 			};
 		});
 		// Requirement #70 契約6 + 追補a: the name stays --color-text-muted, the badge
-		// is drawn in --color-text-secondary (WCAG 1.4.11), and both differ from
-		// the name colour of a normal link.
+		// is drawn in --color-text-secondary (WCAG 1.4.11), and the name differs
+		// from the name colour of a normal link.
 		expect(parseColor(broken.nameColor)).toEqual(parseColor(tokens.muted));
 		expect(parseColor(broken.badge!.color)).toEqual(parseColor(tokens.secondary));
 		expect(broken.nameColor).not.toBe(normal.nameColor);
-		expect(broken.badge!.color).not.toBe(normal.nameColor);
+		// 要件56 の見た目に合わせた(2026-11-06 由谷承認): a plain tree row's name is
+		// now --color-text-secondary too, so the broken badge can no longer be
+		// told apart from a normal link's *name*. The distinction that remains is
+		// against the normal link's *badge* (--color-text-primary): the broken
+		// badge is a different colour and fainter, i.e. it has less contrast
+		// against the row background it sits on.
+		const rowBg = await effectiveBackground(brokenUri);
+		expect(broken.badge!.color).not.toBe(normal.badge!.color);
+		expect(contrastRatio(broken.badge!.color, rowBg)).toBeLessThan(contrastRatio(normal.badge!.color, rowBg));
 		report(REPORT, {
 			gate: '70-3-colour',
 			mutedToken: tokens.muted,
@@ -384,6 +392,9 @@ describe('Requirement #70 human gates 1-4 (symlink rows in the Explorer)', () =>
 			brokenBadge: broken.badge!.color,
 			linkName: normal.nameColor,
 			linkBadge: normal.badge!.color,
+			rowBackground: rowBg,
+			brokenBadgeVsRow: contrastRatio(broken.badge!.color, rowBg),
+			linkBadgeVsRow: contrastRatio(normal.badge!.color, rowBg),
 		});
 
 		// Show a document first, so "nothing happened" has something to keep.
@@ -528,7 +539,9 @@ describe('Requirement #70 human gates 1-4 (symlink rows in the Explorer)', () =>
 		);
 		await record('selected', linkUri);
 		const selectedRow = (await rowInfo(linkUri))!;
-		expect(selectedRow.nameWeight).toBe('600');
+		// 要件56 の見た目に合わせた(2026-11-06 由谷承認): `.explorer-item.active` is
+		// now `font-weight: 500` (it was 600 up to v0.5.5).
+		expect(selectedRow.nameWeight).toBe('500');
 		await zoomedShot('req70-gate4-selected-crop-x4', { x: tr.x, y: (await rowInfo(linkUri))!.rowRect.y - 60, width: Math.min(tr.width, 260), height: 200 }, 4);
 		// A broken link cannot be selected by clicking; select it through Go to.
 		await emitMenu('menu_go_to');

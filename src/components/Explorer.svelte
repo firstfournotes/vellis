@@ -9,11 +9,13 @@
 	import { DEFAULT_PANE_WIDTH } from '$lib/pane-resize';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
 	import { parentUri } from '$lib/uri';
+	import { createFolderReloader } from '$lib/reload-file';
 	import type { NewWindowAction } from '$lib/context-menu';
 	import { windowState, type Entry } from '../stores/window-state.svelte';
 	import { contextMenu } from '../stores/context-menu.svelte';
 	import ContextMenu from './ContextMenu.svelte';
 	import ExplorerItem from './ExplorerItem.svelte';
+	import Icon from './Icon.svelte';
 
 	type RootPayload = {
 		root_uri: string;
@@ -29,7 +31,8 @@
 		explorerZoom = DEFAULT_ZOOM,
 		onDuplicateWindow,
 		onOpenInNewWindow,
-		onFindInFolder
+		onFindInFolder,
+		onReloadFile
 	}: {
 		root: string;
 		entries: Entry[];
@@ -53,6 +56,12 @@
 		 * ページ側から受け取って呼ぶだけ(パネルの出し入れはページ側の持ち場)。
 		 */
 		onFindInFolder?: () => void;
+		/**
+		 * 右クリックの Reload File(要件#80 契約 8・9)。実行列(確認・読み直し・ツリー)は
+		 * ページ側にあり、View ▸ Reload File と同じものを呼ぶ=ここは中継するだけ。
+		 * 引数は行の URI(本文のメニューは null=今の文書)。省略時は何もしない。
+		 */
+		onReloadFile?: (uri: string | null) => void;
 	} = $props();
 
 	// 親フォルダの導出は `$lib/uri` の共有実装(要件#59 起案時判断 (f))。
@@ -127,6 +136,23 @@
 	}
 
 	/**
+	 * 右クリックの Reload Folder(要件#80 契約 14・15)。フォルダの行はそのフォルダとその下の
+	 * 展開中のフォルダ、空白(null)は root と展開中のフォルダを `list_dir` で読み直し、
+	 * 監視の `directory_changed` と同じ当て方で当てる(展開の状態は保つ)。畳んである行は
+	 * 開くだけ(読むのは ExplorerItem の展開の effect)。失敗は 1 回だけ知らせる。
+	 * 窓に 1 つ=最中の重ね押しは実行列が捨てる。
+	 */
+	const folderReloader = createFolderReloader({
+		root: () => windowState.root,
+		expandedDirs: () => windowState.expandedDirs,
+		isExpanded: (uri) => windowState.isExpanded(uri),
+		expand: (uri) => windowState.toggleExpanded(uri),
+		listDir: (uri) => invoke<Entry[]>('list_dir', { uri }),
+		apply: (uri, entries) => windowState.applyDirectoryEvent(uri, entries),
+		notify: (message) => alert(message)
+	});
+
+	/**
 	 * ツリーの空白部分の右クリック(要件#34③)。アイテムを指していないので、
 	 * 出すのは窓に効く項目だけのメニュー。
 	 *
@@ -155,18 +181,8 @@
 			title="Find in Folder"
 			aria-label="Find in Folder"
 		>
-			<svg
-				aria-hidden="true"
-				width="20"
-				height="20"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-				><circle cx="11" cy="11" r="7" /><line x1="16.5" y1="16.5" x2="21" y2="21" /></svg
-			>
+			<!-- 虫眼鏡はモックの i-search(要件#56 契約 5)。追補c-3 の 20px 角のまま。 -->
+			<Icon name="search" size={20} />
 		</button>
 		<button
 			class="up-button"
@@ -175,7 +191,7 @@
 			title="Go to Parent Folder"
 			aria-label="Go to Parent Folder"
 		>
-			↑
+			<Icon name="arrow-u" size={18} />
 		</button>
 	</div>
 	<!-- 等倍では宣言を出さない(Viewer.svelte の .markdown-body と同じ流儀=導入前と同じ DOM)。 -->
@@ -197,9 +213,15 @@
 <!--
 	コンテキストメニューはウインドウにつき1つ(要件#19)。position: fixed なので
 	Explorer の overflow には切られず、ツリーの外にもはみ出して表示できる。
-	アイテムのメニューも空白部のメニュー(要件#34)もこの1つが描く。
+	アイテムのメニューも空白部のメニュー(要件#34)も文書の本文のメニュー(要件#80)もこの1つが描く。
 -->
-<ContextMenu {onDuplicateWindow} {onOpenInNewWindow} onOpenInNewTab={openInNewTab} />
+<ContextMenu
+	{onDuplicateWindow}
+	{onOpenInNewWindow}
+	onOpenInNewTab={openInNewTab}
+	{onReloadFile}
+	onReloadFolder={(uri) => void folderReloader.reload(uri)}
+/>
 
 <style>
 	/*
@@ -212,24 +234,30 @@
 		display: flex;
 		flex-direction: column;
 		border-right: 1px solid var(--color-border);
-		background-color: var(--color-bg-secondary);
+		background-color: var(--color-bg-base);
 		overflow: hidden;
 	}
 
+	/*
+	 * 区画の見出し行(モックの `.sh`=大文字・小さく・薄く。要件#56 判断 (q))。高さは
+	 * モックのペインの見出しと同じ 34px にそろえ、右端に 28px 角のボタンを並べる。
+	 */
 	.explorer-header {
-		padding: 6px 8px 6px 12px;
+		box-sizing: border-box;
+		min-height: 34px;
+		padding: 3px 6px 3px 14px;
 		/* 要件#64 追補b: 文字は下の区画の見出しと同じトークン(theme.css)。 */
 		font-size: var(--pane-header-font-size);
 		font-weight: var(--pane-header-font-weight);
 		text-transform: uppercase;
 		letter-spacing: var(--pane-header-letter-spacing);
-		color: var(--color-text-secondary);
+		color: var(--color-text-muted);
 		border-bottom: 1px solid var(--color-border);
 		flex-shrink: 0;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 8px;
+		gap: 2px;
 	}
 
 	/* 要件#55 追補c: ボタンが 2 つになったので、見出しを左に寄せ、↑ と検索を右に並べる。 */
@@ -240,7 +268,7 @@
 	.up-button {
 		background: transparent;
 		border: 1px solid transparent;
-		border-radius: 4px;
+		border-radius: 6px;
 		color: var(--color-text-secondary);
 		cursor: pointer;
 		/* 要件#55 追補c-3: ↑ も ⌕ と同じ約 28px 角の外形に揃え、文字を 18px に上げる。 */
@@ -269,8 +297,7 @@
 
 	.up-button:hover:not(:disabled) {
 		background-color: var(--color-bg-hover);
-		border-color: var(--color-border);
-		color: var(--color-text-hover);
+		color: var(--color-text-primary);
 	}
 
 	.up-button:disabled {
@@ -278,9 +305,10 @@
 		opacity: 0.3;
 	}
 
+	/* 行の角丸の選択色を区画の縁から離す(モックの `.tree`= 左右 6px)。 */
 	.explorer-list {
 		flex: 1;
 		overflow-y: auto;
-		padding: 4px 0;
+		padding: 4px 6px;
 	}
 </style>

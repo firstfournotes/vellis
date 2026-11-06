@@ -244,9 +244,12 @@ fn ac65c_matching_after_the_slash_is_stripped_is_unchanged() {
 ///    ツリーから `docs` と `docs/a.md` が隠れ、`docsx` は隠れない。`false` の行は効かない。
 #[test]
 fn ac65c_files_exclude_entry_with_a_trailing_slash_hides_the_folder_from_the_tree() {
+    // 要件#56(2026-11-02・棚卸し 7 の拡大=由谷承認)で `Settings` に `appearance_theme` が加わったため、
+    // 残りの項目は既定値で埋める(判定の中身は変えない)。
     let settings = Settings {
         files_exclude: ExcludeMap::from([("docs/".to_string(), true)]),
         search_exclude: ExcludeMap::new(),
+        ..Settings::default()
     };
     assert!(is_hidden_from_tree("docs", &settings), "docs/ hides docs");
     assert!(is_hidden_from_tree("docs/a.md", &settings), "docs/ hides docs/a.md");
@@ -257,6 +260,7 @@ fn ac65c_files_exclude_entry_with_a_trailing_slash_hides_the_folder_from_the_tre
     let disabled = Settings {
         files_exclude: ExcludeMap::from([("docs/".to_string(), false)]),
         search_exclude: ExcludeMap::new(),
+        ..Settings::default()
     };
     assert!(!is_hidden_from_tree("docs", &disabled), "a false entry is off");
     assert!(!is_hidden_from_tree("docs/a.md", &disabled), "a false entry is off");

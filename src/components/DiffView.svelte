@@ -15,6 +15,7 @@
 		type Hunk,
 		type Mark,
 	} from '$lib/annotation';
+	import Icon from './Icon.svelte';
 
 	let {
 		open,
@@ -151,7 +152,7 @@
 					</button>
 				{/if}
 				<button type="button" class="close" onclick={onClose} aria-label="Close">
-					×
+					<Icon name="x" size={16} />
 				</button>
 			</div>
 		</header>
@@ -182,13 +183,15 @@
 {/if}
 
 <style>
+	/* 暗くする層(要件#56 契約 4= `--color-shadow`)。 */
 	.overlay {
 		position: fixed;
 		inset: 0;
-		background-color: rgba(0, 0, 0, 0.5);
+		background-color: var(--color-shadow);
 		z-index: 200;
 	}
 
+	/* 重なりの 1 段(要件#56 契約 4= `--color-bg-raised` + `--shadow-2` + `--radius-md`)。 */
 	.diff-view {
 		position: fixed;
 		top: 5vh;
@@ -199,9 +202,11 @@
 		z-index: 201;
 		display: flex;
 		flex-direction: column;
-		background-color: #ffffff;
-		border-radius: 8px;
-		box-shadow: 0 24px 64px rgba(0, 0, 0, 0.25);
+		background-color: var(--color-bg-raised);
+		border-radius: var(--radius-md);
+		box-shadow: var(--shadow-2);
+		overflow: hidden;
+		color: var(--color-text-primary);
 	}
 
 	header {
@@ -210,15 +215,15 @@
 		justify-content: space-between;
 		gap: 12px;
 		padding: 12px 16px;
-		border-bottom: 1px solid #e5e7eb;
+		border-bottom: 1px solid var(--color-border);
 	}
 
 	h2 {
 		margin: 0;
-		font-size: 14px;
+		font-size: var(--text-md);
 		font-weight: 600;
-		font-family: ui-monospace, SFMono-Regular, monospace;
-		color: #1f2937;
+		font-family: var(--font-mono);
+		color: var(--color-text-primary);
 	}
 
 	.header-right {
@@ -229,19 +234,24 @@
 
 	.mode-toggle {
 		display: flex;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
+		border: 1px solid var(--color-border-strong);
+		border-radius: var(--radius-sm);
 		overflow: hidden;
 	}
 
 	.mode-tab {
-		font-size: 11px;
+		font: inherit;
+		font-size: var(--text-xs);
 		padding: 4px 10px;
 		border: none;
-		border-right: 1px solid #d1d5db;
-		background-color: #ffffff;
-		color: #6b7280;
+		border-right: 1px solid var(--color-border-strong);
+		background-color: var(--color-bg-raised);
+		color: var(--color-text-secondary);
 		cursor: pointer;
+	}
+
+	.mode-tab:hover:not(.active) {
+		color: var(--color-text-primary);
 	}
 
 	.mode-tab:last-child {
@@ -249,57 +259,69 @@
 	}
 
 	.mode-tab.active {
-		background-color: #2563eb;
-		color: #ffffff;
+		background-color: var(--color-accent);
+		color: var(--color-on-accent);
 	}
 
 	.revert,
 	.close {
-		font-size: 12px;
+		font: inherit;
+		font-size: var(--text-sm);
+		font-weight: 500;
 		padding: 4px 12px;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		background-color: #ffffff;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+		background-color: var(--color-bg-raised);
 		cursor: pointer;
 	}
 
 	.revert {
-		color: #b91c1c;
-		border-color: #fca5a5;
+		color: var(--color-danger);
+		border-color: var(--color-danger);
 	}
 
 	.revert:hover {
-		background-color: #fef2f2;
+		background-color: var(--color-danger-soft);
 	}
 
 	.close {
-		font-size: 16px;
-		padding: 0 10px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		padding: 0;
 		border-color: transparent;
-		color: #6b7280;
+		background-color: transparent;
+		color: var(--color-text-secondary);
+	}
+
+	.close:hover {
+		background-color: var(--color-bg-hover);
+		color: var(--color-text-primary);
 	}
 
 	.body {
 		flex: 1;
 		overflow: auto;
 		padding: 12px 16px;
-		background-color: #fafafa;
+		background-color: var(--color-bg-base);
 	}
 
 	.placeholder {
 		text-align: center;
-		color: #6b7280;
+		color: var(--color-text-secondary);
 		font-size: 12px;
 		padding: 32px 16px;
 	}
 
 	.placeholder.error {
-		color: #b91c1c;
+		color: var(--color-danger);
 	}
 
 	pre {
 		margin: 0;
-		font-family: ui-monospace, SFMono-Regular, monospace;
+		font-family: var(--font-mono);
 		font-size: 12px;
 		line-height: 1.5;
 		white-space: pre-wrap;
@@ -307,31 +329,31 @@
 	}
 
 	.inline-diff {
-		background-color: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 4px;
+		background-color: var(--color-bg-surface);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
 		padding: 8px 12px;
 	}
 
 	.hunk-equal {
-		color: #374151;
+		color: var(--color-text-primary);
 	}
 
 	.hunk-insert {
 		display: inline;
-		background-color: #dcfce7;
-		color: #166534;
+		background-color: var(--color-success-soft);
+		color: var(--color-success);
 	}
 
 	.hunk-delete {
 		display: inline;
-		background-color: #fee2e2;
-		color: #991b1b;
+		background-color: var(--color-danger-soft);
+		color: var(--color-danger);
 		text-decoration: line-through;
 	}
 
 	.hunk-anchor {
-		outline: 2px solid #fde047;
+		outline: 2px solid var(--color-warning);
 	}
 
 	.side-by-side {
@@ -341,9 +363,9 @@
 	}
 
 	.col {
-		background-color: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 4px;
+		background-color: var(--color-bg-surface);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
 		padding: 8px 12px;
 		position: relative;
 		overflow-x: auto;
@@ -354,7 +376,7 @@
 		font-size: 10px;
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
-		color: #6b7280;
+		color: var(--color-text-secondary);
 		margin-bottom: 4px;
 	}
 </style>
