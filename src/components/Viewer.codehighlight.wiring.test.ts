@@ -1,56 +1,25 @@
 /**
- * 要件#69 の受け入れテスト(docs/requirements/req-69.md)— Viewer の配線
- * (component プロジェクト)
+ * 要件#69(コードのファイルの色)の配線の後継 — 要件74 第2段 2-5(2026-11-17 仮・契約5・契約21・棚卸し 4・7「書き直し」=承認済み (r)(as))。
  *
- * 純関数側(言語の表・色付きの html の形・上限・検索の一致計算)は
- * src/lib/code-highlight.acceptance.test.ts(unit 側)。ここは `Viewer.svelte` を JSDOM
- * にマウントし、**本番の `renderForDisplay` が返す色付きの html** を props に渡して、
- * 閲覧(色付き)⇄ 編集(素テキスト)の往復と、検索バーの件数が色付きでも変わらない
- * ことを判定する。既存の wiring テスト(Viewer.edit / Viewer.find / Viewer.codeedit)は
- * 書き換えず、本要件用に新設(家風はそこに倣う)。
- *
- * ## 判定するもの(AC 番号は req-69.md の受け入れ基準)
- * - **AC-69-7(契約4)**: `.ts` の文書と色付きの html を渡すと、閲覧中の
- *   `pre.vellis-plaintext` は contenteditable でなく、中に `span`(style 付き)がある。
- *   その `span` をダブルクリックすると `editMode` が `edit` になり、
- *   `pre.vellis-plaintext[contenteditable="true"]` の `textContent` は `document.content`
- *   と一致し、子要素を持たない(素テキスト)。Command + E で入っても同じ ――
- *   `menu_edit` は +page.svelte が受けて `windowState.beginEdit()` を呼ぶ(Viewer は
- *   購読しない)ので、ここでは `beginEdit()` を直接呼んで到着を写す(Viewer.edit の家風)。
- *   編集を破棄(非 dirty の Esc)して閲覧に戻ると、色付きの `span` が再び見える
- * - **AC-69-8(契約7)の Viewer の部分**: 色付きの `.ts` に検索を開いて語を入れると、
- *   件数の表示がプレーン表示(`<pre class="vellis-plaintext">\n…</pre>`)のときと同じ。
- *   Next の送り・Esc で閉じてハイライトが消える動きも変わらない
- *
- * ## 判定しないもの
- * - 言語の判定・上限・エスケープ・一致範囲の中身 → unit 側
- * - +page.svelte の `menu_edit` 購読そのもの → 既存の要件48 の照合
- * - 色の見た目・保存後に色が戻る見え方 → 人間ゲート
- *
- * ## スタブの設計(Viewer.find.wiring の家風)
- * - $lib/ipc / @tauri-apps/plugin-opener / @tauri-apps/plugin-dialog / $lib/mermaid-mounter:
- *   モジュールモック(Tauri 実体なし)
- * - $lib/events: `listen` を控えて `menu_find` の到着を写す(__eventHandlers は裏口)
+ * 要件69 の「閲覧は Shiki の色付きの pre・ダブルクリック / Command + E で素テキストの編集面」は、要件74 契約5 で「開いた時点から
+ * CodeMirror の面(色は Lezer・そのまま打てる)」に置き換わった。Shiki の `<pre>` は印刷の直前だけ(AC-74-39)。
+ * AC-69-8(色付きでも検索の件数は同じ)は CodeMirror の面の全文検索(AC-74-31)として残る。
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { EditorView as CMView } from '@codemirror/view';
 import Viewer from './Viewer.svelte';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
-import { renderForDisplay } from '$lib/file-type';
+import { render as renderMarkdown } from '../markdown/renderer';
+import type { SourceIndex } from '../markdown/types';
+import { contentHash } from '$lib/document-edit';
+import { saveFileEditor, type FileEditorHandle } from '../editor/file-editor';
 
-vi.mock('$lib/ipc', () => ({
-	invoke: vi.fn(async () => null),
-}));
-vi.mock('@tauri-apps/plugin-opener', () => ({
-	openUrl: vi.fn(async () => undefined),
-	openPath: vi.fn(async () => undefined),
-}));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn() }));
-vi.mock('$lib/mermaid-mounter', () => ({
-	mountMermaid: vi.fn(async () => undefined),
-}));
-
+vi.mock('$lib/ipc', () => ({ invoke: vi.fn(async () => null) }));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn(async () => undefined), openPath: vi.fn(async () => undefined) }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn(), open: vi.fn() }));
+vi.mock('$lib/mermaid-mounter', () => ({ mountMermaid: vi.fn(async () => undefined) }));
 vi.mock('$lib/events', () => {
 	const handlers = new Map<string, Array<(e: { payload: unknown }) => void>>();
 	return {
@@ -67,277 +36,185 @@ vi.mock('$lib/events', () => {
 		__eventHandlers: handlers,
 	};
 });
-
+vi.mock('@tauri-apps/api/window', async (orig) => {
+	const actual = (await orig()) as Record<string, unknown>;
+	const fake = { label: 'main', emit: vi.fn(async () => undefined), onFocusChanged: vi.fn(async () => () => {}), listen: vi.fn(async () => () => {}) };
+	return { ...actual, getCurrentWindow: () => fake };
+});
+import { message } from '@tauri-apps/plugin-dialog';
+import { invoke } from '$lib/ipc';
 import * as eventsModule from '$lib/events';
 
-const menuHandlers = (
-	eventsModule as unknown as {
-		__eventHandlers: Map<string, Array<(e: { payload: unknown }) => void>>;
+const messageMock = vi.mocked(message);
+const invokeMock = vi.mocked(invoke);
+const menuHandlers = (eventsModule as unknown as { __eventHandlers: Map<string, Array<(e: { payload: unknown }) => void>> }).__eventHandlers;
+const alertMock = vi.fn((_m?: unknown) => {});
+
+beforeAll(() => {
+	const zeroRect = () => ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) });
+	const emptyRects = () => Object.assign([] as DOMRect[], { item: (_i: number) => null }) as unknown as DOMRectList;
+	const rangeProto = Range.prototype as unknown as Record<string, unknown>;
+	if (typeof rangeProto.getClientRects !== 'function') rangeProto.getClientRects = emptyRects;
+	if (typeof rangeProto.getBoundingClientRect !== 'function') rangeProto.getBoundingClientRect = zeroRect;
+	if (typeof (document as unknown as Record<string, unknown>).elementFromPoint !== 'function') {
+		(document as unknown as Record<string, unknown>).elementFromPoint = () => null;
 	}
-).__eventHandlers;
-
-/** menu.rs / find-in-document.ts の MENU_FIND_EVENT と同綴り(値固定は要件54 の unit 側)。 */
-const MENU_FIND = 'menu_find';
-
-// ---------------------------------------------------------------------------
-// フィクスチャ
-// ---------------------------------------------------------------------------
-
-const TS_URI = 'file:///Users/a/src/app.ts';
-/** `const` が 2 行・`a = 1` はトークンをまたいで 1 箇所。 */
-const TS_CONTENT = 'const a = 1;\nconst b = a + 1;\n';
-
-/** file-type.ts の renderPlainText と同形(色付けしない表示=比較の基準)。 */
-function plainTextHtml(content: string): string {
-	const escaped = content.replace(
-		/[&<>"']/g,
-		(c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
-	);
-	return `<pre class="vellis-plaintext">\n${escaped}</pre>`;
-}
-
-/** 本番の `renderForDisplay` が `.ts` に返す html(実装後は色付き)。 */
-let coloredHtml: string;
-
-beforeAll(async () => {
-	const result = await renderForDisplay(TS_URI, TS_CONTENT);
-	coloredHtml = result.html;
 });
 
-function tsDoc(): DocumentPayload {
-	return { uri: TS_URI, content: TS_CONTENT, modified: 1 };
+const TXT_URI = 'file:///Users/a/notes/memo.txt';
+const TXT_CONTENT = 'first line\nsecond line\nthird line\n';
+const MD_URI = 'file:///Users/a/notes/plan.md';
+const MD = '# Plan\n\nIntro paragraph with **bold** word.\n\nSecond paragraph here.\n';
+
+function doc(uri: string, content: string): DocumentPayload {
+	return { uri, content, modified: 1 };
 }
-
-function baseProps(doc: DocumentPayload, html: string) {
-	return {
-		document: doc,
-		html,
-		index: null,
-		onRequestAddMark: vi.fn(),
-		onToggleMarks: vi.fn(),
-		marksOpen: false,
-	};
+function plainTextHtml(content: string): string {
+	const escaped = content.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
+	return `<pre class="vellis-plaintext">\n${escaped}</pre>`;
 }
-
-/** `.ts` 文書を windowState と Viewer の両方に載せてマウントする(html は引数)。 */
-function mountTs(html: string) {
-	const doc = tsDoc();
-	windowState.setDocument(doc);
-	return render(Viewer, { props: baseProps(doc, html) });
+/** 撤去の後の Viewer の props(`fileEditor` / `editable` の prop は無い=常に新しい面)。 */
+function baseProps(d: DocumentPayload, html: string, index: SourceIndex | null) {
+	return { document: d, html, index, onRequestAddMark: vi.fn(), onToggleMarks: vi.fn(), marksOpen: false };
 }
-
-// ---------------------------------------------------------------------------
-// ヘルパー
-// ---------------------------------------------------------------------------
-
-async function settle() {
-	for (let i = 0; i < 8; i++) await Promise.resolve();
+async function settle(rounds = 8) {
+	for (let i = 0; i < rounds; i++) await Promise.resolve();
 	await tick();
 }
-
-function viewingPre(container: HTMLElement): HTMLElement {
-	const pre = container.querySelector('.markdown-body pre.vellis-plaintext');
-	if (!pre) throw new Error('pre.vellis-plaintext が見つからない');
-	return pre as HTMLElement;
-}
-
-function isEditable(el: Element): boolean {
-	return el.getAttribute('contenteditable') === 'true';
-}
-
-function editables(container: HTMLElement): HTMLElement[] {
-	return [...container.querySelectorAll('[contenteditable="true"]')] as HTMLElement[];
-}
-
-function styledSpans(scope: ParentNode): HTMLElement[] {
-	return [...scope.querySelectorAll('span[style]')] as HTMLElement[];
-}
-
-/** 編集面(素テキストの `<pre contenteditable>`)が契約4 の形であることを確かめる。 */
-function expectPlainEditor(container: HTMLElement) {
-	expect(windowState.editMode).toBe('edit');
-	const list = editables(container);
-	expect(list, 'contenteditable は 1 つだけ').toHaveLength(1);
-	const editor = list[0];
-	expect(editor.matches('pre.vellis-plaintext[contenteditable="true"]')).toBe(true);
-	// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
-	expect(editor.textContent).toBe(TS_CONTENT + '\n');
-	expect(editor.children, '編集面は子要素を持たない(色付きの span を持ち込まない)').toHaveLength(0);
-	return editor;
-}
-
-async function emitMenuFind() {
+async function settleLong() {
 	await settle();
-	const list = [...(menuHandlers.get(MENU_FIND) ?? [])];
-	expect(list.length, "Viewer が $lib/events の listen で 'menu_find' を購読していること").toBeGreaterThan(
-		0,
-	);
-	for (const handler of list) handler({ payload: undefined });
+	await new Promise((r) => setTimeout(r, 0));
 	await settle();
 }
-
-function findBar(container: HTMLElement): HTMLElement | null {
-	return container.querySelector('[data-testid="find-bar"]');
+async function mountText(content = TXT_CONTENT, uri = TXT_URI) {
+	const d = doc(uri, content);
+	windowState.setDocument(d);
+	const result = render(Viewer, { props: baseProps(d, plainTextHtml(content), null) });
+	await settleLong();
+	return result;
 }
-
-function findInput(container: HTMLElement): HTMLInputElement {
-	const el = container.querySelector('[data-testid="find-input"]');
-	expect(el, '検索バーの入力欄(data-testid="find-input")があること').toBeTruthy();
-	return el as HTMLInputElement;
+async function mountMd(content = MD, uri = MD_URI) {
+	const d = doc(uri, content);
+	windowState.setDocument(d);
+	const r = await renderMarkdown(content, uri);
+	const result = render(Viewer, { props: baseProps(d, r.html, r.index) });
+	await settleLong();
+	return result;
 }
-
-function countText(container: HTMLElement): string {
-	const el = container.querySelector('[data-testid="find-count"]');
-	expect(el, '件数表示(data-testid="find-count")があること').toBeTruthy();
-	return ((el as HTMLElement).textContent ?? '').trim();
+function q(container: ParentNode, selector: string): HTMLElement | null {
+	return container.querySelector(selector);
 }
-
-async function typeQuery(container: HTMLElement, value: string) {
-	await fireEvent.input(findInput(container), { target: { value } });
-	await settle();
+function handle(): FileEditorHandle {
+	const h = windowState.fileEditor;
+	if (!h) throw new Error('windowState.fileEditor が登録されていない(新しい面が出ていない)');
+	return h;
 }
-
-async function keyOn(el: Element, key: string, init: KeyboardEventInit = {}) {
-	el.dispatchEvent(
-		new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, composed: true, ...init }),
-	);
-	await settle();
+function cm(container: ParentNode): CMView {
+	const el = q(container, '[data-testid="code-editor"] .cm-editor');
+	if (!el) throw new Error('CodeMirror の面が無い');
+	const v = CMView.findFromDOM(el as HTMLElement);
+	if (!v) throw new Error('EditorView.findFromDOM が null');
+	return v;
 }
-
-function marks(scope: ParentNode): HTMLElement[] {
-	return [...scope.querySelectorAll('mark[data-vellis-find]')] as HTMLElement[];
+function typeCm(container: ParentNode, s: string, at = 0) {
+	const v = cm(container);
+	v.dispatch({ changes: { from: at, insert: s } });
 }
-
-/** 検索バーで語を入れたときの件数(マウント→menu_find→入力→件数→後始末)。 */
-async function countFor(html: string, query: string): Promise<string> {
-	const { container } = mountTs(html);
-	await emitMenuFind();
-	await typeQuery(container, query);
-	const count = countText(container);
-	cleanup();
-	windowState.endEdit();
-	windowState.clearDocument();
-	menuHandlers.clear();
-	return count;
+function editables(container: ParentNode): HTMLElement[] {
+	return [...container.querySelectorAll<HTMLElement>('[contenteditable="true"]')];
 }
 
 beforeEach(() => {
-	windowState.endEdit();
 	windowState.clearDocument();
+	windowState.fileEditor = null;
+	windowState.editBlocked = false;
+	windowState.externalRemoved = false;
 	menuHandlers.clear();
-	// JSDOM に scrollIntoView が無い(現在一致へのスクロールが呼んでも落ちないように)。
-	Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
+	invokeMock.mockReset();
+	invokeMock.mockImplementation(async () => null);
+	messageMock.mockReset();
+	alertMock.mockClear();
+	vi.stubGlobal('alert', alertMock);
 });
-
 afterEach(() => {
 	cleanup();
-	vi.clearAllMocks();
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
-// ---------------------------------------------------------------------------
-// AC-69-7 — 閲覧は色付き・編集は素テキスト・戻ると色が戻る(契約4)
-// ---------------------------------------------------------------------------
 
-describe('AC-69-7 — 閲覧は色付きの pre・編集は素テキストの pre(契約4)', () => {
-	it('閲覧中の pre.vellis-plaintext は contenteditable でなく、中に style 付きの span がある', () => {
-		const { container } = mountTs(coloredHtml);
-		const pre = viewingPre(container);
+const TS_URI = 'file:///Users/a/src/app.ts';
+const TS_CONTENT = 'const a = 1;\nconst b = a + 1;\n';
 
-		expect(isEditable(pre)).toBe(false);
-		expect(pre.getAttribute('data-vellis-lang')).toBe('typescript');
-		expect(pre.querySelector('span')).not.toBeNull();
-		expect(styledSpans(pre).length).toBeGreaterThan(0);
-		expect(windowState.editMode).toBe('view');
-		expect(editables(container)).toHaveLength(0);
+async function mountTs() {
+	return mountText(TS_CONTENT, TS_URI);
+}
+async function emitMenuFind() {
+	await settle();
+	const list = [...(menuHandlers.get('menu_find') ?? [])];
+	expect(list.length, "Viewer が 'menu_find' を購読していること").toBeGreaterThan(0);
+	for (const h of list) h({ payload: undefined });
+	await settle();
+}
+async function typeQuery(container: ParentNode, value: string) {
+	const input = q(container, '[data-testid="find-input"]') as HTMLInputElement | null;
+	expect(input).toBeTruthy();
+	await fireEvent.input(input!, { target: { value } });
+	await settleLong();
+	await new Promise((r) => setTimeout(r, 200));
+	await settle();
+}
+const countText = (c: ParentNode) => (q(c, '[data-testid="find-count"]')?.textContent ?? '').trim();
+
+describe('AC-69-7 の後継(契約5): .ts は開いた時点から CodeMirror の面で、色付きのまま打てる', () => {
+	it('pre.vellis-plaintext(Shiki)は出ず、.cm-editor の中にトークンの class 付きの span がある・data-vellis-lang=typescript', async () => {
+		const { container } = await mountTs();
+		expect(q(container, 'pre.vellis-plaintext')).toBeNull();
+		const root = q(container, '[data-testid="code-editor"]')!;
+		expect(root).not.toBeNull();
+		expect(root.getAttribute('data-vellis-lang')).toBe('typescript');
+		await new Promise((r) => setTimeout(r, 50));
+		await settle();
+		expect(cm(container).contentDOM.querySelectorAll('.cm-line span[class]').length, 'Lezer の色').toBeGreaterThan(0);
 	});
-
-	it('色付きの span の上でダブルクリックするとソース編集に入り、編集面は document.content の素テキスト', async () => {
-		const { container } = mountTs(coloredHtml);
-		const span = styledSpans(viewingPre(container))[0];
-		expect(span, '前提: 閲覧中に style 付きの span がある').toBeTruthy();
-
-		await fireEvent.dblClick(span);
+	it('ダブルクリックしても面は同じ(素テキストの編集面に替わらない)・打つとそのまま dirty', async () => {
+		const { container } = await mountTs();
+		const before = cm(container);
+		await fireEvent.dblClick(q(container, '.markdown-body')!);
+		await settleLong();
+		expect(cm(container)).toBe(before);
+		expect(editables(container)).toHaveLength(1);
+		expect(q(container, 'pre.vellis-plaintext')).toBeNull();
+		typeCm(container, '// edited\n', 0);
 		await settle();
-
-		expectPlainEditor(container);
-		expect(windowState.dirty).toBe(false);
+		expect(handle().dirty).toBe(true);
+		expect(handle().text()).toBe('// edited\n' + TS_CONTENT);
 	});
-
-	it('Command + E(menu_edit → windowState.beginEdit)で入っても同じ素テキストの編集面', async () => {
-		const { container } = mountTs(coloredHtml);
-		expect(styledSpans(viewingPre(container)).length).toBeGreaterThan(0);
-
-		expect(windowState.beginEdit()).toBe(true);
-		await settle();
-
-		expectPlainEditor(container);
-	});
-
-	it('編集を破棄(非 dirty の Esc)して閲覧に戻ると、色付きの span が再び見える', async () => {
-		const { container } = mountTs(coloredHtml);
-		const before = viewingPre(container).innerHTML;
-		await fireEvent.dblClick(styledSpans(viewingPre(container))[0]);
-		await settle();
-		const editor = expectPlainEditor(container);
-
-		await fireEvent.keyDown(editor, { key: 'Escape' });
-		await settle();
-
-		expect(windowState.editMode).toBe('view');
-		expect(editables(container)).toHaveLength(0);
-		const pre = viewingPre(container);
-		expect(isEditable(pre)).toBe(false);
-		expect(styledSpans(pre).length).toBeGreaterThan(0);
-		expect(pre.innerHTML).toBe(before);
-	});
-
-	it('Command + E で入ったあと Esc で戻っても色付きの span が再び見える', async () => {
-		const { container } = mountTs(coloredHtml);
-		windowState.beginEdit();
-		await settle();
-		const editor = expectPlainEditor(container);
-
-		await fireEvent.keyDown(editor, { key: 'Escape' });
-		await settle();
-
-		expect(windowState.editMode).toBe('view');
-		expect(styledSpans(viewingPre(container)).length).toBeGreaterThan(0);
+	it('Command + E(menu_edit)の受け手は無い(撤去)。届いても面は変わらない', async () => {
+		const { container } = await mountTs();
+		expect(menuHandlers.get('menu_edit') ?? [], 'menu_edit の購読は無い').toHaveLength(0);
+		expect(cm(container).state.doc.toString()).toBe(TS_CONTENT);
+		expect(handle().dirty).toBe(false);
 	});
 });
 
-// ---------------------------------------------------------------------------
-// AC-69-8 — 検索の件数は色付きでもプレーンと同じ(契約7)
-// ---------------------------------------------------------------------------
-
-describe('AC-69-8 — 色付きの .ts に検索を開いても件数はプレーン表示と同じ(契約7)', () => {
-	it.each([
-		['const', '1 of 2'],
-		['a = 1', '1 of 1'],
-		['CONST', '1 of 2'],
-	])('語 %s: 色付きとプレーンで件数が同じ(%s)', async (query, expected) => {
-		const plainCount = await countFor(plainTextHtml(TS_CONTENT), query);
-		const coloredCount = await countFor(coloredHtml, query);
-		expect(plainCount).toBe(expected);
-		expect(coloredCount).toBe(plainCount);
-	});
-
-	it('色付きの表示でも Next で送れ、Esc で閉じるとハイライト(フォールバックの mark)が消える', async () => {
-		const { container } = mountTs(coloredHtml);
-		expect(styledSpans(viewingPre(container)).length, '前提: 色付き').toBeGreaterThan(0);
+describe('AC-69-8 の後継(AC-74-31): 色付きの .ts に検索を開いても件数は全文の一致の数で、Next で送れ、Esc で閉じる', () => {
+	it('件数・Next・Esc', async () => {
+		const { container } = await mountTs();
 		await emitMenuFind();
 		await typeQuery(container, 'const');
 		expect(countText(container)).toBe('1 of 2');
-		expect(marks(container).length).toBeGreaterThan(0);
-		// 検索は閲覧のまま(編集に入らない)。
-		expect(windowState.editMode).toBe('view');
-
-		await keyOn(findInput(container), 'Enter');
+		const v = cm(container);
+		expect(v.state.doc.sliceString(v.state.selection.main.from, v.state.selection.main.to)).toBe('const');
+		const input = q(container, '[data-testid="find-input"]')!;
+		await fireEvent.keyDown(input, { key: 'Enter' });
+		await settleLong();
 		expect(countText(container)).toBe('2 of 2');
-
-		await keyOn(findInput(container), 'Escape');
-		expect(findBar(container)).toBeNull();
-		expect(marks(container)).toHaveLength(0);
-		// 閉じたあとも色付きのまま。
-		expect(styledSpans(viewingPre(container)).length).toBeGreaterThan(0);
+		expect(v.state.selection.main.from).toBe(TS_CONTENT.indexOf('const b'));
+		await fireEvent.keyDown(input, { key: 'Escape' });
+		await settleLong();
+		expect(q(container, '[data-testid="find-bar"]')).toBeNull();
+		expect(container.querySelectorAll('.cm-vellis-find, .cm-vellis-find-current')).toHaveLength(0);
+		expect(handle().dirty).toBe(false);
 	});
 });

@@ -413,6 +413,8 @@ pub(crate) fn build_window<R: tauri::Runtime>(
     config.visible = plan.visible_window;
     config.focus = plan.visible_window;
     config.background_throttling = Some(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
+    // Drags reach WKWebView, as in the user's window (requirements.md #74 第3段 3-5).
+    config.drag_drop_enabled = false;
     let mut builder = tauri::WebviewWindowBuilder::from_config(app, &config)?;
     for script in SelfCheckSession::initialization_scripts() {
         builder = builder.initialization_script(script);

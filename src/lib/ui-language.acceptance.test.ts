@@ -482,11 +482,18 @@ describe('AC-51-9: Rust 側は変更なし(menu.rs の CJK 走査が残ってい
 
 /** 要件#51 登録時点の依存(要件#49/#52 の AC と同じ固定方式)。 */
 const RUNTIME_DEPS_AT_REQ51 = [
+	// 要件74 第1段(2026-11-16・契約20 (am) 決定)= CodeMirror 6 の部品 6 つ(要件側更新=req-74.md 棚卸し 1)。
+	'@codemirror/commands',
+	'@codemirror/language',
+	'@codemirror/language-data',
+	'@codemirror/state',
+	'@codemirror/view',
+	'@lezer/highlight',
 	'@shikijs/rehype',
 	'@tauri-apps/api',
 	'@tauri-apps/plugin-dialog',
 	'@tauri-apps/plugin-opener',
-	'hast-util-to-mdast',
+	// 要件74 第2段 2-5(2026-11-17 仮・契約20・棚卸し 1=承認済み (r)(as)): 撤去で hast-util-to-mdast を外した
 	'mdast-util-to-markdown',
 	'mdast-util-to-string',
 	'mermaid',
@@ -500,6 +507,19 @@ const RUNTIME_DEPS_AT_REQ51 = [
 	'unified',
 	'unist-util-visit',
 	// 追補b(2026-09-15・要件#53 契約⑧による改訂)= 要件#53 が rehype-parse 1件を追加。
+	// 要件74 第2段 2-1(2026-11-17・仮の前提=判断 3 で prosemirror-schema-list を含む・契約20 (D))= ProseMirror の部品 9 つ(要件側更新=req-74.md 棚卸し 1)。
+	'prosemirror-commands',
+	'prosemirror-dropcursor',
+	'prosemirror-gapcursor',
+	'prosemirror-history',
+	'prosemirror-inputrules',
+	'prosemirror-keymap',
+	'prosemirror-model',
+	'prosemirror-schema-list',
+	'prosemirror-state',
+	'prosemirror-tables',
+	'prosemirror-transform',
+	'prosemirror-view',
 	'rehype-parse',
 ];
 

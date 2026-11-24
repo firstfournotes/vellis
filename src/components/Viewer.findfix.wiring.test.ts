@@ -281,8 +281,9 @@ function stubScrollContainer(el: HTMLElement, initial = 0): { value: () => numbe
 let scrollSpy: ReturnType<typeof vi.fn>;
 const originalRangeRect = Range.prototype.getBoundingClientRect;
 
+// 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 7=承認済み (r)(as)): 今の編集の store の口(endEdit / editMode)は撤去。後片付けは面の handle を外す。
 beforeEach(() => {
-	windowState.endEdit();
+	windowState.fileEditor = null;
 	windowState.clearDocument();
 	menuHandlers.clear();
 	// 契約=scrollIntoView は**呼ばれない**(追補c)。spy して全テストで数える。
@@ -440,8 +441,12 @@ describe('AC-54c-2 — scrollRangeIntoContainer: 一致の矩形を容器の中�
 // AC-54c-3 / AC-54c-4 — 閲覧・ソース編集の両方で Range 経路(追補c(2))
 // ---------------------------------------------------------------------------
 
-describe('AC-54c-3 — 閲覧モード: 現在一致へは Range 経路で運ぶ(追補c)', () => {
-	it('語を入れると容器(article.viewer)の scrollTop が一致の矩形基準で動き、scrollIntoView は呼ばれない', async () => {
+describe('AC-54c-3 — Range 経路で運ぶ(追補c)。要件74 2-5 の後: Markdown は面で、jsdom(Highlight API 無し)では塗らず運ばない', () => {
+	// 要件74 第2段 2-5(2026-11-17 仮・契約17・棚卸し 7=承認済み (r)(as)): 閲覧モードは無く Markdown は常に ProseMirror の面。面の検索は
+	// CSS Custom Highlight API で塗り、同じ Range 経路(rangeAtMatch → scrollRangeIntoContainer)で容器を動かす(2-2 の項目 15)。
+	// jsdom には Highlight API が無いので面は塗らず運ばない(2-2 AC-74-18・37 の決め)。ここでは (1) scrollIntoView を呼ばないこと、
+	// (2) Range 経路の算術(scrollRangeIntoContainer)が今のまま 510 になること(AC-54c-2 と同じ値)を見る。
+	it('語を入れても scrollIntoView は呼ばれず、Range 経路の算術は 0 + (710 - 200) = 510 のまま', async () => {
 		const { container } = mountMd();
 		const viewer = container.querySelector('article.viewer') as HTMLElement;
 		expect(viewer).toBeTruthy();
@@ -450,37 +455,32 @@ describe('AC-54c-3 — 閲覧モード: 現在一致へは Range 経路で運ぶ
 		await emitMenuFind();
 		await typeQuery(container, 'zebra');
 		expect(countText(container)).toBe('1 of 3');
+		expect(scrollSpy, 'scrollIntoView は呼ばない(Range 経路に一本化)').not.toHaveBeenCalled();
 
-		expect(
-			scrollSpy,
-			'閲覧モードでも scrollIntoView は呼ばない(Range 経路に一本化)',
-		).not.toHaveBeenCalled();
-		// Range 矩形=top 700 h 20(beforeEach のスタブ)→ 0 + (710 - 200) = 510。
+		const range = document.createRange();
+		range.getBoundingClientRect = () => rect(700, 20);
+		scrollRangeIntoContainer(viewer, range);
 		expect(scroll.value(), '一致の矩形を容器の中央へ(scrollTop = 510)').toBe(510);
 	});
 });
 
-describe('AC-54c-4 — ソース編集中: <pre> 全体を中央寄せしない(追補c)', () => {
-	it('⌘E のソース編集中に語を入れても scrollIntoView は一切呼ばれず、同じ Range 経路で容器が動く', async () => {
+// 要件74 第2段 2-5(2026-11-17 仮・契約21・契約17・棚卸し 4「ソース編集中のスクロールの件を編集面の件に書き直し」=承認済み (r)(as)):
+// ⌘E のソース編集(<pre contenteditable>)は撤去。plain text は開いた時点から CodeMirror の面で、検索は面の全文(AC-74-31)。
+// backlog 179 の再発防止の趣旨=「要素の中央寄せ(scrollIntoView)で 930px 飛ぶ経路を残さない」はそのまま見る。
+describe('AC-54c-4 の後継 — CodeMirror の面の検索は Element.scrollIntoView を呼ばない(追補c・要件74 AC-74-31)', () => {
+	it('面に語を入れても scrollIntoView は一切呼ばれず、件数は 1 of 1 で選択が一致に移る', async () => {
 		const { container } = mountText();
+		await settle();
 		const viewer = container.querySelector('article.viewer') as HTMLElement;
 		expect(viewer).toBeTruthy();
-		const scroll = stubScrollContainer(viewer, 0);
-
-		// ⌘E(menu_edit 相当)=ソース編集モードへ(既存 wiring の家風どおり直接叩く)。
-		windowState.beginEdit();
-		await settle();
-		const pre = container.querySelector('pre.vellis-plaintext[contenteditable="true"]');
-		expect(pre, 'ソース編集の <pre contenteditable> が出ていること').toBeTruthy();
+		stubScrollContainer(viewer, 0);
+		const face = container.querySelector('[data-testid="code-editor"] .cm-editor');
+		expect(face, 'CodeMirror の面が出ていること(ソース編集の <pre contenteditable> は無い)').toBeTruthy();
+		expect(container.querySelector('pre.vellis-plaintext[contenteditable="true"]')).toBeNull();
 
 		await emitMenuFind();
 		await typeQuery(container, 'beta');
 		expect(countText(container)).toBe('1 of 1');
-
-		// backlog 179 の再発防止: <pre>(子要素なし)にも article にも scrollIntoView
-		// が飛ばない(要素の中央寄せで 930px 飛ぶ経路を残さない)。
 		expect(scrollSpy).not.toHaveBeenCalled();
-		// 閲覧モードと同じ Range 経路: 0 + (710 - 200) = 510。
-		expect(scroll.value(), 'ソース編集中も一致の矩形基準で容器が動くこと').toBe(510);
 	});
 });

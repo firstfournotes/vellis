@@ -239,7 +239,7 @@ beforeAll(async () => {
 	renderedLink = { html: r.html, index: r.index };
 });
 
-function mountViewer() {
+async function mountViewer() {
 	const doc: DocumentPayload = { uri: MD_URI, content: LINK_MD, modified: 1 };
 	windowState.setDocument(doc);
 	const utils = render(Viewer, {
@@ -252,9 +252,12 @@ function mountViewer() {
 			marksOpen: false,
 		},
 	});
-	const link = utils.container.querySelector('a[data-vellis-link]') as HTMLAnchorElement | null;
+	// 要件74 第2段 2-5(2026-11-17 仮・オーケストレーターの仮の承認=朝に由谷に確かめる): Markdown は常に ProseMirror の面になり、
+	// 今の描画の `a[data-vellis-link]`(href を絶対にした a)は描かれない。面のリンク(2-2 の航行・2-4 の MarkView)は href を原文のまま持ち、
+	// クリックのときに文書の URI から LINK_TARGET に解いて open_document / new_window を呼ぶ(開けなかったときの知らせは同じ文言)。
+	await settle();
+	const link = utils.container.querySelector('[data-testid="markdown-editor"] .ProseMirror a[href="./other.md"]') as HTMLAnchorElement | null;
 	if (!link) throw new Error('internal link not rendered');
-	expect(link.getAttribute('href')).toBe(LINK_TARGET);
 	return { ...utils, doc, link };
 }
 
@@ -337,7 +340,7 @@ describe('AC-71-2: ツリーのクリックで openForDisplay が失敗 → aler
 describe('AC-71-2: 内部リンクのクリックで open_document が失敗 → alert 1 回・表示中の文書は不変・unhandled なし(契約2・6)', () => {
 	it('open_document が reject → alert(`Could not open the file: <理由>`)が 1 回', async () => {
 		installInvoke({ open_document: OPEN_REASON });
-		const { link } = mountViewer();
+		const { link } = await mountViewer();
 
 		await fireEvent.click(link);
 		await settle();
@@ -351,7 +354,7 @@ describe('AC-71-2: 内部リンクのクリックで open_document が失敗 →
 
 	it('表示中の文書は前のまま・Unhandled Promise Rejection を出さない', async () => {
 		installInvoke({ open_document: OPEN_REASON });
-		const { link, doc } = mountViewer();
+		const { link, doc } = await mountViewer();
 
 		await fireEvent.click(link);
 		await settle();
@@ -361,7 +364,7 @@ describe('AC-71-2: 内部リンクのクリックで open_document が失敗 →
 	});
 
 	it('成功するクリックは従来どおり(alert なし・currentDocument がリンク先に差し替わる)', async () => {
-		const { link } = mountViewer();
+		const { link } = await mountViewer();
 
 		await fireEvent.click(link);
 		await settle();
@@ -487,7 +490,7 @@ describe('AC-71-4: ツリーの Shift + クリックで new_window が失敗 →
 describe('AC-71-4: 内部リンクの Shift + クリックで new_window が失敗 → alert(`Could not open a new window: <理由>`)(契約4・6)', () => {
 	it('new_window が reject → alert が 1 回・文言は既存の openInNewWindowFailedMessage と同じ', async () => {
 		installInvoke({ new_window: WINDOW_REASON });
-		const { link } = mountViewer();
+		const { link } = await mountViewer();
 
 		await fireEvent.click(link, { shiftKey: true });
 		await settle();
@@ -501,7 +504,7 @@ describe('AC-71-4: 内部リンクの Shift + クリックで new_window が失�
 
 	it('この窓の文書は動かない・open_document は呼ばない・Unhandled Promise Rejection を出さない', async () => {
 		installInvoke({ new_window: WINDOW_REASON });
-		const { link, doc } = mountViewer();
+		const { link, doc } = await mountViewer();
 
 		await fireEvent.click(link, { shiftKey: true });
 		await settle();

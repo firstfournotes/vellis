@@ -1,547 +1,297 @@
 /**
- * 要件#48 の受け入れテスト(requirements.md #48)— WindowState 編集状態と
- * Viewer の contenteditable 配線(component プロジェクト)
+ * 要件#48 契約①〜⑥の配線の後継 — 要件74 第2段 2-5(撤去)で書き直し(2026-11-17 仮・契約21・棚卸し 4「書き直し」=承認済み (r)(as))。
  *
- * runes を含む `stores/window-state.svelte.ts` は svelte プラグインの効く
- * component プロジェクト(*.wiring.test.ts)でしかコンパイルできないため、
- * 契約③④⑥の**状態遷移の実体**はここで判定する(純関数 VM と保存経路は
- * src/lib/document-edit.acceptance.test.ts=unit 側)。
+ * 今の編集(`<pre contenteditable>`・editMode・editBuffer・Done Editing・Esc で閲覧へ・外部変更の帯の Overwrite / Reload)は撤去され、
+ * 要件48 の入口・出口・外部変更の配線は新しい面(CodeMirror / ProseMirror の handle=`windowState.fileEditor`)に変わる。
  *
- * ## 判定するもの(契約番号は requirements.md #48 の①〜⑨)
- * - **WindowState(契約③④⑥)**: beginEdit の可否(text は入れる・画像/ssh は
- *   入れない)・dirty 遷移(updateBuffer / markSaved)・endEdit・
- *   applyFileChanged の3分岐(ignore-echo / external-conflict / apply)・
- *   acceptExternalChange・clearDocument / applyRoot での編集状態リセット
- * - **Viewer 配線(契約②③⑥)**:
- *   - 閲覧中の `<pre class="vellis-plaintext">` は contenteditable ではない
- *   - `.markdown-body` のダブルクリックで編集モードへ(単クリック・キー入力
- *     では入らない=閲覧中の誤タッチで dirty にならない)
- *   - 編集中は contenteditable="true"・「Done」(data-testid="edit-done")あり
- *   - input で editBuffer が更新され dirty になる
- *   - Esc /「Done」で閲覧へ戻る
- *   - **追補c(2026-09-09 由谷決定)**: dirty のままの Esc /「Done」は
- *     `confirmDiscardEdits`(保存 / 破棄 / キャンセル)を通る — キャンセルなら
- *     編集中のまま・破棄なら即閲覧・保存なら `save_document` 成功後に閲覧。
- *     非 dirty は従来どおり確認なしで即閲覧(⌘E トグルとの非対称の解消)
- *   - markdown 種別の編集はソース編集=レンダリング HTML ではなく
- *     `document.content` を `<pre contenteditable>` に出す
- *   - 外部変更衝突時はバナー(data-testid="external-change-banner")と
- *     「上書き保存」(external-overwrite)/「読み直す」(external-reload)が出る
+ * ## 対応する受け入れ基準
+ * - AC-74-25 現行の編集の撤去(契約21): `Viewer.svelte` に閲覧の DOM へ `contenteditable` を付ける経路が無い(`html-edit-surface` の編集も無い)。
+ *   開いた時点から新しい面(prop `fileEditor` / `editable` は無い)。`windowState` に `editMode` / `beginEdit` / `endEdit` / `editBuffer` /
+ *   `externalChange` / `acceptExternalChange` / `updateBuffer` が無い。`dirty` は面の handle の dirty を映す
+ * - 契約3(要件48 の入口): ダブルクリック・単クリック・スクロールでは何も変わらない(面は常に編集できる=打鍵で dirty)
+ * - 契約4〜6(要件48 の dirty・保存・外部変更): 面の handle と `saveFileEditor`・`applyFileChanged`(契約12〜14)で成り立つ
  *
- * ## 判定しないもの
- * - 保存の IPC 経路(unit 側 saveDocument)・Rust 書き込み(acceptance_req48.rs)
- * - Edit メニュー・⌘S・閉窓/別ファイル/root 変更時の確認ダイアログ・IME・
- *   衝突表示の見え方 → reviewer 照合+人間ゲート(acceptance/acceptance.md)
+ * ## 確定契約(implementer はこれに従う)
+ * - `windowState`: `dirty` getter = `fileEditor?.dirty ?? false`。`editMode` / `editBuffer` / `externalChange` / `beginEdit` / `endEdit` /
+ *   `updateBuffer` / `acceptExternalChange` は無い(`'editMode' in windowState` が false)。`applyFileChanged(payload)` は面があれば handle に委ね、
+ *   無ければ `setDocument`。`applyFileRemoved(uri)` は面の dirty で keep / close
+ * - `Viewer.svelte`: props に `fileEditor` / `editable` が無い。`.markdown-body` の中に `pre.vellis-plaintext[contenteditable]` も `html-edit-surface` も
+ *   `edit-done` / `edit-source` / `external-change-banner` / `external-overwrite` / `external-reload` の testid も無い
  *
- * ## スタブの設計(VideoViewer.wiring.test.ts の家風)
- * - $lib/ipc / @tauri-apps/plugin-opener: モジュールモック(Tauri 実体なし)
- * - @tauri-apps/plugin-dialog: `message` をモック(追補c で Viewer が edit-guard を
- *   通るため)。edit-guard 自体はモックしない — 関門の実体(`confirmDiscardEdits`)
- *   を通し、`message` の返り値(押したボタンの文言)で3択を再現する
- *   (menu-open.acceptance.test.ts の家風)。要件#48 追補o(2026-10-28・由谷承認の
- *   書き換え)で `ask` 2 枚から `message` 1 枚の 3 択へ。確認の部分だけを直し、確認の
- *   後の期待値(編集中のまま・閲覧へ戻る・保存してから戻る)は変えていない
- * - mermaid: 本テストの html に `.vellis-mermaid` は無く、dynamic import は
- *   発火しない(mermaid-mounter の設計)
+ * ## 修正前に赤になる理由
+ * - `windowState.editMode` ほかが残っている・Viewer に `fileEditor` の prop があり、渡さないと今の表示になる
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { EditorView as CMView } from '@codemirror/view';
 import Viewer from './Viewer.svelte';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+import { render as renderMarkdown } from '../markdown/renderer';
+import type { SourceIndex } from '../markdown/types';
 import { contentHash } from '$lib/document-edit';
+import { saveFileEditor, type FileEditorHandle } from '../editor/file-editor';
 
-vi.mock('$lib/ipc', () => ({
-	invoke: vi.fn(async () => null),
-}));
-vi.mock('@tauri-apps/plugin-opener', () => ({
-	openUrl: vi.fn(async () => undefined),
-	openPath: vi.fn(async () => undefined),
-}));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn() }));
-
+vi.mock('$lib/ipc', () => ({ invoke: vi.fn(async () => null) }));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn(async () => undefined), openPath: vi.fn(async () => undefined) }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn(), open: vi.fn() }));
+vi.mock('$lib/mermaid-mounter', () => ({ mountMermaid: vi.fn(async () => undefined) }));
+vi.mock('$lib/events', () => {
+	const handlers = new Map<string, Array<(e: { payload: unknown }) => void>>();
+	return {
+		listen: async (event: string, handler: (e: { payload: unknown }) => void) => {
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
+			return () => {
+				const cur = handlers.get(event) ?? [];
+				const at = cur.indexOf(handler);
+				if (at >= 0) cur.splice(at, 1);
+			};
+		},
+		__eventHandlers: handlers,
+	};
+});
+vi.mock('@tauri-apps/api/window', async (orig) => {
+	const actual = (await orig()) as Record<string, unknown>;
+	const fake = { label: 'main', emit: vi.fn(async () => undefined), onFocusChanged: vi.fn(async () => () => {}), listen: vi.fn(async () => () => {}) };
+	return { ...actual, getCurrentWindow: () => fake };
+});
 import { message } from '@tauri-apps/plugin-dialog';
 import { invoke } from '$lib/ipc';
-import { UNSAVED_SAVE_MESSAGE } from '$lib/edit-guard';
+import * as eventsModule from '$lib/events';
 
 const messageMock = vi.mocked(message);
 const invokeMock = vi.mocked(invoke);
+const menuHandlers = (eventsModule as unknown as { __eventHandlers: Map<string, Array<(e: { payload: unknown }) => void>> }).__eventHandlers;
+const alertMock = vi.fn((_m?: unknown) => {});
 
-// ---------------------------------------------------------------------------
-// フィクスチャ
-// ---------------------------------------------------------------------------
+beforeAll(() => {
+	const zeroRect = () => ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) });
+	const emptyRects = () => Object.assign([] as DOMRect[], { item: (_i: number) => null }) as unknown as DOMRectList;
+	const rangeProto = Range.prototype as unknown as Record<string, unknown>;
+	if (typeof rangeProto.getClientRects !== 'function') rangeProto.getClientRects = emptyRects;
+	if (typeof rangeProto.getBoundingClientRect !== 'function') rangeProto.getBoundingClientRect = zeroRect;
+	if (typeof (document as unknown as Record<string, unknown>).elementFromPoint !== 'function') {
+		(document as unknown as Record<string, unknown>).elementFromPoint = () => null;
+	}
+});
 
 const TXT_URI = 'file:///Users/a/notes/memo.txt';
-const TXT_CONTENT = 'first line\nsecond line\n';
+const TXT_CONTENT = 'first line\nsecond line\nthird line\n';
 const MD_URI = 'file:///Users/a/notes/plan.md';
-const MD_CONTENT = '# Plan\n\n- item\n';
+const MD = '# Plan\n\nIntro paragraph with **bold** word.\n\nSecond paragraph here.\n';
 
-function txtDoc(content: string = TXT_CONTENT): DocumentPayload {
-	return { uri: TXT_URI, content, modified: 1 };
+function doc(uri: string, content: string): DocumentPayload {
+	return { uri, content, modified: 1 };
 }
-
-function mdDoc(): DocumentPayload {
-	return { uri: MD_URI, content: MD_CONTENT, modified: 1 };
-}
-
-/** file-type.ts の renderPlainText と同形のマークアップ(text 種別の html prop)。 */
 function plainTextHtml(content: string): string {
-	const escaped = content.replace(
-		/[&<>"']/g,
-		(c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
-	);
+	const escaped = content.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 	return `<pre class="vellis-plaintext">\n${escaped}</pre>`;
 }
-
-function baseProps(doc: DocumentPayload, html: string) {
-	return {
-		document: doc,
-		html,
-		index: null,
-		onRequestAddMark: vi.fn(),
-		onToggleMarks: vi.fn(),
-		marksOpen: false,
-	};
+/** 撤去の後の Viewer の props(`fileEditor` / `editable` の prop は無い=常に新しい面)。 */
+function baseProps(d: DocumentPayload, html: string, index: SourceIndex | null) {
+	return { document: d, html, index, onRequestAddMark: vi.fn(), onToggleMarks: vi.fn(), marksOpen: false };
 }
-
-/** text 文書を windowState と Viewer の両方に載せてマウントする。 */
-function renderText(content: string = TXT_CONTENT) {
-	const doc = txtDoc(content);
-	windowState.setDocument(doc);
-	return render(Viewer, { props: baseProps(doc, plainTextHtml(content)) });
+async function settle(rounds = 8) {
+	for (let i = 0; i < rounds; i++) await Promise.resolve();
+	await tick();
 }
-
-function getPre(container: HTMLElement): HTMLElement {
-	const pre = container.querySelector('pre.vellis-plaintext');
-	if (!pre) throw new Error('pre.vellis-plaintext not found');
-	return pre as HTMLElement;
+async function settleLong() {
+	await settle();
+	await new Promise((r) => setTimeout(r, 0));
+	await settle();
 }
-
-/** contenteditable が有効か(属性なし・"false" はどちらも「無効」)。 */
-function isEditable(el: HTMLElement): boolean {
-	return el.getAttribute('contenteditable') === 'true';
+async function mountText(content = TXT_CONTENT, uri = TXT_URI) {
+	const d = doc(uri, content);
+	windowState.setDocument(d);
+	const result = render(Viewer, { props: baseProps(d, plainTextHtml(content), null) });
+	await settleLong();
+	return result;
+}
+async function mountMd(content = MD, uri = MD_URI) {
+	const d = doc(uri, content);
+	windowState.setDocument(d);
+	const r = await renderMarkdown(content, uri);
+	const result = render(Viewer, { props: baseProps(d, r.html, r.index) });
+	await settleLong();
+	return result;
+}
+function q(container: ParentNode, selector: string): HTMLElement | null {
+	return container.querySelector(selector);
+}
+function handle(): FileEditorHandle {
+	const h = windowState.fileEditor;
+	if (!h) throw new Error('windowState.fileEditor が登録されていない(新しい面が出ていない)');
+	return h;
+}
+function cm(container: ParentNode): CMView {
+	const el = q(container, '[data-testid="code-editor"] .cm-editor');
+	if (!el) throw new Error('CodeMirror の面が無い');
+	const v = CMView.findFromDOM(el as HTMLElement);
+	if (!v) throw new Error('EditorView.findFromDOM が null');
+	return v;
+}
+function typeCm(container: ParentNode, s: string, at = 0) {
+	const v = cm(container);
+	v.dispatch({ changes: { from: at, insert: s } });
+}
+function editables(container: ParentNode): HTMLElement[] {
+	return [...container.querySelectorAll<HTMLElement>('[contenteditable="true"]')];
 }
 
 beforeEach(() => {
-	// 前のテストの編集状態・文書を持ち越さない。実装前はメソッド不在でも
-	// beforeEach では落とさない(赤は各テストのアサーションで出す)。
-	(windowState as { endEdit?: () => void }).endEdit?.();
 	windowState.clearDocument();
+	windowState.fileEditor = null;
+	windowState.editBlocked = false;
+	windowState.externalRemoved = false;
+	menuHandlers.clear();
+	invokeMock.mockReset();
+	invokeMock.mockImplementation(async () => null);
+	messageMock.mockReset();
+	alertMock.mockClear();
+	vi.stubGlobal('alert', alertMock);
 });
-
 afterEach(() => {
 	cleanup();
-	vi.clearAllMocks();
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
-// ---------------------------------------------------------------------------
-// WindowState — 編集状態の遷移(契約③④)
-// ---------------------------------------------------------------------------
-
-describe('WindowState — beginEdit の可否と dirty 遷移(契約③④)', () => {
-	it('text 文書で beginEdit → true・editMode=edit・バッファ=content・dirty ではない', () => {
-		windowState.setDocument(txtDoc());
-
-		expect(windowState.beginEdit()).toBe(true);
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe(TXT_CONTENT);
-		expect(windowState.dirty).toBe(false);
+describe('AC-74-25: 開いた時点から新しい面(prop なし)で、今の編集の入口は無い', () => {
+	it('.txt: prop を渡さなくても CodeMirror の面が出て handle が登録される。pre.vellis-plaintext は無い', async () => {
+		const { container } = await mountText();
+		expect(q(container, '[data-testid="code-editor"] .cm-editor')).not.toBeNull();
+		expect(handle().kind).toBe('text');
+		expect(q(container, 'pre.vellis-plaintext')).toBeNull();
+		expect(editables(container)).toHaveLength(1);
+		expect(editables(container)[0]!.classList.contains('cm-content')).toBe(true);
 	});
 
-	it('画像文書では beginEdit → false・view のまま', () => {
-		windowState.setDocument({ uri: 'file:///Users/a/pics/p.png', content: '', modified: null });
-
-		expect(windowState.beginEdit()).toBe(false);
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
+	it('.md: prop を渡さなくても ProseMirror の面が出る。今の編集の掴み手(edit-done / edit-source)は無い', async () => {
+		const { container } = await mountMd();
+		expect(q(container, '[data-testid="markdown-editor"] .ProseMirror[contenteditable="true"]')).not.toBeNull();
+		expect(handle().kind).toBe('markdown');
+		for (const id of ['edit-done', 'edit-source', 'external-change-banner', 'external-overwrite', 'external-reload', 'html-edit-surface']) {
+			expect(q(container, `[data-testid="${id}"]`), id).toBeNull();
+		}
 	});
 
-	it('ssh root の text 文書では beginEdit → false(SSH は読み取り専用のまま=契約①)', () => {
-		windowState.setDocument({ uri: 'ssh://host/notes/memo.txt', content: 'x', modified: null });
-
-		expect(windowState.beginEdit()).toBe(false);
-		expect(windowState.editMode).toBe('view');
-	});
-
-	it('updateBuffer で dirty になり、保存済み content と同一へ戻せば dirty が消える', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-
-		windowState.updateBuffer(TXT_CONTENT + 'more');
-		expect(windowState.dirty).toBe(true);
-
-		windowState.updateBuffer(TXT_CONTENT);
-		expect(windowState.dirty).toBe(false);
-	});
-
-	it('endEdit で view へ戻り、バッファと外部変更が破棄される', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-		windowState.updateBuffer('changed');
-
-		windowState.endEdit();
-
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(windowState.externalChange).toBe(null);
-		expect(windowState.dirty).toBe(false);
-	});
-
-	it('markSaved で content と lastSavedHash が更新され dirty が消える・edit のまま(契約⑤⑥)', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-		const edited = TXT_CONTENT + 'appended\n';
-		windowState.updateBuffer(edited);
-
-		windowState.markSaved(edited);
-
-		expect(windowState.currentDocument?.content).toBe(edited);
-		expect(windowState.dirty).toBe(false);
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.lastSavedHash).toBe(contentHash(edited));
-	});
-
-	it('clearDocument は編集状態もリセットする(契約④=別ファイルへの持ち越しなし)', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-		windowState.updateBuffer('changed');
-
-		windowState.clearDocument();
-
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(windowState.externalChange).toBe(null);
-	});
-
-	it('applyRoot も編集状態をリセットする(root 変更で編集を持ち越さない)', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-		windowState.updateBuffer('changed');
-
-		windowState.applyRoot('file:///Users/a/other-root', [], false);
-
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-	});
-});
-
-describe('WindowState — applyFileChanged の3分岐(契約⑥)', () => {
-	it('保存した content と同一の file_changed は ignore-echo(文書・編集状態が動かない)', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-		const saved = TXT_CONTENT + 'saved\n';
-		windowState.updateBuffer(saved);
-		windowState.markSaved(saved);
-
-		const decision = windowState.applyFileChanged({
-			uri: TXT_URI,
-			content: saved,
-			modified: 2,
-		});
-
-		expect(decision).toBe('ignore-echo');
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe(saved);
-		expect(windowState.currentDocument?.content).toBe(saved);
-		expect(windowState.externalChange).toBe(null);
-	});
-
-	it('編集中+dirty に外部変更 → external-conflict(currentDocument 不変・外部版を保持)', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-		windowState.updateBuffer(TXT_CONTENT + 'my edit\n');
-
-		const decision = windowState.applyFileChanged({
-			uri: TXT_URI,
-			content: 'rewritten outside\n',
-			modified: 9,
-		});
-
-		expect(decision).toBe('external-conflict');
-		expect(windowState.currentDocument?.content).toBe(TXT_CONTENT);
-		expect(windowState.editBuffer).toBe(TXT_CONTENT + 'my edit\n');
-		expect(windowState.externalChange).toEqual({ content: 'rewritten outside\n', modified: 9 });
-	});
-
-	it('閲覧中の外部変更 → apply(従来どおり setDocument 相当で更新)', () => {
-		windowState.setDocument(txtDoc());
-
-		const decision = windowState.applyFileChanged({
-			uri: TXT_URI,
-			content: 'rewritten outside\n',
-			modified: 9,
-		});
-
-		expect(decision).toBe('apply');
-		expect(windowState.currentDocument?.content).toBe('rewritten outside\n');
-	});
-
-	it('編集中でも未変更なら apply(外部版に追従してよい)', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-
-		const decision = windowState.applyFileChanged({
-			uri: TXT_URI,
-			content: 'rewritten outside\n',
-			modified: 9,
-		});
-
-		expect(decision).toBe('apply');
-		expect(windowState.currentDocument?.content).toBe('rewritten outside\n');
-	});
-
-	it('acceptExternalChange は外部版を採用して編集を破棄する(「読み直す」の実体)', () => {
-		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
-		windowState.updateBuffer(TXT_CONTENT + 'my edit\n');
-		windowState.applyFileChanged({ uri: TXT_URI, content: 'external\n', modified: 9 });
-
-		windowState.acceptExternalChange();
-
-		expect(windowState.currentDocument?.content).toBe('external\n');
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(windowState.externalChange).toBe(null);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Viewer — contenteditable 配線(契約②③⑥)
-// ---------------------------------------------------------------------------
-
-describe('Viewer — text 種別の編集モード配線(契約②③)', () => {
-	it('閲覧中: pre.vellis-plaintext は contenteditable ではない', () => {
-		const { container } = renderText();
-
-		expect(isEditable(getPre(container))).toBe(false);
-	});
-
-	it('単クリックとキー入力では編集モードに入らず dirty にもならない(契約③)', async () => {
-		const { container } = renderText();
-		const body = container.querySelector('.markdown-body') as HTMLElement;
-
+	it('ダブルクリック・単クリック・キー入力(矢印)では文書も dirty も変わらない(契約3=誤編集の守りは打鍵だけ)', async () => {
+		const { container } = await mountText();
+		const body = q(container, '.markdown-body')!;
 		await fireEvent.click(body);
-		await fireEvent.keyDown(body, { key: 'a' });
-
-		expect(windowState.editMode).toBe('view');
+		await fireEvent.dblClick(body);
+		cm(container).contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+		await settleLong();
+		expect(handle().dirty).toBe(false);
 		expect(windowState.dirty).toBe(false);
-		expect(isEditable(getPre(container))).toBe(false);
+		expect(handle().text()).toBe(TXT_CONTENT);
+		expect(editables(container), '面は 1 つのまま(今の編集の <pre contenteditable> は生まれない)').toHaveLength(1);
 	});
 
-	it('ダブルクリックで編集モード: contenteditable="true" と Done ボタンが現れる', async () => {
-		const { container } = renderText();
-		const body = container.querySelector('.markdown-body') as HTMLElement;
-
-		await fireEvent.dblClick(body);
-		await tick();
-
-		expect(windowState.editMode).toBe('edit');
-		expect(isEditable(getPre(container))).toBe(true);
-		expect(screen.getByTestId('edit-done')).toBeTruthy();
-	});
-
-	it('input で editBuffer が更新され dirty になる(契約④)', async () => {
-		const { container } = renderText();
-		const body = container.querySelector('.markdown-body') as HTMLElement;
-		await fireEvent.dblClick(body);
-		await tick();
-
-		const pre = getPre(container);
-		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。バッファは番兵を除く。
-		pre.textContent = 'edited by hand\n' + '\n';
-		await fireEvent.input(pre);
-
-		expect(windowState.editBuffer).toBe('edited by hand\n');
+	it('打つと dirty(windowState.dirty は面の dirty を映す)。元に戻すと消える', async () => {
+		const { container } = await mountText();
+		typeCm(container, 'x');
+		await settle();
+		expect(handle().dirty).toBe(true);
 		expect(windowState.dirty).toBe(true);
-	});
-
-	it('Esc で閲覧へ戻る(契約③)', async () => {
-		const { container } = renderText();
-		const body = container.querySelector('.markdown-body') as HTMLElement;
-		await fireEvent.dblClick(body);
-		await tick();
-
-		await fireEvent.keyDown(getPre(container), { key: 'Escape' });
-		await tick();
-
-		expect(windowState.editMode).toBe('view');
-		expect(isEditable(getPre(container))).toBe(false);
-	});
-
-	it('「Done」ボタンで閲覧へ戻る(契約③)', async () => {
-		const { container } = renderText();
-		await fireEvent.dblClick(container.querySelector('.markdown-body') as HTMLElement);
-		await tick();
-
-		await fireEvent.click(screen.getByTestId('edit-done'));
-		await tick();
-
-		expect(windowState.editMode).toBe('view');
-		expect(isEditable(getPre(container))).toBe(false);
+		cm(container).dispatch({ changes: { from: 0, to: 1, insert: '' } });
+		await settle();
+		expect(windowState.dirty).toBe(false);
 	});
 });
 
-describe('Viewer — markdown のソース編集モード(契約②)', () => {
-	it('編集中はレンダリング HTML ではなく document.content を contenteditable な pre に出す', async () => {
-		const doc = mdDoc();
-		windowState.setDocument(doc);
-		const { container } = render(Viewer, {
-			props: baseProps(doc, '<h1>Plan</h1>\n<ul><li>item</li></ul>'),
-		});
-
-		// 閲覧中はレンダリング結果が見えている(既存挙動=契約⑨)。
-		expect(container.querySelector('h1')).toBeTruthy();
-		expect(container.querySelector('pre.vellis-plaintext')).toBeNull();
-
-		await fireEvent.dblClick(container.querySelector('.markdown-body') as HTMLElement);
-		await tick();
-
-		const pre = getPre(container);
-		expect(isEditable(pre)).toBe(true);
-		// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」。
-		expect(pre.textContent).toBe(MD_CONTENT + '\n');
-		expect(container.querySelector('h1')).toBeNull();
-	});
-});
-
-describe('Viewer — 外部変更衝突の表示(契約⑥)', () => {
-	it('external-conflict でバナーと「上書き保存」「読み直す」が現れる', async () => {
-		const { container } = renderText();
-		await fireEvent.dblClick(container.querySelector('.markdown-body') as HTMLElement);
-		await tick();
-		const pre = getPre(container);
-		// 追補r 契約1・6: 番兵の `\n` を付けて書く(バッファは TXT_CONTENT + 'my edit\n')。
-		pre.textContent = TXT_CONTENT + 'my edit\n' + '\n';
-		await fireEvent.input(pre);
-
-		const decision = windowState.applyFileChanged({
-			uri: TXT_URI,
-			content: 'rewritten outside\n',
-			modified: 9,
-		});
-		await tick();
-
-		expect(decision).toBe('external-conflict');
-		expect(screen.getByTestId('external-change-banner')).toBeTruthy();
-		expect(screen.getByTestId('external-overwrite')).toBeTruthy();
-		expect(screen.getByTestId('external-reload')).toBeTruthy();
+describe('AC-74-25: windowState から今の編集の口が消えている', () => {
+	it('editMode / editBuffer / externalChange / beginEdit / endEdit / updateBuffer / acceptExternalChange が無い', () => {
+		const ws = windowState as unknown as Record<string, unknown>;
+		for (const key of ['editMode', 'editBuffer', 'externalChange', 'beginEdit', 'endEdit', 'updateBuffer', 'acceptExternalChange']) {
+			expect(key in ws, `windowState.${key} は撤去`).toBe(false);
+		}
 	});
 
-	it('衝突していないとき(閲覧中)はバナーが出ない', () => {
-		renderText();
-
-		expect(screen.queryByTestId('external-change-banner')).toBeNull();
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Viewer — dirty な Esc / Done は確認関門を通る(契約③ 追補c)
-// ---------------------------------------------------------------------------
-
-describe('Viewer — dirty 時の Esc / Done は confirmDiscardEdits を通る(追補c)', () => {
-	const EDITED = TXT_CONTENT + 'my edit\n';
-
-	/** 編集モードへ入り、input で dirty にした状態の pre を返す。 */
-	async function renderDirty() {
-		const rendered = renderText();
-		await fireEvent.dblClick(rendered.container.querySelector('.markdown-body') as HTMLElement);
-		await tick();
-		const pre = getPre(rendered.container);
-		// 追補r 契約1・6: 番兵の `\n` を付けて書く(バッファは EDITED)。
-		pre.textContent = EDITED + '\n';
-		await fireEvent.input(pre);
+	it('clearDocument / applyRoot で面の handle と削除の印が外れる(契約2=別の文書へ持ち越さない)', async () => {
+		await mountText();
+		typeCm(document.body, 'x');
+		await settle();
 		expect(windowState.dirty).toBe(true);
-		return { ...rendered, pre };
-	}
-
-	/**
-	 * Esc / Done ハンドラは message → (保存) → endEdit と await を連ねるため、
-	 * fireEvent の解決だけでは途中までしか進まない。マイクロタスクを数周流して
-	 * 連鎖全体を確定させる。
-	 */
-	async function settle() {
-		for (let i = 0; i < 8; i++) await Promise.resolve();
-		await tick();
-	}
-
-	it('dirty で Esc → Cancel なら編集中のまま(バッファ・contenteditable 維持)', async () => {
-		const { container, pre } = await renderDirty();
-		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
-
-		await fireEvent.keyDown(pre, { key: 'Escape' });
-		await settle();
-
-		expect(messageMock).toHaveBeenCalledTimes(1);
-		expect(messageMock.mock.calls[0][0]).toBe(UNSAVED_SAVE_MESSAGE);
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe(EDITED);
-		expect(isEditable(getPre(container))).toBe(true);
+		windowState.clearDocument();
+		await settleLong();
+		expect(windowState.fileEditor).toBeNull();
+		expect(windowState.dirty).toBe(false);
+		expect(windowState.externalRemoved).toBe(false);
 	});
+});
 
-	it('dirty で Done クリック → Cancel なら編集中のまま', async () => {
-		const { container } = await renderDirty();
-		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
-
-		await fireEvent.click(screen.getByTestId('edit-done'));
+describe('契約4〜6(要件48)の後継: 保存と外部変更は面の handle で', () => {
+	it('Command + S の経路(saveFileEditor)で save_document に { uri, content, expectedHash }・dirty が消える', async () => {
+		const { container } = await mountText();
+		typeCm(container, 'x');
 		await settle();
-
-		expect(messageMock).toHaveBeenCalledTimes(1);
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe(EDITED);
-		expect(isEditable(getPre(container))).toBe(true);
-	});
-
-	it("dirty で Esc → Don't Save(破棄)なら閲覧へ戻りバッファ破棄・保存は走らない", async () => {
-		const { container, pre } = await renderDirty();
-		messageMock.mockResolvedValueOnce("Don't Save"); // 1 枚の 3 択: 破棄する
-
-		await fireEvent.keyDown(pre, { key: 'Escape' });
-		await settle();
-
-		expect(messageMock).toHaveBeenCalledTimes(1);
-		expect(messageMock.mock.calls[0][0]).toBe(UNSAVED_SAVE_MESSAGE);
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(isEditable(getPre(container))).toBe(false);
-		expect(invokeMock).not.toHaveBeenCalledWith('save_document', expect.anything());
-	});
-
-	it('dirty で Done → Save(保存)なら save_document が呼ばれてから閲覧へ戻る', async () => {
-		await renderDirty();
-		messageMock.mockResolvedValueOnce('Save'); // 1 枚の 3 択: 保存する
-
-		await fireEvent.click(screen.getByTestId('edit-done'));
-		await settle();
-
-		expect(messageMock).toHaveBeenCalledTimes(1);
-		expect(invokeMock).toHaveBeenCalledWith('save_document', {
-			uri: TXT_URI,
-			content: EDITED,
-		});
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(windowState.currentDocument?.content).toBe(EDITED);
+		await saveFileEditor(handle());
+		await settleLong();
+		expect(invokeMock.mock.calls).toEqual([['save_document', { uri: TXT_URI, content: 'x' + TXT_CONTENT, expectedHash: contentHash(TXT_CONTENT) }]]);
 		expect(windowState.dirty).toBe(false);
 	});
 
-	it('非 dirty なら Esc / Done とも確認なしで即閲覧へ(従来どおり)', async () => {
-		const { container } = renderText();
-		const body = container.querySelector('.markdown-body') as HTMLElement;
+	it('閲覧中(dirty でない)の外部変更 → 静かに追従(applyFileChanged は handle に委ねる)', async () => {
+		const { container } = await mountText();
+		const incoming = TXT_CONTENT + 'fourth line\n';
+		expect(windowState.applyFileChanged(doc(TXT_URI, incoming))).toBe('apply');
+		await settleLong();
+		expect(handle().text()).toBe(incoming);
+		expect(cm(container).state.doc.toString()).toBe(incoming);
+		expect(q(container, '[data-testid="external-change-banner"]'), '今の帯は無い').toBeNull();
+	});
 
-		// Esc(非 dirty)
-		await fireEvent.dblClick(body);
-		await tick();
-		await fireEvent.keyDown(getPre(container), { key: 'Escape' });
+	it('dirty で重なる外部変更 → 面の帯(external-conflict-banner)。Overwrite / Reload の帯は無い', async () => {
+		const { container } = await mountText();
+		typeCm(container, 'MINE ', 0);
 		await settle();
-		expect(windowState.editMode).toBe('view');
+		const theirs = 'THEIRS first line\nsecond line\nthird line\n';
+		expect(windowState.applyFileChanged(doc(TXT_URI, theirs))).toBe('external-conflict');
+		await settleLong();
+		expect(q(container, '[data-testid="external-conflict-banner"]')).not.toBeNull();
+		expect(q(container, '[data-testid="external-change-banner"]')).toBeNull();
+		expect(q(container, '[data-testid="external-overwrite"]')).toBeNull();
+		expect(q(container, '[data-testid="external-reload"]')).toBeNull();
+		expect(handle().text()).toBe('MINE ' + TXT_CONTENT);
+	});
 
-		// Done(非 dirty)
-		await fireEvent.dblClick(body);
-		await tick();
-		await fireEvent.click(screen.getByTestId('edit-done'));
+	it('自己書き込みのエコーは ignore-echo', async () => {
+		const { container } = await mountText();
+		typeCm(container, 'x');
 		await settle();
-		expect(windowState.editMode).toBe('view');
+		await saveFileEditor(handle());
+		await settleLong();
+		expect(windowState.applyFileChanged(doc(TXT_URI, 'x' + TXT_CONTENT))).toBe('ignore-echo');
+	});
+});
 
-		expect(messageMock).not.toHaveBeenCalled();
+describe('AC-74-25(ソース走査): Viewer.svelte と +page.svelte に今の編集の経路が無い', () => {
+	const read = async (rel: string) => {
+		const { readFileSync } = await import('node:fs');
+		const { resolve } = await import('node:path');
+		return readFileSync(resolve(__dirname, '../..', rel), 'utf8');
+	};
+	it('Viewer.svelte: contenteditable を閲覧の DOM に付ける経路・html-edit-surface・edit-done・fileEditor / editable の prop が無い', async () => {
+		// <style> の中(print-edit-marks の AC-38-追l (c) が求める印の規則)は見ず、マークアップとスクリプトだけを見る。
+		const src = (await read('src/components/Viewer.svelte')).replace(/<style[\s\S]*?<\/style>/g, '');
+		expect(src).not.toMatch(/(?<!\[)contenteditable\s*=\s*["']?true|setAttribute\('contenteditable'|\.contentEditable\s*=/);
+		for (const needle of ['html-edit-surface', 'edit-done', 'edit-source', 'external-overwrite', 'external-reload', 'external-change-banner', 'htmlEditing', 'editMode', 'editBuffer', "from '../markdown/edit'", 'bufferFromPre', 'fileEditor = ', 'editable = ']) {
+			expect(src, needle).not.toContain(needle);
+		}
+	});
+	it('+page.svelte: MENU_EDIT_EVENT の受け手・toggleEditMode・legacy.edit・EDITOR_FILE_FLAG が無い', async () => {
+		const src = await read('src/routes/+page.svelte');
+		for (const needle of ['MENU_EDIT_EVENT', 'toggleEditMode', 'legacy.edit', 'EDITOR_FILE_FLAG', 'editor-flags', 'editMode', 'editable={']) {
+			expect(src, needle).not.toContain(needle);
+		}
+	});
+	it('src/markdown/edit.ts と src/lib/editor-flags.ts が無い', async () => {
+		const { existsSync } = await import('node:fs');
+		const { resolve } = await import('node:path');
+		expect(existsSync(resolve(__dirname, '../..', 'src/markdown/edit.ts'))).toBe(false);
+		expect(existsSync(resolve(__dirname, '../..', 'src/lib/editor-flags.ts'))).toBe(false);
 	});
 });

@@ -198,6 +198,9 @@ pub(crate) fn run_app(
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Every window stays on the app's own URLs: a file dropped onto a
+        // frame must not replace the window's content (要件#74 第3段 3-5).
+        .plugin(window::navigation::plugin())
         // --- SpaceMouse focus tracking (要件#25) ---
         // The 3Dconnexion driver deactivates our client as soon as another
         // application comes to the front, so coming back needs an explicit
@@ -411,6 +414,15 @@ pub(crate) fn run_app(
     // one the config describes is not created; its settings are the
     // starting point of the self-check window.
     let mut context = tauri::generate_context!();
+    // Tauri's drag-drop handler is on by default: wry then takes every drag
+    // and WKWebView never sees it, so drops onto (and drags inside) the
+    // editing surfaces do nothing (requirements.md #74 第3段 3-5). Turn it
+    // off for every window the config describes, here at run time so that
+    // `tauri.conf.json` stays as it is. The page keeps a dropped file from
+    // replacing the window's content (`src/lib/file-drop-guard.ts`).
+    for window in context.config_mut().app.windows.iter_mut() {
+        window.drag_drop_enabled = false;
+    }
     let self_check_window = if self_check_session.is_some() {
         let windows = &mut context.config_mut().app.windows;
         let first = windows.first().cloned();
@@ -427,6 +439,10 @@ pub(crate) fn run_app(
         .setup(move |app| {
             // --- Native menu bar ---
             let menu = menu::build(app.handle())?;
+            // View ▸ Raw Source のチェック印は前面の窓の raw に合わせる(要件#74 契約23・判断 9)
+            menu::listen_raw_source_state(app.handle());
+            // View ▸ Show Formatting Toolbar のチェック印も前面の窓の値に合わせる(要件#74 第4段 4-2)
+            menu::listen_format_toolbar_state(app.handle());
             #[cfg(target_os = "macos")]
             let window_menu_owner = menu.clone();
             app.set_menu(menu)?;
@@ -534,15 +550,15 @@ pub(crate) fn run_app(
                     // 中の窓へ投げて任せる(要件#83 契約3・4)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_DASHBOARD_EVENT);
                 }
-                id if id == menu::EDIT_ITEM_ID => {
-                    // 編集に入れる文書かも、いま編集中かも窓の側にしかないので、
-                    // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#48 追補b)。
-                    menu::handle_menu_open_click(app_handle, menu::MENU_EDIT_EVENT);
-                }
                 id if id == menu::FIND_ITEM_ID => {
                     // 何が表示されていて探せる文字があるかは窓の側にしかないので、
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#54 契約①)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_FIND_EVENT);
+                }
+                id if id == menu::FIND_REPLACE_ITEM_ID => {
+                    // 置換の行を出せる面かは窓の側にしかないので、Find… と同じくフォーカス中の窓へ
+                    // 投げて任せる(要件#74 第3段 3-3・3-12)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_FIND_REPLACE_EVENT);
                 }
                 id if id == menu::FIND_IN_FOLDER_ITEM_ID => {
                     // 開いている root も検索パネルも窓の側にしかないので、Find… と
@@ -578,6 +594,24 @@ pub(crate) fn run_app(
                     // Default のテーマを themes/ に書き出して新しい窓で開く。Settings… と
                     // 同じく Rust の中で完結し、窓へは投げない(要件#56 AC-56-23)。
                     menu::handle_export_default_theme_click(app_handle);
+                }
+                id if id == menu::SHOW_FORMAT_TOOLBAR_ITEM_ID => {
+                    // 書式のツールバーを出せる面か(Markdown の面)は窓の側にしかないので前面の窓へ。muda がクリックで
+                    // 反転したチェックは先に戻し、チェック印は窓が format_toolbar_state で知らせる値だけで動かす
+                    // (要件#74 第4段 4-2・/code-review B)。受け手のない面ではチェックは変わらない。
+                    menu::revert_check_toggle(app_handle, menu::SHOW_FORMAT_TOOLBAR_ITEM_ID);
+                    menu::handle_menu_open_click(app_handle, menu::MENU_SHOW_FORMAT_TOOLBAR_EVENT);
+                }
+                id if id == menu::RAW_SOURCE_ITEM_ID => {
+                    // rendered ⇄ raw は前面の窓の面の仕事(要件#74 契約23)。muda がクリックで反転したチェックは先に
+                    // 戻し、チェック印は窓が raw_source_state で知らせる値だけで動かす(listen_raw_source_state・
+                    // /code-review B)。受け手のない面ではチェックは変わらない。
+                    menu::revert_check_toggle(app_handle, menu::RAW_SOURCE_ITEM_ID);
+                    menu::handle_menu_open_click(app_handle, menu::MENU_RAW_SOURCE_EVENT);
+                }
+                id if id.starts_with(menu::FORMAT_ITEM_ID_PREFIX) => {
+                    // Format ▸ の項目はすべて ID を payload に前面の窓へ(要件#74 契約8)。
+                    menu::emit_to_focused(app_handle, menu::MENU_FORMAT_EVENT, id.to_string());
                 }
                 id if id.starts_with(menu::APPEARANCE_THEME_ITEM_PREFIX) => {
                     // テーマは settings.json の appearance.theme だけを書き換える。全窓へ

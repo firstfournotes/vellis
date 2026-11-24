@@ -86,14 +86,34 @@ function stripRustLineComments(src: string): string {
 // ---------------------------------------------------------------------------
 
 const PACKAGE_DEPENDENCIES = [
+	// 要件74 第1段(2026-11-16・契約20 (am) 決定)= CodeMirror 6 の部品 6 つ(要件側更新=req-74.md 棚卸し 1)。
+	'@codemirror/commands',
+	'@codemirror/language',
+	'@codemirror/language-data',
+	'@codemirror/state',
+	'@codemirror/view',
+	'@lezer/highlight',
 	'@shikijs/rehype',
 	'@tauri-apps/api',
 	'@tauri-apps/plugin-dialog',
 	'@tauri-apps/plugin-opener',
-	'hast-util-to-mdast',
+	// 要件74 第2段 2-5(2026-11-17 仮・契約20・棚卸し 1=承認済み (r)(as)): 撤去で hast-util-to-mdast を外した
 	'mdast-util-to-markdown',
 	'mdast-util-to-string',
 	'mermaid',
+	// 要件74 第2段 2-1(2026-11-17・仮の前提=判断 3 で prosemirror-schema-list を含む・契約20 (D))= ProseMirror の部品 9 つ(要件側更新=req-74.md 棚卸し 1)。
+	'prosemirror-commands',
+	'prosemirror-dropcursor',
+	'prosemirror-gapcursor',
+	'prosemirror-history',
+	'prosemirror-inputrules',
+	'prosemirror-keymap',
+	'prosemirror-model',
+	'prosemirror-schema-list',
+	'prosemirror-state',
+	'prosemirror-tables',
+	'prosemirror-transform',
+	'prosemirror-view',
 	'rehype-parse',
 	'rehype-raw',
 	'rehype-sanitize',
@@ -213,11 +233,8 @@ describe('AC-56-11 依存追加ゼロ(契約 5・7): package.json と Cargo.toml
 
 /** 再起案時点の `data-testid` の値(52 箇所・52 種=すべて一意)。 */
 const DATA_TESTIDS = [
-	'edit-done',
-	'edit-source',
-	'external-change-banner',
-	'external-overwrite',
-	'external-reload',
+	// 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 9=承認済み (as)): 今の編集の撤去で消した掴み手を集合から外した=
+	// edit-done・edit-source・external-change-banner・external-overwrite・external-reload・html-edit-surface・htmledit-structure-notice(新しい面の帯は external-conflict-banner ほか)。
 	'external-removed-banner',
 	'external-removed-close',
 	'external-removed-save',
@@ -251,9 +268,7 @@ const DATA_TESTIDS = [
 	'go-to-go',
 	'go-to-input',
 	'go-to-message',
-	'html-edit-surface',
 	'html-find-surface',
-	'htmledit-structure-notice',
 	'recent-files',
 	'recent-files-clear',
 	'recent-files-empty',
@@ -266,7 +281,9 @@ const DATA_TESTIDS = [
 	'recent-files-sash',
 	'recent-files-title',
 ] as const;
-const DATA_TESTID_OCCURRENCES = 52;
+// 要件74 第2段 2-5(2026-11-17 仮・棚卸し 9): 今の編集の掴み手 7 つ(edit-done・edit-source・external-change-banner・external-overwrite・
+// external-reload・html-edit-surface・htmledit-structure-notice)を外したので 52 → 45。
+const DATA_TESTID_OCCURRENCES = 45;
 
 /**
  * 再起案時点の `aria-label` の値(39 箇所・29 種)。ソースに書かれたままの属性値
@@ -441,16 +458,12 @@ describe('AC-56-16 print.css の不変(契約 6・判断 (p)): SHA-256 と var(-
 /** `find src/markdown -type f | sort | xargs shasum -a 256`(2026-11-02)。renderer.ts は別扱い。 */
 const MARKDOWN_TREE_SHA: Record<string, string> = {
 	'src/markdown/alert.acceptance.test.ts': '2870f094d41f1e431ddefeae2ef026e87bf30759638c622a8ea12475ea4db714',
-	'src/markdown/code-edit.acceptance.test.ts': '7a5d27d547ee8d9a83af4cc230bc4bd95dce7f17287b736f1282b7e8878b948c',
-	'src/markdown/edit-redirect-single.acceptance.test.ts': '397483a7dbe4537320083f4c0013add0193158bc529ceb298fd0f7fa149f0ae9',
-	'src/markdown/edit-redirect.acceptance.test.ts': '8c0196200e7d3f8a9d9848503e30f4629fee43820440f12024abff2d5328214e',
-	'src/markdown/edit-tasklist-strike.acceptance.test.ts': 'cd50ed9a8fed11dc84da1d91b8bf3314f8a0d04607baaa99da597615abe75399',
-	'src/markdown/edit-tilde-single.acceptance.test.ts': 'b7d10a156b65ff66aa5659e282818eefa77c6fcc35cccffbaa3cfd559ae5eeef',
-	'src/markdown/edit-tilde.acceptance.test.ts': '715ca45340479c2bebe694a019b3fb47a24a8d4c3b442de8b89c952f2b8cebae',
-	'src/markdown/edit.acceptance.test.ts': '0f0d013af1189945a734dd2021f65b0033a6f1a0f7c8cb646e856fadd18d5b7a',
-	'src/markdown/edit.ts': 'f8a5e377ffb0d7a65da0ca65965195e3a81cbc266e09178005aa7ead7b360a8b',
+	// 要件74 第1段(2026-11-16・由谷承認): 依存の一覧に CodeMirror の 6 つを足したため、この 2 本の固定値を更新(契約22・棚卸し 1・2)。
+	// 要件74 第2段 2-1(2026-11-17・仮の前提): 依存の一覧に ProseMirror の 9 つを足したため、この 2 本の固定値を更新(第1段と同じ承認の形)。
+	// 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 2=承認済み (as)): 今の編集の撤去で src/markdown/edit.ts と
+	// edit*.acceptance.test.ts(6 本)・code-edit.acceptance.test.ts を消したので、固定の表から外した。
 	'src/markdown/footnote.acceptance.test.ts': '9d61e214a6aa41f5cd4afc9d15074f33d40c2730591c95d772573b13889e6fb5',
-	'src/markdown/plugins/alert.ts': '3ba83323a1ee73165bbba8e6289bbee97da6d49209b965909bae75aaeb4c755e',
+	'src/markdown/plugins/alert.ts': '7a1bc0bdc231df0857d063fa6059dcfcb9caca73907753ca84b0c2d6d1a4d67f',
 	'src/markdown/plugins/code-attrs.ts': '195b84c41d4608fc4330a84b5e62d5d24b0a6dc83f19db8368216d4eeb582542',
 	'src/markdown/plugins/fence-langs.ts': '06d615222e9312d2bc9380e5327ff85c5b893aaeb683a17bde1a9de1b8547b2c',
 	'src/markdown/plugins/footnote-ids.ts': 'c9be25559ed8abc60de4bd9a16999b9a8bf1f464ca17f44b4aa314eb7051d11f',

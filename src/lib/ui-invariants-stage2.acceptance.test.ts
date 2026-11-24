@@ -114,6 +114,10 @@ const OVERLAY_COMPONENTS = [
 	'DiffView.svelte',
 	'FindBar.svelte',
 	'GoToBar.svelte',
+	// 要件#74 第4段 4-1: 衝突 / 未保存の差分の 1 枚(ペインの文書の場所に重ねる)
+	'EditorDiffView.svelte',
+	// 要件#74 第4段 4-3: 選択の近くに浮かぶ書式のバー(1 段)
+	'SelectionBar.svelte',
 ] as const;
 const OVERLAY_TOKENS = ['--color-bg-raised', '--shadow-2', '--radius-md'] as const;
 /** 暗くする層(backdrop)を持つモーダル 2 つ。 */

@@ -1,662 +1,319 @@
 /**
- * 要件#48 追補g(2026-10-11・backlog 330)の受け入れテスト AC-48-追g (a)〜(f)=
- * 外部で削除されても dirty なら閉じない(帯で知らせ、保存すれば同じパスに書く)。
- *
- * runes を含む `stores/window-state.svelte.ts` は component プロジェクト(*.wiring.test.ts)
- * でしかコンパイルできないため、状態遷移・帯・関門の全部をここで判定する
- * (`Viewer.edit.wiring.test.ts` と同じ家風)。
- *
- * ## test-writer が決めた名前(implementer はこれに合わせる)
- * - store の入口: `windowState.applyFileRemoved(uri: string)`。返り値は決定の文字列
- *   `'keep'`(dirty なので文書を保つ・印を立てる)/ `'close'`(dirty でないので従来どおり
- *   `clearDocument`)/ `'ignore'`(表示中の文書の uri ではない・文書が無い)
- * - 印: `windowState.externalRemoved: boolean`(既定 false)
- * - 帯: `data-testid="external-removed-banner"`・`role="alert"`・外部変更の帯と同じ見た目=
- *   class に `external-change` を持つ(同じ規則で描く)
- *   - 文言(値固定・契約(追補g)2): `This file was deleted outside the app. Your edits have not been saved.`
- *   - `data-testid="external-removed-save"`: 文字 `Save`・title `Save your edits to the file again`
- *   - `data-testid="external-removed-close"`: 文字 `Close`・title `Close the file (your edits are discarded)`
- *
- * ## 判定するもの(契約(追補g)1〜4= req-48.md)
- * - (a) dirty の文書に同じ uri の削除 → 文書・バッファ・モードが残り印が立つ。閲覧中 /
- *   編集中で未変更なら閉じる。別の uri・文書なしでは何も起きない
- * - (b) 印が立つと帯が出る(文言・ボタン2つ・title・role)。印が無ければ出ない
- * - (c) 帯の Save → `save_document` が同じ uri と編集バッファの中身で呼ばれ、成功すると印と
- *   dirty が消える(失敗なら残る)。Close → 文書が閉じ、`save_document` は呼ばれない。
- *   Command + S と同じ経路= `markSaved`(`$lib/save-document` の成功後の記帳)で印が消える
- * - (d) 印のあと同じ文書の `file_changed`(中身が編集と違う)→ 印が消えて外部変更の帯
- * - (e) 別の文書を開く・root が変わる・`clearDocument` → 印が消える。保存せずに編集を終える
- *   (Esc / Done / Command + E の関門= `confirmDiscardEdits` で破棄)→ 文書が閉じる。
- *   関門でキャンセルなら残り、保存を選べば文書は残って印が消える
- * - (f) 配線(ソース走査): `+page.svelte` の `file_removed` の listener が
- *   `windowState.applyFileRemoved(` を通り、listener の中で直に `clearDocument(` を呼ばない。
- *   store の `applyFileRemoved` の本体が `dirty` を見て `clearDocument(` に分岐する
- *
- * ## 想定される赤(実装前)
- * `applyFileRemoved` が無い(TypeError)・`externalRemoved` が undefined(`toBe(false)` が赤)・
- * 帯の testid が無い・`+page.svelte` の listener が `clearDocument()` を直に呼んでいる。
- * 「印が無ければ帯が出ない」(b) の1件だけは実装前から緑(否定の固定)。
- *
- * ## スタブの設計(Viewer.edit.wiring.test.ts と同じ)
- * - $lib/ipc / @tauri-apps/plugin-opener: モジュールモック。`invoke` の既定応答は
- *   beforeEach で `mockReset` → `mockResolvedValue(null)` し直す(ファクトリの vi.fn は
- *   restoreAllMocks で戻らない)
- * - @tauri-apps/plugin-dialog: `message` をモック(関門 `confirmDiscardEdits` は実体を通す)。
- *   要件#48 追補o(2026-10-28・由谷承認の書き換え)で `ask` 2 枚から `message` 1 枚の 3 択へ。
- *   確認の部分(モック・答え・回数)だけを直し、確認の後の期待値は変えていない
- * - `alert` は `vi.stubGlobal`(保存失敗の通知が jsdom の未実装で落ちないように)
- * - `$state` のオブジェクトは deep proxy なので同一性(`toBe`)では見ず、uri / content で見る
+ * 要件#48 追補g — 編集中のファイルの削除(印・帯・Save / Close・印が消えるとき)。
+ * 要件74 第2段 2-5(2026-11-17 仮・契約21・契約13・棚卸し 4「書き直し」=承認済み (r)(as)): 今の編集(editMode / editBuffer)の
+ * 代わりに新しい面の handle(`windowState.fileEditor`)の dirty で決める。帯・ボタン・文言・title は今のまま(testid も今のまま)。
+ * Save は `saveFileEditor`(削除の印があれば expectedHash を省く=契約14)。
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { EditorView as CMView } from '@codemirror/view';
 import Viewer from './Viewer.svelte';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+import { render as renderMarkdown } from '../markdown/renderer';
+import type { SourceIndex } from '../markdown/types';
+import { contentHash } from '$lib/document-edit';
+import { saveFileEditor, type FileEditorHandle } from '../editor/file-editor';
 
-vi.mock('$lib/ipc', () => ({
-	invoke: vi.fn(async () => null),
-}));
-vi.mock('@tauri-apps/plugin-opener', () => ({
-	openUrl: vi.fn(async () => undefined),
-	openPath: vi.fn(async () => undefined),
-}));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn() }));
-
+vi.mock('$lib/ipc', () => ({ invoke: vi.fn(async () => null) }));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn(async () => undefined), openPath: vi.fn(async () => undefined) }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), message: vi.fn(), open: vi.fn() }));
+vi.mock('$lib/mermaid-mounter', () => ({ mountMermaid: vi.fn(async () => undefined) }));
+vi.mock('$lib/events', () => {
+	const handlers = new Map<string, Array<(e: { payload: unknown }) => void>>();
+	return {
+		listen: async (event: string, handler: (e: { payload: unknown }) => void) => {
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
+			return () => {
+				const cur = handlers.get(event) ?? [];
+				const at = cur.indexOf(handler);
+				if (at >= 0) cur.splice(at, 1);
+			};
+		},
+		__eventHandlers: handlers,
+	};
+});
+vi.mock('@tauri-apps/api/window', async (orig) => {
+	const actual = (await orig()) as Record<string, unknown>;
+	const fake = { label: 'main', emit: vi.fn(async () => undefined), onFocusChanged: vi.fn(async () => () => {}), listen: vi.fn(async () => () => {}) };
+	return { ...actual, getCurrentWindow: () => fake };
+});
 import { message } from '@tauri-apps/plugin-dialog';
 import { invoke } from '$lib/ipc';
-import { confirmDiscardEdits } from '$lib/edit-guard';
-import { saveDocument } from '$lib/save-document';
+import * as eventsModule from '$lib/events';
 
 const messageMock = vi.mocked(message);
 const invokeMock = vi.mocked(invoke);
-const alertMock = vi.fn((_message?: unknown) => {});
+const menuHandlers = (eventsModule as unknown as { __eventHandlers: Map<string, Array<(e: { payload: unknown }) => void>> }).__eventHandlers;
+const alertMock = vi.fn((_m?: unknown) => {});
 
-// ---------------------------------------------------------------------------
-// 値固定(契約(追補g)2)
-// ---------------------------------------------------------------------------
-
-const REMOVED_MESSAGE = 'This file was deleted outside the app. Your edits have not been saved.';
-const REMOVED_SAVE_TITLE = 'Save your edits to the file again';
-const REMOVED_CLOSE_TITLE = 'Close the file (your edits are discarded)';
-
-// ---------------------------------------------------------------------------
-// フィクスチャ
-// ---------------------------------------------------------------------------
+beforeAll(() => {
+	const zeroRect = () => ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) });
+	const emptyRects = () => Object.assign([] as DOMRect[], { item: (_i: number) => null }) as unknown as DOMRectList;
+	const rangeProto = Range.prototype as unknown as Record<string, unknown>;
+	if (typeof rangeProto.getClientRects !== 'function') rangeProto.getClientRects = emptyRects;
+	if (typeof rangeProto.getBoundingClientRect !== 'function') rangeProto.getBoundingClientRect = zeroRect;
+	if (typeof (document as unknown as Record<string, unknown>).elementFromPoint !== 'function') {
+		(document as unknown as Record<string, unknown>).elementFromPoint = () => null;
+	}
+});
 
 const TXT_URI = 'file:///Users/a/notes/memo.txt';
-const OTHER_URI = 'file:///Users/a/notes/other.txt';
-const TXT_CONTENT = 'first line\nsecond line\n';
-const EDITED = TXT_CONTENT + 'my edit\n';
+const TXT_CONTENT = 'first line\nsecond line\nthird line\n';
+const MD_URI = 'file:///Users/a/notes/plan.md';
+const MD = '# Plan\n\nIntro paragraph with **bold** word.\n\nSecond paragraph here.\n';
 
-function txtDoc(content: string = TXT_CONTENT): DocumentPayload {
-	return { uri: TXT_URI, content, modified: 1 };
+function doc(uri: string, content: string): DocumentPayload {
+	return { uri, content, modified: 1 };
 }
-
-/** file-type.ts の renderPlainText と同形のマークアップ(text 種別の html prop)。 */
 function plainTextHtml(content: string): string {
-	const escaped = content.replace(
-		/[&<>"']/g,
-		(c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
-	);
+	const escaped = content.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 	return `<pre class="vellis-plaintext">\n${escaped}</pre>`;
 }
-
-function baseProps(doc: DocumentPayload, html: string) {
-	return {
-		document: doc,
-		html,
-		index: null,
-		onRequestAddMark: vi.fn(),
-		onToggleMarks: vi.fn(),
-		marksOpen: false,
-	};
+/** 撤去の後の Viewer の props(`fileEditor` / `editable` の prop は無い=常に新しい面)。 */
+function baseProps(d: DocumentPayload, html: string, index: SourceIndex | null) {
+	return { document: d, html, index, onRequestAddMark: vi.fn(), onToggleMarks: vi.fn(), marksOpen: false };
 }
-
-/** text 文書を windowState と Viewer の両方に載せてマウントする。 */
-function renderText(content: string = TXT_CONTENT) {
-	const doc = txtDoc(content);
-	windowState.setDocument(doc);
-	return render(Viewer, { props: baseProps(doc, plainTextHtml(content)) });
-}
-
-function getPre(container: HTMLElement): HTMLElement {
-	const pre = container.querySelector('pre.vellis-plaintext');
-	if (!pre) throw new Error('pre.vellis-plaintext not found');
-	return pre as HTMLElement;
-}
-
-/** store だけで dirty の編集状態にする(Viewer 無し)。 */
-function makeDirtyInStore(): void {
-	windowState.setDocument(txtDoc());
-	expect(windowState.beginEdit()).toBe(true);
-	windowState.updateBuffer(EDITED);
-	expect(windowState.dirty).toBe(true);
-}
-
-/** Viewer を載せ、ダブルクリック → input で dirty にする。 */
-async function renderDirty() {
-	const rendered = renderText();
-	await fireEvent.dblClick(rendered.container.querySelector('.markdown-body') as HTMLElement);
-	await tick();
-	const pre = getPre(rendered.container);
-	// 追補r 契約1・6: 編集の pre の中身は「原文 + 番兵の `\n`」(バッファは EDITED)。
-	pre.textContent = EDITED + '\n';
-	await fireEvent.input(pre);
-	expect(windowState.dirty).toBe(true);
-	return { ...rendered, pre };
-}
-
-/** message → (保存) → endEdit と await を連ねる処理を流しきる。 */
-async function settle() {
-	for (let i = 0; i < 8; i++) await Promise.resolve();
+async function settle(rounds = 8) {
+	for (let i = 0; i < rounds; i++) await Promise.resolve();
 	await tick();
 }
-
-const saveCalls = () => invokeMock.mock.calls.filter((c) => c[0] === 'save_document');
-
-/** 印の読み出し(未実装なら undefined が返り、`toBe(false)` / `toBe(true)` の赤で分かる)。 */
-const removedFlag = () => (windowState as unknown as { externalRemoved?: boolean }).externalRemoved;
+async function settleLong() {
+	await settle();
+	await new Promise((r) => setTimeout(r, 0));
+	await settle();
+}
+async function mountText(content = TXT_CONTENT, uri = TXT_URI) {
+	const d = doc(uri, content);
+	windowState.setDocument(d);
+	const result = render(Viewer, { props: baseProps(d, plainTextHtml(content), null) });
+	await settleLong();
+	return result;
+}
+async function mountMd(content = MD, uri = MD_URI) {
+	const d = doc(uri, content);
+	windowState.setDocument(d);
+	const r = await renderMarkdown(content, uri);
+	const result = render(Viewer, { props: baseProps(d, r.html, r.index) });
+	await settleLong();
+	return result;
+}
+function q(container: ParentNode, selector: string): HTMLElement | null {
+	return container.querySelector(selector);
+}
+function handle(): FileEditorHandle {
+	const h = windowState.fileEditor;
+	if (!h) throw new Error('windowState.fileEditor が登録されていない(新しい面が出ていない)');
+	return h;
+}
+function cm(container: ParentNode): CMView {
+	const el = q(container, '[data-testid="code-editor"] .cm-editor');
+	if (!el) throw new Error('CodeMirror の面が無い');
+	const v = CMView.findFromDOM(el as HTMLElement);
+	if (!v) throw new Error('EditorView.findFromDOM が null');
+	return v;
+}
+function typeCm(container: ParentNode, s: string, at = 0) {
+	const v = cm(container);
+	v.dispatch({ changes: { from: at, insert: s } });
+}
+function editables(container: ParentNode): HTMLElement[] {
+	return [...container.querySelectorAll<HTMLElement>('[contenteditable="true"]')];
+}
 
 beforeEach(() => {
+	windowState.clearDocument();
+	windowState.fileEditor = null;
+	windowState.editBlocked = false;
+	windowState.externalRemoved = false;
+	menuHandlers.clear();
 	invokeMock.mockReset();
-	invokeMock.mockResolvedValue(null);
+	invokeMock.mockImplementation(async () => null);
 	messageMock.mockReset();
 	alertMock.mockClear();
 	vi.stubGlobal('alert', alertMock);
-	// 前のテストの編集状態・文書を持ち越さない。
-	windowState.endEdit();
-	windowState.clearDocument();
 });
-
 afterEach(() => {
 	cleanup();
 	vi.unstubAllGlobals();
-	vi.clearAllMocks();
+	vi.restoreAllMocks();
 });
 
-// ---------------------------------------------------------------------------
-// (a) WindowState — applyFileRemoved の分岐
-// ---------------------------------------------------------------------------
+const REMOVED = '[data-testid="external-removed-banner"]';
+const SAVE = '[data-testid="external-removed-save"]';
+const CLOSE = '[data-testid="external-removed-close"]';
+const DIRTY_MESSAGE = 'This file was deleted outside the app. Your edits have not been saved.';
 
-describe('AC-48-追g (a): WindowState.applyFileRemoved — dirty なら保つ・そうでなければ閉じる・別の uri は無視', () => {
-	it('既定では印は立っていない(externalRemoved === false)', () => {
-		windowState.setDocument(txtDoc());
-		expect(removedFlag()).toBe(false);
+async function mountDirty() {
+	const r = await mountText();
+	typeCm(r.container, 'my edit\n', 0);
+	await settle();
+	expect(windowState.dirty).toBe(true);
+	return r;
+}
+
+describe('AC-48-追g (a): applyFileRemoved — dirty なら保つ・そうでなければ閉じる・別の uri は無視(面の dirty で決める)', () => {
+	it('既定では印は立っていない', async () => {
+		await mountText();
+		expect(windowState.externalRemoved).toBe(false);
 	});
-
-	it('dirty の文書に同じ uri の削除 → keep: 文書・バッファ・モードが残り、印が立つ・dirty のまま', () => {
-		makeDirtyInStore();
-
-		const decision = windowState.applyFileRemoved(TXT_URI);
-
-		expect(decision).toBe('keep');
+	it('dirty の面に同じ uri の削除 → keep: 文書・面・文字列が残り、印が立つ・dirty のまま', async () => {
+		const { container } = await mountDirty();
+		expect(windowState.applyFileRemoved(TXT_URI)).toBe('keep');
+		await settle();
 		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(windowState.currentDocument?.content).toBe(TXT_CONTENT);
-		expect(windowState.editBuffer).toBe(EDITED);
-		expect(windowState.editMode).toBe('edit');
+		expect(windowState.fileEditor).not.toBeNull();
+		expect(handle().text()).toBe('my edit\n' + TXT_CONTENT);
+		expect(windowState.externalRemoved).toBe(true);
 		expect(windowState.dirty).toBe(true);
-		expect(removedFlag()).toBe(true);
+		expect(cm(container).state.doc.toString()).toBe('my edit\n' + TXT_CONTENT);
 	});
-
-	it('閲覧中の文書に同じ uri の削除 → close: 従来どおり閉じる(印は立たない)', () => {
-		windowState.setDocument(txtDoc());
-
-		const decision = windowState.applyFileRemoved(TXT_URI);
-
-		expect(decision).toBe('close');
-		expect(windowState.currentDocument).toBe(null);
-		expect(removedFlag()).toBe(false);
+	it('dirty でない面に同じ uri の削除 → close: 閉じて面も外れる(印は立たない)', async () => {
+		await mountText();
+		expect(windowState.applyFileRemoved(TXT_URI)).toBe('close');
+		await settle();
+		expect(windowState.currentDocument).toBeNull();
+		expect(windowState.fileEditor).toBeNull();
+		expect(windowState.externalRemoved).toBe(false);
 	});
-
-	it('編集中でも未変更なら close: 閉じて編集状態も畳む(印は立たない)', () => {
-		windowState.setDocument(txtDoc());
-		expect(windowState.beginEdit()).toBe(true);
-		expect(windowState.dirty).toBe(false);
-
-		const decision = windowState.applyFileRemoved(TXT_URI);
-
-		expect(decision).toBe('close');
-		expect(windowState.currentDocument).toBe(null);
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(removedFlag()).toBe(false);
-	});
-
-	it('dirty でも別の uri の削除 → ignore: 何も起きない(文書・バッファ・モード・印)', () => {
-		makeDirtyInStore();
-
-		const decision = windowState.applyFileRemoved(OTHER_URI);
-
-		expect(decision).toBe('ignore');
-		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(windowState.currentDocument?.content).toBe(TXT_CONTENT);
-		expect(windowState.editBuffer).toBe(EDITED);
-		expect(windowState.editMode).toBe('edit');
+	it('dirty でも別の uri の削除 → ignore', async () => {
+		await mountDirty();
+		expect(windowState.applyFileRemoved('file:///Users/a/notes/other.txt')).toBe('ignore');
+		expect(windowState.externalRemoved).toBe(false);
 		expect(windowState.dirty).toBe(true);
-		expect(removedFlag()).toBe(false);
-	});
-
-	it('閲覧中に別の uri の削除 → ignore: 文書は残る', () => {
-		windowState.setDocument(txtDoc());
-
-		const decision = windowState.applyFileRemoved(OTHER_URI);
-
-		expect(decision).toBe('ignore');
 		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(removedFlag()).toBe(false);
 	});
-
-	it('文書が無いときの削除 → ignore(落ちない・印は立たない)', () => {
-		expect(windowState.currentDocument).toBe(null);
-
-		const decision = windowState.applyFileRemoved(TXT_URI);
-
-		expect(decision).toBe('ignore');
-		expect(windowState.currentDocument).toBe(null);
-		expect(removedFlag()).toBe(false);
+	it('文書が無いときの削除 → ignore(落ちない)', () => {
+		expect(windowState.applyFileRemoved(TXT_URI)).toBe('ignore');
+		expect(windowState.externalRemoved).toBe(false);
 	});
 });
 
-// ---------------------------------------------------------------------------
-// (c)(d)(e) WindowState — 印が消えるとき(契約(追補g)3)
-// ---------------------------------------------------------------------------
-
-describe('AC-48-追g (c)(d)(e): WindowState — 印が消えるとき', () => {
-	it('(c) 保存の記帳(markSaved= Command + S と同じ経路の成功後)で印と dirty が消え、編集中のまま', () => {
-		makeDirtyInStore();
+describe('AC-48-追g (c)(d)(e): 印が消えるとき', () => {
+	it('(c) 保存の成功(saveFileEditor)で印と dirty が消え、面は残る。save_document は expectedHash なし', async () => {
+		const { container } = await mountDirty();
 		windowState.applyFileRemoved(TXT_URI);
-		expect(removedFlag()).toBe(true);
-
-		windowState.markSaved(EDITED);
-
-		expect(removedFlag()).toBe(false);
+		await settle();
+		await saveFileEditor(handle());
+		await settleLong();
+		expect(invokeMock.mock.calls).toEqual([['save_document', { uri: TXT_URI, content: 'my edit\n' + TXT_CONTENT }]]);
+		expect(windowState.externalRemoved).toBe(false);
 		expect(windowState.dirty).toBe(false);
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(windowState.currentDocument?.content).toBe(EDITED);
+		expect(q(container, '[data-testid="code-editor"]')).not.toBeNull();
 	});
-
-	it('(c) `$lib/save-document` の saveDocument は save_document を同じ uri と中身で呼び、成功で印が消える', async () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-
-		await saveDocument(TXT_URI, EDITED);
-
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
-		expect(removedFlag()).toBe(false);
-		expect(windowState.dirty).toBe(false);
-	});
-
 	it('(c) 保存に失敗したら印も dirty も残る', async () => {
-		makeDirtyInStore();
+		await mountDirty();
 		windowState.applyFileRemoved(TXT_URI);
 		invokeMock.mockRejectedValueOnce(new Error('disk full'));
-
-		await expect(saveDocument(TXT_URI, EDITED)).rejects.toThrow();
-
-		expect(removedFlag()).toBe(true);
+		await saveFileEditor(handle());
+		await settleLong();
+		expect(windowState.externalRemoved).toBe(true);
 		expect(windowState.dirty).toBe(true);
+		expect(alertMock).toHaveBeenCalledTimes(1);
+	});
+	it('(d) 印のあと同じ文書の file_changed → 印が消える(置き換えとして扱う=契約12 (e))', async () => {
+		await mountDirty();
+		windowState.applyFileRemoved(TXT_URI);
+		windowState.applyFileChanged(doc(TXT_URI, 'recreated\n'));
+		await settleLong();
+		expect(windowState.externalRemoved).toBe(false);
 		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
 	});
-
-	it('(d) 印のあと同じ文書の file_changed(中身が編集と違う)→ 印が消え、外部変更の衝突になる', () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-		expect(removedFlag()).toBe(true);
-
-		const decision = windowState.applyFileChanged({ uri: TXT_URI, content: 'recreated outside\n', modified: 9 });
-
-		expect(decision).toBe('external-conflict');
-		expect(removedFlag()).toBe(false);
-		expect(windowState.externalChange).toEqual({ content: 'recreated outside\n', modified: 9 });
-		expect(windowState.currentDocument?.content).toBe(TXT_CONTENT);
-		expect(windowState.editBuffer).toBe(EDITED);
-		expect(windowState.dirty).toBe(true);
-	});
-
-	it('(e) 別の文書を開く(setDocument)→ 印が消える', () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-
-		windowState.setDocument({ uri: OTHER_URI, content: 'other\n', modified: 1 });
-
-		expect(removedFlag()).toBe(false);
-		expect(windowState.currentDocument?.uri).toBe(OTHER_URI);
-		expect(windowState.editMode).toBe('view');
-	});
-
-	it('(e) root が変わる(applyRoot・文書が残る切替)→ 印が消える', () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-
-		windowState.applyRoot('file:///Users/a/other-root', [], true);
-
-		expect(removedFlag()).toBe(false);
-		expect(windowState.editMode).toBe('view');
-	});
-
-	it('(e) root が変わる(applyRoot・文書も閉じる切替)→ 印が消える', () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-
-		windowState.applyRoot('file:///Users/a/other-root', [], false);
-
-		expect(removedFlag()).toBe(false);
-		expect(windowState.currentDocument).toBe(null);
-	});
-
-	it('(e) clearDocument → 印が消える', () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-
-		windowState.clearDocument();
-
-		expect(removedFlag()).toBe(false);
-		expect(windowState.currentDocument).toBe(null);
+	it('(e) 別の文書を開く(setDocument)・clearDocument・applyRoot で印が消える', async () => {
+		for (const step of ['setDocument', 'clearDocument', 'applyRoot'] as const) {
+			cleanup();
+			await mountDirty();
+			windowState.applyFileRemoved(TXT_URI);
+			expect(windowState.externalRemoved).toBe(true);
+			if (step === 'setDocument') windowState.setDocument(doc('file:///Users/a/notes/other.txt', 'other\n'));
+			else if (step === 'clearDocument') windowState.clearDocument();
+			else windowState.applyRoot('file:///Users/b', [], false);
+			await settle();
+			expect(windowState.externalRemoved, step).toBe(false);
+		}
 	});
 });
 
-// ---------------------------------------------------------------------------
-// (e) 保存せずに編集を終える= confirmDiscardEdits(Esc / Done / Command + E の関門)
-// ---------------------------------------------------------------------------
-
-describe('AC-48-追g (e): 保存せずに編集を終える(confirmDiscardEdits で破棄)→ 文書が閉じる', () => {
-	it("破棄(Don't Save)→ 文書が閉じ、印も消え、save_document は呼ばれない", async () => {
-		makeDirtyInStore();
+describe('AC-48-追g (b)(c): Viewer — 帯(文言・ボタン・title・role)と Save / Close', () => {
+	it('dirty の面の削除 → external-removed-banner(role=alert・追補g の文言)が出て、面と文字列は残る', async () => {
+		const { container } = await mountDirty();
 		windowState.applyFileRemoved(TXT_URI);
-		messageMock.mockResolvedValueOnce("Don't Save"); // 1 枚の 3 択: 保存しない
-
-		const proceeded = await confirmDiscardEdits();
-
-		expect(proceeded).toBe(true);
-		expect(windowState.currentDocument).toBe(null);
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(removedFlag()).toBe(false);
-		expect(saveCalls()).toEqual([]);
-	});
-
-	it('キャンセル(Cancel)→ 文書・バッファ・印はそのまま', async () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
-
-		const proceeded = await confirmDiscardEdits();
-
-		expect(proceeded).toBe(false);
-		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(windowState.editBuffer).toBe(EDITED);
-		expect(windowState.editMode).toBe('edit');
-		expect(removedFlag()).toBe(true);
-	});
-
-	it('保存する(Save)→ save_document が同じ uri と中身で呼ばれ、文書は残って印が消える', async () => {
-		makeDirtyInStore();
-		windowState.applyFileRemoved(TXT_URI);
-		messageMock.mockResolvedValueOnce('Save'); // 1 枚の 3 択: 保存する
-
-		const proceeded = await confirmDiscardEdits();
-
-		expect(proceeded).toBe(true);
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
-		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(windowState.currentDocument?.content).toBe(EDITED);
-		expect(windowState.editMode).toBe('view');
-		expect(removedFlag()).toBe(false);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// (b) Viewer — 帯の表示
-// ---------------------------------------------------------------------------
-
-describe('AC-48-追g (b): Viewer — 印が立つと帯が出る(文言・ボタン2つ・title・role)', () => {
-	it('dirty の文書の削除 → external-removed-banner(role=alert・外部変更の帯と同じ見た目)が出る', async () => {
-		await renderDirty();
-
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-
-		const banner = screen.getByTestId('external-removed-banner');
+		await settleLong();
+		const banner = q(container, REMOVED)!;
+		expect(banner).not.toBeNull();
 		expect(banner.getAttribute('role')).toBe('alert');
-		expect(banner.classList.contains('external-change')).toBe(true);
-		expect(banner.textContent?.replace(/\s+/g, ' ').trim()).toContain(REMOVED_MESSAGE);
-		// 外部変更の帯(契約⑥)とは別物。削除だけでは衝突の帯は出ない。
-		expect(screen.queryByTestId('external-change-banner')).toBeNull();
+		expect(banner.textContent).toContain(DIRTY_MESSAGE);
+		expect(q(container, SAVE)!.textContent?.trim()).toBe('Save');
+		expect(q(container, SAVE)!.getAttribute('title')).toBe('Save your edits to the file again');
+		expect(q(container, CLOSE)!.textContent?.trim()).toBe('Close');
+		expect(q(container, CLOSE)!.getAttribute('title')).toBe('Close the file (your edits are discarded)');
+		expect(q(container, '[data-testid="code-editor"] .cm-editor')).not.toBeNull();
+		expect(handle().text()).toBe('my edit\n' + TXT_CONTENT);
 	});
-
-	it('帯の Save ボタン: 文字 "Save"・title 値固定', async () => {
-		await renderDirty();
+	it('印が無いときは帯が出ない', async () => {
+		const { container } = await mountDirty();
+		expect(q(container, REMOVED)).toBeNull();
+	});
+	it('Save → save_document(同じ uri・面の文字列・expectedHash なし)→ 印と dirty と帯が消える', async () => {
+		const { container } = await mountDirty();
 		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-
-		const save = screen.getByTestId('external-removed-save');
-		expect(save.tagName).toBe('BUTTON');
-		expect(save.textContent?.trim()).toBe('Save');
-		expect(save.getAttribute('title')).toBe(REMOVED_SAVE_TITLE);
-	});
-
-	it('帯の Close ボタン: 文字 "Close"・title 値固定', async () => {
-		await renderDirty();
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-
-		const close = screen.getByTestId('external-removed-close');
-		expect(close.tagName).toBe('BUTTON');
-		expect(close.textContent?.trim()).toBe('Close');
-		expect(close.getAttribute('title')).toBe(REMOVED_CLOSE_TITLE);
-	});
-
-	it('帯が出ても編集面(contenteditable)とバッファは残る', async () => {
-		const { container } = await renderDirty();
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-
-		expect(getPre(container).getAttribute('contenteditable')).toBe('true');
-		expect(windowState.editBuffer).toBe(EDITED);
-	});
-
-	it('印が無いときは帯が出ない(閲覧中・dirty で削除が無いとき)', async () => {
-		renderText();
-		expect(screen.queryByTestId('external-removed-banner')).toBeNull();
-		cleanup();
-
-		await renderDirty();
-		expect(screen.queryByTestId('external-removed-banner')).toBeNull();
-	});
-});
-
-// ---------------------------------------------------------------------------
-// (c) Viewer — 帯の Save / Close
-// ---------------------------------------------------------------------------
-
-describe('AC-48-追g (c): Viewer — 帯の Save は同じ uri と編集バッファで保存し、Close は文書を閉じる', () => {
-	it('Save → save_document(同じ uri・編集バッファの中身)が呼ばれ、成功すると印と dirty と帯が消える', async () => {
-		await renderDirty();
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-
-		await fireEvent.click(screen.getByTestId('external-removed-save'));
-		await settle();
-
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
-		expect(removedFlag()).toBe(false);
+		await settleLong();
+		await fireEvent.click(q(container, SAVE)!);
+		await settleLong();
+		expect(invokeMock.mock.calls).toEqual([['save_document', { uri: TXT_URI, content: 'my edit\n' + TXT_CONTENT }]]);
+		expect(windowState.externalRemoved).toBe(false);
 		expect(windowState.dirty).toBe(false);
-		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(windowState.currentDocument?.content).toBe(EDITED);
-		expect(screen.queryByTestId('external-removed-banner')).toBeNull();
-		expect(messageMock).not.toHaveBeenCalled();
+		expect(q(container, REMOVED)).toBeNull();
 	});
-
 	it('Save が失敗したら印・dirty・帯は残る(文書は閉じない)', async () => {
-		await renderDirty();
+		const { container } = await mountDirty();
 		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-		invokeMock.mockRejectedValueOnce(new Error('disk full'));
-
-		await fireEvent.click(screen.getByTestId('external-removed-save'));
-		await settle();
-
-		expect(saveCalls()).toHaveLength(1);
-		expect(removedFlag()).toBe(true);
+		await settleLong();
+		invokeMock.mockRejectedValueOnce(new Error('EACCES'));
+		await fireEvent.click(q(container, SAVE)!);
+		await settleLong();
+		expect(windowState.externalRemoved).toBe(true);
 		expect(windowState.dirty).toBe(true);
+		expect(q(container, REMOVED)).not.toBeNull();
 		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(screen.getByTestId('external-removed-banner')).toBeTruthy();
 	});
-
 	it('Close → 文書が閉じ(編集は捨てられ)、save_document は呼ばれない', async () => {
-		await renderDirty();
+		const { container } = await mountDirty();
 		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-
-		await fireEvent.click(screen.getByTestId('external-removed-close'));
-		await settle();
-
-		expect(windowState.currentDocument).toBe(null);
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(removedFlag()).toBe(false);
-		expect(saveCalls()).toEqual([]);
+		await settleLong();
+		await fireEvent.click(q(container, CLOSE)!);
+		await settleLong();
+		expect(windowState.currentDocument).toBeNull();
+		expect(windowState.fileEditor).toBeNull();
+		expect(invokeMock).not.toHaveBeenCalled();
+		expect(windowState.externalRemoved).toBe(false);
 	});
 });
-
-// ---------------------------------------------------------------------------
-// (d)(e) Viewer — 帯の入れ替わりと Esc / Done
-// ---------------------------------------------------------------------------
-
-describe('AC-48-追g (d)(e): Viewer — 作り直しで外部変更の帯へ・Esc / Done の破棄で閉じる', () => {
-	it('(d) 印のあと同じ文書の file_changed(中身が違う)→ 削除の帯が消え、外部変更の帯が出る', async () => {
-		await renderDirty();
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-		expect(screen.getByTestId('external-removed-banner')).toBeTruthy();
-
-		const decision = windowState.applyFileChanged({ uri: TXT_URI, content: 'recreated outside\n', modified: 9 });
-		await tick();
-
-		expect(decision).toBe('external-conflict');
-		expect(screen.queryByTestId('external-removed-banner')).toBeNull();
-		expect(screen.getByTestId('external-change-banner')).toBeTruthy();
-		expect(screen.getByTestId('external-overwrite')).toBeTruthy();
-		expect(screen.getByTestId('external-reload')).toBeTruthy();
-	});
-
-	it("(e) Esc → Don't Save(保存しない)→ 文書が閉じる(save_document は呼ばれない)", async () => {
-		const { pre } = await renderDirty();
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-		messageMock.mockResolvedValueOnce("Don't Save"); // 1 枚の 3 択: 保存しない
-
-		await fireEvent.keyDown(pre, { key: 'Escape' });
-		await settle();
-
-		expect(messageMock).toHaveBeenCalledTimes(1);
-		expect(windowState.currentDocument).toBe(null);
-		expect(removedFlag()).toBe(false);
-		expect(saveCalls()).toEqual([]);
-	});
-
-	it("(e) Done → Don't Save(保存しない)→ 文書が閉じる", async () => {
-		await renderDirty();
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-		messageMock.mockResolvedValueOnce("Don't Save");
-
-		await fireEvent.click(screen.getByTestId('edit-done'));
-		await settle();
-
-		expect(messageMock).toHaveBeenCalledTimes(1);
-		expect(windowState.currentDocument).toBe(null);
-		expect(removedFlag()).toBe(false);
-		expect(saveCalls()).toEqual([]);
-	});
-
-	it('(e) Esc → Cancel(キャンセル)→ 文書・帯・バッファはそのまま', async () => {
-		const { container, pre } = await renderDirty();
-		windowState.applyFileRemoved(TXT_URI);
-		await tick();
-		messageMock.mockResolvedValueOnce('Cancel'); // 1 枚の 3 択: キャンセル
-
-		await fireEvent.keyDown(pre, { key: 'Escape' });
-		await settle();
-
-		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-		expect(windowState.editBuffer).toBe(EDITED);
-		expect(removedFlag()).toBe(true);
-		expect(screen.getByTestId('external-removed-banner')).toBeTruthy();
-		expect(getPre(container).getAttribute('contenteditable')).toBe('true');
-	});
-});
-
-// ---------------------------------------------------------------------------
-// (f) 配線(ソース走査)
-// ---------------------------------------------------------------------------
-
-const PAGE_PATH = resolve(__dirname, '../routes/+page.svelte');
-const STORE_PATH = resolve(__dirname, '../stores/window-state.svelte.ts');
-
-/** コメント(行・ブロック)を落とす(コメントの中の語を数えない)。 */
-function stripJsComments(src: string): string {
-	return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
-/** `start` 以降で最初の `{` から、対応する `}` までの中身。 */
-function braceBody(src: string, start: number, what: string): string {
-	const open = src.indexOf('{', start);
-	expect(open, `${what}: opening brace`).toBeGreaterThanOrEqual(0);
-	let depth = 0;
-	for (let i = open; i < src.length; i++) {
-		if (src[i] === '{') depth++;
-		else if (src[i] === '}') {
-			depth--;
-			if (depth === 0) return src.slice(open + 1, i);
-		}
-	}
-	throw new Error(`${what}: unbalanced braces`);
-}
-
-/** `open`(`(` の位置)から対応する `)` までの中身。 */
-function parenBody(src: string, open: number, what: string): string {
-	expect(open, `${what}: opening paren`).toBeGreaterThanOrEqual(0);
-	expect(src[open], `${what}: opening paren`).toBe('(');
-	let depth = 0;
-	for (let i = open; i < src.length; i++) {
-		if (src[i] === '(') depth++;
-		else if (src[i] === ')') {
-			depth--;
-			if (depth === 0) return src.slice(open + 1, i);
-		}
-	}
-	throw new Error(`${what}: unbalanced parens`);
-}
 
 describe('AC-48-追g (f): 配線(ソース走査)', () => {
-	it("+page.svelte の listen('file_removed') の listener は windowState.applyFileRemoved( を通り、直に clearDocument( を呼ばない", () => {
-		const src = stripJsComments(readFileSync(PAGE_PATH, 'utf8'));
+	const read = async (rel: string) => {
+		const { readFileSync } = await import('node:fs');
+		const { resolve } = await import('node:path');
+		return readFileSync(resolve(__dirname, '../..', rel), 'utf8');
+	};
+	it("+page.svelte の listen('file_removed') の listener は windowState.applyFileRemoved( を通り、直に clearDocument( を呼ばない", async () => {
+		const src = await read('src/routes/+page.svelte');
 		const at = src.indexOf("'file_removed'");
-		expect(at, "listen('file_removed') in +page.svelte").toBeGreaterThanOrEqual(0);
-		// `listen(` の引数全体(イベント名 + listener)を括弧の対応で切り出す。
-		const call = parenBody(src, src.lastIndexOf('(', at), "listen('file_removed', …)");
-		expect(call).toContain("'file_removed'");
-
-		expect(call).toContain('windowState.applyFileRemoved(');
-		expect(call).not.toContain('clearDocument(');
-	});
-
-	it("+page.svelte に 'file_removed' の listen は 1 か所だけ(別の経路で clearDocument へ回らない)", () => {
-		const src = stripJsComments(readFileSync(PAGE_PATH, 'utf8'));
+		expect(at).toBeGreaterThanOrEqual(0);
+		const body = src.slice(at, at + 400);
+		expect(body).toContain('windowState.applyFileRemoved(');
+		expect(body).not.toContain('clearDocument(');
 		expect(src.split("'file_removed'").length - 1).toBe(1);
 	});
-
-	it('window-state.svelte.ts の applyFileRemoved の本体が dirty を見て clearDocument( に分岐する', () => {
-		const src = stripJsComments(readFileSync(STORE_PATH, 'utf8'));
-		const at = src.search(/\bapplyFileRemoved\s*\(/);
-		expect(at, 'applyFileRemoved( in window-state.svelte.ts').toBeGreaterThanOrEqual(0);
-		const body = braceBody(src, src.indexOf(')', at), 'applyFileRemoved body');
-
-		expect(body).toMatch(/\bdirty\b/);
+	it('window-state.svelte.ts の applyFileRemoved の本体が dirty(面の dirty)を見て clearDocument( に分岐する', async () => {
+		const src = await read('src/stores/window-state.svelte.ts');
+		const at = src.indexOf('applyFileRemoved(uri');
+		expect(at).toBeGreaterThanOrEqual(0);
+		const body = src.slice(at, at + 700);
+		expect(body).toMatch(/this\.dirty|fileEditor\?\.dirty|fileEditor\.dirty/);
 		expect(body).toContain('clearDocument(');
+		expect(body).not.toContain('externalChange');
 	});
 });

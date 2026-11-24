@@ -25,6 +25,7 @@
 	import { onMount, tick } from 'svelte';
 	import { open as openDialog } from '@tauri-apps/plugin-dialog';
 	import { invoke } from '$lib/ipc';
+	import { getBuildInfo } from '$lib/buildInfo';
 	import { listen } from '$lib/events';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { detectFileType } from '$lib/file-type';
@@ -620,6 +621,15 @@
 
 	// --- Mount -----------------------------------------------------------------
 
+	// 開発版(要件87 契約2)の版の名前 `dev-<開発名> #<n>(日時)`。版番号の下に出す。
+	// 公開版・dev ビルドは空なので出さない(About の下の行と同じ扱い)。
+	let buildName = $state('');
+	onMount(() => {
+		getBuildInfo()
+			.then((info) => (buildName = info?.buildName ?? ''))
+			.catch(() => {});
+	});
+
 	onMount(() => {
 		let disposed = false;
 		let unlisten: (() => void) | null = null;
@@ -673,6 +683,9 @@
 				<div class="wordmark">Vellis</div>
 				{#if windowState.version}
 					<div class="version">Version {windowState.version}</div>
+				{/if}
+				{#if buildName}
+					<div class="version build-name">{buildName}</div>
 				{/if}
 			</div>
 			<div class="top-actions">
@@ -913,6 +926,10 @@
 		margin-top: 3px;
 		font-size: var(--text-sm);
 		color: var(--color-text-muted);
+	}
+
+	.build-name {
+		margin-top: 1px;
 	}
 
 	.top-actions {

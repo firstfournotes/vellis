@@ -124,6 +124,8 @@ import { confirmDiscardEdits } from '$lib/edit-guard';
 import FindInFolder from './FindInFolder.svelte';
 import Viewer from './Viewer.svelte';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+import type { FileEditorHandle } from '../editor/file-editor';
+import { contentHash } from '$lib/document-edit';
 import { render as renderMarkdown } from '../markdown/renderer';
 import type { SourceIndex } from '../markdown/types';
 import type { SearchHit } from '$lib/find-in-folder';
@@ -132,6 +134,55 @@ import { occurrenceIndex } from '$lib/find-in-folder';
 // 要件#65 契約13: 欄の値のリセット(`resetSearchScope`)と分割の純関数(`splitPatterns`)。
 // 名前空間 import なので、未実装でもこのファイルの読み込みは失敗しない(該当ケースだけが赤)。
 import * as findInFolderModule from '$lib/find-in-folder';
+
+/**
+ * 要件74 第2段 2-5(2026-11-17 仮・契約21・オーケストレーターの仮の承認=朝に由谷に確かめる): 今の編集の store の口
+ * (beginEdit / updateBuffer / editMode / editBuffer / endEdit)は撤去で消えるため、用意だけを新しい面の偽の handle
+ * (`windowState.fileEditor`=edit-guard の 2 本と同じ形)に置き換えた。見ている振る舞いの期待値は変えていない。
+ * `windowState.dirty` は面の dirty を映す(確定契約)。
+ */
+type FakeFace = FileEditorHandle & { setText(next: string): void };
+function fakeFace(uri: string, base: string): FakeFace {
+	let current = base;
+	let savedBase = base;
+	return {
+		kind: 'text',
+		uri,
+		readOnly: false,
+		get dirty() {
+			return current !== savedBase;
+		},
+		conflict: false,
+		notice: null,
+		text: () => current,
+		expectedHash: () => contentHash(savedBase),
+		markSaved(text: string) {
+			savedBase = text;
+			current = text;
+		},
+		applyFileChanged: () => 'apply',
+		keepMyEdits() {},
+		useFileOnDisk() {},
+		showSaveConflict() {},
+		reset(content: string) {
+			current = content;
+			savedBase = content;
+		},
+		preparePrint: async () => undefined,
+		setText(next: string) {
+			current = next;
+		},
+	};
+}
+let face: FakeFace | null = null;
+/** 今の文書を面に載せて dirty にする(今の編集の editMode / editBuffer の代入の代わり)。 */
+function makeCurrentDirty(edited: string) {
+	const uri = windowState.currentDocument?.uri ?? '';
+	face = fakeFace(uri, windowState.currentDocument?.content ?? '');
+	windowState.fileEditor = face;
+	face.setText(edited);
+	expect(windowState.dirty).toBe(true);
+}
 
 const invokeMock = vi.mocked(invoke);
 const confirmMock = vi.mocked(confirmDiscardEdits);
@@ -276,6 +327,8 @@ beforeEach(() => {
 	installInvoke();
 	confirmMock.mockResolvedValue(true);
 	windowState.currentDocument = null;
+	windowState.fileEditor = null;
+	face = null;
 	Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
 	try {
 		localStorage.clear();
@@ -1125,9 +1178,7 @@ describe('要件#55 追補b-2・AC-55-31: クリックした結果が今開い�
 
 	it('編集中(dirty)でも同じ文書なら確認を出さない(文書は動かない)', async () => {
 		const { onOpen, current, setDocumentSpy } = await mountWithResultsAndCurrent(A_URI);
-		windowState.editMode = 'edit';
-		windowState.editBuffer = '# a\n\nalpha one (edited)\n';
-		expect(windowState.dirty).toBe(true);
+		makeCurrentDirty('# a\n\nalpha one (edited)\n');
 
 		await fireEvent.click(hitRows()[1]);
 		await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
@@ -1138,8 +1189,9 @@ describe('要件#55 追補b-2・AC-55-31: クリックした結果が今開い�
 		expect(openCalls()).toHaveLength(0);
 		expect(setDocumentSpy).not.toHaveBeenCalled();
 		expect(windowState.currentDocument?.uri).toBe(current.uri);
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe('# a\n\nalpha one (edited)\n');
+		expect(windowState.fileEditor).toBe(face);
+		expect(face?.text()).toBe('# a\n\nalpha one (edited)\n');
+		expect(windowState.dirty).toBe(true);
 	});
 
 	it('違うファイルの行は従来どおり confirmDiscardEdits → open_document → onOpen', async () => {
@@ -1157,8 +1209,7 @@ describe('要件#55 追補b-2・AC-55-31: クリックした結果が今開い�
 
 	it('違うファイルで編集中なら確認が出て、偽なら開かず onOpen も呼ばない(既存の経路は不変)', async () => {
 		const { onOpen, current } = await mountWithResultsAndCurrent(A_URI);
-		windowState.editMode = 'edit';
-		windowState.editBuffer = 'changed';
+		makeCurrentDirty('changed');
 		confirmMock.mockResolvedValue(false);
 
 		await fireEvent.click(hitRows()[2]);

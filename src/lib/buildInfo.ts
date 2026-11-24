@@ -1,7 +1,7 @@
 /**
  * Build info IPC wrapper + cache.
  *
- * `version` / `buildNumber` / `buildTime` are baked at compile time by
+ * `version` / `buildNumber` / `buildTime` / `buildName` are baked at compile time by
  * `src-tauri/build.rs` and exposed via the `get_build_info` Tauri command.
  * The values never change for a running process, so we cache the first
  * fetch and serve subsequent calls from memory.
@@ -12,10 +12,16 @@ export interface BuildInfo {
 	version: string;
 	buildNumber: string;
 	buildTime: string;
-	/** Single source of truth for gating, resolved in Rust. */
-	channel: 'dev' | 'release';
 	/**
-	 * Resolved flag booleans. On `release` the backend omits `kind=dev`
+	 * The preview build's name, `dev-<name> #<n>(YYYY-MM-DD HH:MM JST)`
+	 * (requirements.md #87); empty on release and dev builds. Optional so a
+	 * payload from before requirements.md #87 still type-checks.
+	 */
+	buildName?: string;
+	/** Single source of truth for gating, resolved in Rust. */
+	channel: 'dev' | 'preview' | 'release';
+	/**
+	 * Resolved flag booleans. On `release` / `preview` the backend omits `kind=dev`
 	 * entries (feature-flags.md §3.5); never carries registry metadata.
 	 */
 	flags: Record<string, boolean>;

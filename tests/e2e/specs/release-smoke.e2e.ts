@@ -80,13 +80,39 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *     used.
  *  4. Headings / lists / blockquote nesting / tables (incl. alignment) /
  *     hr / bold / italic / strike / inline code are present in the DOM.
- *  5. Shiki colours TypeScript / Rust / Bash / JSON (≥ 2 distinct inline
- *     colours per block; the language-less block has none as a control).
- *  6. Task-list checkboxes exist, checked and unchecked.
+ *  5. The TypeScript / Rust / Bash / JSON fences are coloured (≥ 2 distinct
+ *     token colours per block; the language-less block has none as a control).
+ *  6. Task-list items exist, checked and unchecked, each with a visible mark.
  *  7. Clicking the first footnote reference brings its definition into the
  *     viewer's *visible* area — below the sticky, opaque toolbar
  *     (`header.viewer-toolbar`), not merely inside `article.viewer`'s box
  *     (requirement #73 contract 1).
+ *
+ * The face (要件74 第2段, 2026-11-17 / this rewrite 2026-11-24)
+ * --------------------------------------------------------------
+ * A Markdown file is the ProseMirror face from the moment it opens
+ * (`[data-testid="markdown-editor"] .ProseMirror.markdown-body` inside the
+ * viewer's `.markdown-body`); the read-only render (`render()`) is kept for
+ * printing / SSH only. What that changes for 4〜7, and how each line is judged
+ * now (the line's purpose is unchanged):
+ *  - table alignment is `style="text-align: …"` on the cell (prosemirror-tables
+ *    `align` attr), not the `align` attribute → computed `text-align`;
+ *  - a fence is an embedded CodeMirror (`pre[data-lang] .cm-content`, 契約5
+ *    補足), coloured by Lezer tokens in the Shiki theme's colours
+ *    (`.cm-line span[class]`, computed `color`) — the Shiki `<pre>` only exists
+ *    for printing (AC-74-39). CodeMirror renders the viewport, so each fence is
+ *    scrolled into view first, and the language loads lazily, so the colours
+ *    are waited for;
+ *  - a task item is `li.task-list-item[data-checked]` (markdown-schema.ts); the
+ *    checklist line is "the checkboxes are shown", so each item must also carry
+ *    a visible mark — a real `input[type="checkbox"]` or a mark drawn by CSS
+ *    (`::before` / `::marker` with content). The attribute alone is the model,
+ *    not a checkbox on the screen (契約17「タスクの印: クリックで切り替わる」);
+ *  - footnotes: the reference is `sup.footnote-ref > a[href="#fn-<label>"]`,
+ *    the definition `section.footnote-definition#fn-<label>` **in place** (判断
+ *    6: at the source position, not gathered at the end) with its back-link
+ *    `a.footnote-backref[href="#fnref-<label>"]` (node-views/index.ts). The
+ *    reached / not-reached judgement is the same toolbar-bottom geometry.
  *  8. XSS: `alert` / `confirm` / `prompt` are stubbed before the click and
  *     never called; no `<script>`, `<iframe>`, `on*` attribute or
  *     `javascript:` href survives in the rendered DOM.
@@ -520,8 +546,16 @@ describe('Release smoke: RELEASE-CHECKLIST §3 on the webdriver build (backlog 3
 		expect(await countInBody('ol ol > li')).toBeGreaterThan(0); // Sub 2.1
 		expect(await countInBody('blockquote blockquote')).toBeGreaterThan(0);
 		expect(await countInBody('table')).toBeGreaterThanOrEqual(2);
-		expect(await countInBody('th[align="center"]')).toBeGreaterThan(0);
-		expect(await countInBody('th[align="right"]')).toBeGreaterThan(0);
+		// §6's alignment row (`|:---|:---:|---:|`): the face writes the alignment as the
+		// cell's `text-align` style (prosemirror-tables), the old render as `align=`;
+		// the computed value covers both.
+		const aligned = await browser.execute((body) => {
+			const ths = Array.from(document.querySelectorAll<HTMLElement>(`${body} th`));
+			const by = (want: string) => ths.filter((th) => getComputedStyle(th).textAlign === want).length;
+			return { center: by('center'), right: by('right'), total: ths.length };
+		}, BODY);
+		expect(aligned.center).toBeGreaterThan(0);
+		expect(aligned.right).toBeGreaterThan(0);
 		expect(await countInBody('hr')).toBeGreaterThan(0);
 
 		expect(await textsInBody('strong')).toContain('太字');
@@ -530,53 +564,97 @@ describe('Release smoke: RELEASE-CHECKLIST §3 on the webdriver build (backlog 3
 		expect(await textsInBody(':not(pre) > code')).toContain('インラインコード');
 	});
 
-	it('applies Shiki highlighting to the TypeScript / Rust / Bash / JSON blocks', async () => {
-		// Shiki output after sanitising: `<pre style=…><code><span><span
-		// style="color:#…">`. Identify each fence by a marker from its source
-		// and count the distinct inline colours inside it.
-		const markers: Record<string, string> = {
-			typescript: 'async function fetchChildren',
-			rust: 'pub async fn install_cli',
-			bash: 'vellis --install-cli',
-			json: "default-src 'self'; script-src 'self'",
-			plain: 'これは言語指定のないコードブロック',
+	it('colours the TypeScript / Rust / Bash / JSON fences (embedded CodeMirror, Lezer tokens in the Shiki theme colours)', async () => {
+		// 要件74 契約5 補足: a fence is `pre[data-lang="<lang>"]` holding an embedded
+		// CodeMirror; its tokens are `.cm-line span[class]` whose computed `color`
+		// differs from the content's base colour (the same reading as
+		// req69-code-highlight-gate). sample.md has exactly one fence per language
+		// in §5 (plus the mermaid ones, which are figures, not `pre`). Each fence is
+		// scrolled into view first (CodeMirror renders the viewport only) and the
+		// marker line + ≥ 2 colours are waited for (the language loads lazily).
+		const fences: Record<string, { lang: string; marker: string }> = {
+			typescript: { lang: 'typescript', marker: 'async function fetchChildren' },
+			rust: { lang: 'rust', marker: 'pub async fn install_cli' },
+			bash: { lang: 'bash', marker: 'vellis --install-cli' },
+			json: { lang: 'json', marker: "default-src 'self'; script-src 'self'" },
+			plain: { lang: '', marker: 'これは言語指定のないコードブロック' },
 		};
-		const colours = await browser.execute(
-			(body, m) => {
-				const pres = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre`));
-				const out: Record<string, number | null> = {};
-				for (const [lang, marker] of Object.entries(m)) {
-					const pre = pres.find((p) => (p.textContent ?? '').includes(marker));
-					if (!pre) {
-						out[lang] = null;
-						continue;
-					}
+		const measure = (lang: string, marker: string) =>
+			browser.execute(
+				(body, l, m) => {
+					const pre = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre[data-lang]`)).find(
+						(p) => (p.getAttribute('data-lang') ?? '') === l,
+					);
+					if (!pre) return null;
+					pre.scrollIntoView({ block: 'center' });
+					const content = pre.querySelector<HTMLElement>('.cm-content');
+					if (!content) return { embedded: false, hasMarker: (pre.textContent ?? '').includes(m), colours: 0 };
+					const base = getComputedStyle(content).color;
 					const set = new Set<string>();
-					for (const span of pre.querySelectorAll<HTMLElement>('span[style]')) {
-						if (span.style.color) set.add(span.style.color);
+					for (const span of content.querySelectorAll<HTMLElement>('.cm-line span[class]')) {
+						const c = getComputedStyle(span).color;
+						if (c && c !== base) set.add(c);
 					}
-					out[lang] = set.size;
-				}
-				return out;
-			},
-			BODY,
-			markers,
-		);
-		for (const lang of ['typescript', 'rust', 'bash', 'json']) {
-			expect(colours[lang]).not.toBeNull();
-			expect(colours[lang] ?? 0).toBeGreaterThanOrEqual(2);
+					return { embedded: true, hasMarker: (content.textContent ?? '').includes(m), colours: set.size };
+				},
+				BODY,
+				lang,
+				marker,
+			);
+		const results: Record<string, unknown> = {};
+		for (const [key, f] of Object.entries(fences)) {
+			await waitOrExplain(
+				async () => {
+					const r = await measure(f.lang, f.marker);
+					return !!r && r.embedded && r.hasMarker && (key === 'plain' ? true : r.colours >= 2);
+				},
+				15_000,
+				async () =>
+					`fence ${key} (data-lang=${JSON.stringify(f.lang)}) is not an embedded, coloured CodeMirror: ${JSON.stringify(await measure(f.lang, f.marker))}; recorder=${JSON.stringify(await readRecord())}`,
+			);
+			results[key] = await measure(f.lang, f.marker);
 		}
-		// Control: the language-less fence carries no colour spans, so the
-		// counts above cannot come from something other than highlighting.
-		expect(colours.plain).toBe(0);
+		for (const key of ['typescript', 'rust', 'bash', 'json']) {
+			expect((results[key] as { colours: number }).colours).toBeGreaterThanOrEqual(2);
+		}
+		// Control: the language-less fence carries no token colours, so the counts
+		// above cannot come from something other than highlighting.
+		expect((results.plain as { colours: number }).colours).toBe(0);
+		// Back to the top: the footnote gates below start from an unscrolled viewer.
+		await browser.execute(() => {
+			const viewer = document.querySelector('article.viewer');
+			if (viewer) viewer.scrollTop = 0;
+		});
 	});
 
-	it('shows task-list checkboxes, both checked and unchecked', async () => {
-		expect(await countInBody('li.task-list-item > input[type="checkbox"]')).toBeGreaterThanOrEqual(4);
-		expect(await countInBody('li.task-list-item > input[type="checkbox"]:checked')).toBeGreaterThanOrEqual(2);
-		expect(
-			await countInBody('li.task-list-item > input[type="checkbox"]:not(:checked)'),
-		).toBeGreaterThanOrEqual(2);
+	it('shows task-list items with a visible mark, both checked and unchecked', async () => {
+		// The face's task item is `li.task-list-item[data-checked="true|false"]`
+		// (markdown-schema.ts `list_item.toDOM`); the old render's was
+		// `li.task-list-item > input[type="checkbox"]`. The checklist line is "the
+		// checkboxes are shown" (RELEASE-CHECKLIST §3) and 契約17 says the mark is
+		// clicked to toggle, so beyond the state each item needs a mark a user can
+		// see: a real checkbox (whose `checked` agrees with the state) or a mark
+		// drawn by CSS (`::before` / `::marker` with content).
+		const items = await browser.execute((body) => {
+			const has = (c: string) => !!c && c !== 'none' && c !== 'normal' && c !== '""' && c !== "''";
+			return Array.from(document.querySelectorAll<HTMLElement>(`${body} li.task-list-item`)).map((li) => {
+				// The face puts the mark inside the item's first paragraph, ahead of the
+				// text (#835 widget); the old render put it right under the li. Count only
+				// this item's own mark, not one of a nested item.
+				const input =
+					Array.from(li.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).find((el) => el.closest('li') === li) ?? null;
+				const state = li.getAttribute('data-checked') ?? (input ? String(input.checked) : null);
+				const before = getComputedStyle(li, '::before').content;
+				const marker = getComputedStyle(li, '::marker').content;
+				const mark = input ? 'input' : has(before) || has(marker) ? 'css' : 'none';
+				return { state, mark, inputChecked: input?.checked ?? null, before, marker, text: (li.textContent ?? '').trim().slice(0, 40) };
+			});
+		}, BODY);
+		expect(items.length).toBeGreaterThanOrEqual(4);
+		expect(items.filter((i) => i.state === 'true').length).toBeGreaterThanOrEqual(2);
+		expect(items.filter((i) => i.state === 'false').length).toBeGreaterThanOrEqual(2);
+		expect(items.filter((i) => i.mark === 'none')).toEqual([]);
+		for (const i of items.filter((i) => i.mark === 'input')) expect(String(i.inputChecked)).toBe(i.state);
 	});
 
 	it('does not fire the §13 XSS attempts and leaves no script / handler attribute / javascript: href', async () => {
@@ -622,10 +700,13 @@ describe('Release smoke: RELEASE-CHECKLIST §3 on the webdriver build (backlog 3
 			browser.execute((body) => {
 				const viewer = document.querySelector('article.viewer');
 				const toolbar = viewer?.querySelector('header.viewer-toolbar') ?? null;
-				const ref = document.querySelector<HTMLAnchorElement>(`${body} sup a[data-footnote-ref]`);
+				// The face's reference (node-views/index.ts `footnoteReferenceView`): the
+				// first `sup.footnote-ref` in the body is `[^1]` (§11).
+				const ref = document.querySelector<HTMLAnchorElement>(`${body} sup.footnote-ref a[href^="#fn-"]`);
+				// Its definition sits in place (判断 6), a `section.footnote-definition`.
 				const def = Array.from(
-					document.querySelectorAll<HTMLElement>(`${body} section[data-footnotes] li`),
-				).find((li) => (li.textContent ?? '').includes('複数の CLI 起動'));
+					document.querySelectorAll<HTMLElement>(`${body} section.footnote-definition`),
+				).find((s) => (s.textContent ?? '').includes('複数の CLI 起動'));
 				if (!viewer || !ref || !def) {
 					return { ok: false as const, viewer: !!viewer, ref: !!ref, def: !!def };
 				}
@@ -654,7 +735,7 @@ describe('Release smoke: RELEASE-CHECKLIST §3 on the webdriver build (backlog 3
 		expect(before.visible).toBe(false);
 
 		await browser.execute((body) => {
-			document.querySelector<HTMLAnchorElement>(`${body} sup a[data-footnote-ref]`)?.click();
+			document.querySelector<HTMLAnchorElement>(`${body} sup.footnote-ref a[href^="#fn-"]`)?.click();
 		}, BODY);
 
 		await waitOrExplain(
@@ -670,21 +751,21 @@ describe('Release smoke: RELEASE-CHECKLIST §3 on the webdriver build (backlog 3
 
 	it('jumps back to the [^1] reference when the footnote back-link is clicked', async () => {
 		// Requirement #73 contract 2. Runs after the previous `it`, so the
-		// viewer is scrolled to the footnotes. The reference sits in §11, in
-		// the middle of the document, so this destination is not pinned by
-		// the scroll range's end the way the definition is: it has to be
+		// viewer is scrolled to the definition. In the face the definition sits
+		// right after §11's paragraph (判断 6), so the reference is just above the
+		// visible area — hidden behind / above the toolbar — and has to be
 		// placed below the sticky toolbar by the scroll code itself.
 		const geometry = () =>
 			browser.execute((body) => {
 				const viewer = document.querySelector('article.viewer');
 				const toolbar = viewer?.querySelector('header.viewer-toolbar') ?? null;
 				const def = Array.from(
-					document.querySelectorAll<HTMLElement>(`${body} section[data-footnotes] li`),
-				).find((li) => (li.textContent ?? '').includes('複数の CLI 起動'));
-				const backref = def?.querySelector<HTMLAnchorElement>('a[data-footnote-backref]') ?? null;
+					document.querySelectorAll<HTMLElement>(`${body} section.footnote-definition`),
+				).find((s) => (s.textContent ?? '').includes('複数の CLI 起動'));
+				const backref = def?.querySelector<HTMLAnchorElement>('a.footnote-backref') ?? null;
 				// The first reference in the body is `[^1]`, the one this
 				// back-link returns to.
-				const ref = document.querySelector<HTMLAnchorElement>(`${body} sup a[data-footnote-ref]`);
+				const ref = document.querySelector<HTMLAnchorElement>(`${body} sup.footnote-ref a[href^="#fn-"]`);
 				if (!viewer || !def || !backref || !ref) {
 					return {
 						ok: false as const,
@@ -721,9 +802,9 @@ describe('Release smoke: RELEASE-CHECKLIST §3 on the webdriver build (backlog 3
 
 		await browser.execute((body) => {
 			const def = Array.from(
-				document.querySelectorAll<HTMLElement>(`${body} section[data-footnotes] li`),
-			).find((li) => (li.textContent ?? '').includes('複数の CLI 起動'));
-			def?.querySelector<HTMLAnchorElement>('a[data-footnote-backref]')?.click();
+				document.querySelectorAll<HTMLElement>(`${body} section.footnote-definition`),
+			).find((s) => (s.textContent ?? '').includes('複数の CLI 起動'));
+			def?.querySelector<HTMLAnchorElement>('a.footnote-backref')?.click();
 		}, BODY);
 
 		await waitOrExplain(

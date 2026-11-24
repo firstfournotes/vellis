@@ -6,28 +6,15 @@
  * `svgViewMode` と同じ整理で、「いま何ができるか / 届いた変更をどう扱うか」を
  * ここが決め、呼ぶ側は結果を状態と画面へ移すだけにする。
  *
- * 5つの判断を持つ:
- * - `canEnterEdit` — 編集に入れる種別と root(契約①②)
- * - `isDirty` — 編集バッファと保存済み content の byte 等価(契約④)
- * - `shouldSaveOnCommand` — ⌘S で保存するか(契約⑤・追補i)
- * - `contentHash` / `decideFileChanged` — 自己書き込みエコーの抑止と
- *   外部変更衝突の3分岐(契約⑥)
- * - `bufferFromPre` — `<pre contenteditable>` から原文を取り出す(契約②)
+ * 残る判断(要件#74 第2段 2-5 で今の編集の分は撤去した):
+ * - `canEnterEdit` — 編集できる種別と root(契約①②)
+ * - `isDirty` — バッファと保存済み content の byte 等価(契約④)
+ * - `contentHash` — 自己書き込みエコーの抑止と保存の照合(契約⑥・要件#74 契約14)
+ *
+ * 届いた外部変更の扱い(3 方向マージ・衝突)は面の handle の `applyFileChanged`
+ * (要件#74 契約13)の持ち場。
  */
 import type { FileType } from './file-type';
-
-/** 表示モードの2値。編集は明示操作でしか始まらない(契約③)。 */
-export type EditMode = 'view' | 'edit';
-
-/**
- * Edit メニュー「Edit」(⌘E)のクリックがフロントへ届くイベント名(契約③・追補b)。
- *
- * `menu.rs` の `MENU_EDIT_EVENT` と綴りを合わせること。閲覧⇄編集のトグルで、
- * 本文のダブルクリックと同じ「明示操作」の1つ。html 種別にとってはこれが唯一の
- * 入口でもある — 閲覧中の html は `HtmlViewer` の sandbox された iframe の中に
- * あり、本文のダブルクリックがアプリまで届かない。
- */
-export const MENU_EDIT_EVENT = 'menu_edit';
 
 /**
  * 編集に入れるファイル種別。text はその場編集、markdown / html は
@@ -61,32 +48,6 @@ export function isDirty(buffer: string, saved: string): boolean {
 }
 
 /**
- * ⌘S / File > Save で編集バッファを保存するか(契約⑤・要件#48 追補i)。
- *
- * 呼ぶ側(`+page.svelte` の `saveCurrentEdits`)は `WindowState` の `editMode`・
- * `dirty`・`externalRemoved`(外部で削除された印=追補g)をそのまま渡す。
- * 保存するのは編集中で、かつ書き直す理由があるときだけ:
- * - 変更がある(dirty)— 従来どおり
- * - 外部で削除された印が立っている — dirty でなくても書き直す(追補i 契約1)。
- *   ディスクにはもう無いので、原文に戻した編集でも保存すればファイルが戻り、
- *   成功すれば `markSaved` が印を消す(帯の `Save` と同じ経路)
- *
- * 閲覧中は何もしない。編集中でも未変更かつ印が無ければ何もしない — 同じ内容を
- * 書き戻せば mtime だけが動き、監視・スナップショット・drift 検知が空振りする。
- */
-export function shouldSaveOnCommand({
-	mode,
-	dirty,
-	externalRemoved,
-}: {
-	mode: EditMode;
-	dirty: boolean;
-	externalRemoved: boolean;
-}): boolean {
-	return mode === 'edit' && (dirty || externalRemoved);
-}
-
-/**
  * content の同値判定に使う短いハッシュ(契約⑥)。
  *
  * 依存追加なし(契約⑦)なので自前で持つ。FNV-1a と djb2 の 32bit を並走させ、
@@ -113,60 +74,3 @@ export type FileChangedDecision =
 	| 'ignore-echo'
 	/** 編集中の変更と衝突する外部変更。再レンダーせず利用者に選ばせる。 */
 	| 'external-conflict';
-
-export type FileChangedInput = {
-	/** 届いた content。 */
-	incomingContent: string;
-	/** 直近の保存内容のハッシュ。一度も保存していなければ null。 */
-	lastSavedHash: string | null;
-	/** 現在の表示モード。 */
-	mode: EditMode;
-	/** 編集バッファが保存済み content と違うか。 */
-	dirty: boolean;
-	/**
-	 * 編集バッファ(要件#48 追補h)。届いた content と byte 等価なら衝突にしない。
-	 * 閲覧中は null。省いたときは比べない(今までどおり)。
-	 */
-	editBuffer?: string | null;
-};
-
-/**
- * 届いた `file_changed` の扱いを決める(契約⑥)。
- *
- * 判定は3段:
- * 1. 保存した内容と同じものが返ってきた(=自己書き込みのエコー)→ `ignore-echo`。
- *    モードも dirty も見ない — 閲覧中でも `setDocument` を通せば本文が作り直され、
- *    編集中なら contenteditable の DOM ごと飛ぶ。どちらも「同じ内容で作り直す」
- *    無駄でしかない
- * 2. 編集中で、かつ失うものがある(dirty)→ `external-conflict`。再レンダーせず、
- *    上書き保存か外部版の読み直しかを選ばせる。ただし届いた中身が編集バッファと
- *    byte 等価なら失うものは無いので 3 へ(要件#48 追補h 契約3。比べ方は `isDirty`
- *    と同じく正規化しない)
- * 3. それ以外(閲覧中・編集中でも未変更・編集と同じ中身)→ `apply`。従来どおり
- *    外部版に追従する
- */
-export function decideFileChanged({
-	incomingContent,
-	lastSavedHash,
-	mode,
-	dirty,
-	editBuffer,
-}: FileChangedInput): FileChangedDecision {
-	if (lastSavedHash !== null && contentHash(incomingContent) === lastSavedHash) {
-		return 'ignore-echo';
-	}
-	const sameAsBuffer = editBuffer != null && !isDirty(editBuffer, incomingContent);
-	if (mode === 'edit' && dirty && !sameAsBuffer) return 'external-conflict';
-	return 'apply';
-}
-
-/**
- * `<pre contenteditable>` の現在の内容を原文として取り出す(契約②)。
- *
- * `textContent` をそのまま返す。`renderPlainText`(file-type.ts)が `<pre>` の
- * 直後に置く `\n` は HTML パーサが1つ食うので、改行始まりのソースもここで
- * byte 等価に戻ってくる。整形も trim もしない — 触れば原文が壊れる。
- */
-export function bufferFromPre(pre: HTMLElement): string {
-	return pre.textContent ?? '';
-}

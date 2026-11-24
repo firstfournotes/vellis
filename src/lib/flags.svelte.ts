@@ -19,7 +19,7 @@ import { getBuildInfo } from './buildInfo';
 
 class FeatureFlags {
 	ready = $state(false);
-	channel = $state<'dev' | 'release'>('dev');
+	channel = $state<'dev' | 'preview' | 'release'>('dev');
 	#flags = $state<Record<string, boolean>>({});
 	#started = false;
 

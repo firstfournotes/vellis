@@ -1096,7 +1096,8 @@ fn slice_idents(call: &str) -> Vec<String> {
         .collect()
 }
 
-/// 25. Edit メニューの項目列で「Find in Folder…」が `find_item`(⌘F)の直後に並ぶ。
+/// 25. Edit メニューの項目列で「Find in Folder…」が検索の組(`find_item`=⌘F の直後の `find_replace_item`=要件74 第3段 3-3 の
+///     Edit ▸ Find and Replace…)の直後に並ぶ(Find… / Find and Replace… / Find in Folder…。2026-11-17 由谷の決定 3-12・棚卸し 3)。
 #[test]
 fn edit_menu_holds_find_in_folder_right_after_find() {
     let code = menu_rs_code();
@@ -1109,8 +1110,13 @@ fn edit_menu_holds_find_in_folder_right_after_find() {
         .expect("Edit menu must still hold &find_item (要件#54)");
     assert_eq!(
         idents.get(find_at + 1).map(String::as_str),
+        Some("find_replace_item"),
+        "Find and Replace… (`&find_replace_item`) directly follows &find_item (要件74 3-3): {idents:?}"
+    );
+    assert_eq!(
+        idents.get(find_at + 2).map(String::as_str),
         Some(item),
-        "Find in Folder… (`&{item}`) must directly follow &find_item in the Edit menu: {idents:?}"
+        "Find in Folder… (`&{item}`) must directly follow Find and Replace… in the Edit menu: {idents:?}"
     );
     // File / View / Go / Window には出さない(同じ項目を 2 箇所に出さない)
     for label in ["File", "View", "Go"] {

@@ -395,14 +395,26 @@ fn appearance_submenu_starts_with_modes_then_separator_then_default() {
 }
 
 /// 5. Default の項目は英語ラベル "Default"・ショートカット無し・チェック印なし(`CheckMenuItem` を使わない=判断 (a)・決定 8)。
+///
+/// 要件側更新(2026-11-17 仮・要件74 2-3・契約23・仮の承認=由谷に確かめる): View ▸ Raw Source の CheckMenuItem を足したため、
+/// 「menu.rs に CheckMenuItem が無い」は「`CheckMenuItem::with_id(` は 1 つだけで、それは Raw Source(`RAW_SOURCE_ITEM_ID`)」に改める。
+/// 要件74 4-2(決定 4-5): View ▸ Show Formatting Toolbar も CheckMenuItem なので 2 つ(Raw Source と Show Formatting Toolbar)に改める。
+/// Default の項目が普通の MenuItem であることの判定はそのまま。
 #[test]
 fn default_theme_item_is_a_plain_menu_item_labelled_default() {
     let code = menu_rs_code();
     let call = menu_item_call_using(&code, "APPEARANCE_DEFAULT_THEME_ITEM_ID")
         .expect("menu.rs must build a MenuItem with APPEARANCE_DEFAULT_THEME_ITEM_ID");
+    assert!(call.starts_with("MenuItem::with_id("), "Default is a plain MenuItem (judgement (a), decision 8): {call}");
     assert_eq!(first_string_literal(call), Some("Default"));
     assert!(last_argument(call).starts_with("None"), "Default must have no accelerator");
-    assert!(!code.contains("CheckMenuItem"), "no check marks anywhere in menu.rs (judgement (a), decision 8)");
+    // 要件74 4-2(決定 4-5): View ▸ Show Formatting Toolbar(SHOW_FORMAT_TOOLBAR_ITEM_ID)も CheckMenuItem なので 2 つ(Raw Source と Show Formatting Toolbar)。
+    let checks: Vec<usize> = code.match_indices("CheckMenuItem::with_id(").map(|(i, _)| i).collect();
+    assert_eq!(checks.len(), 2, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23) and View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5)");
+    let check_calls: Vec<&str> = checks.iter().map(|&at| &code[at..code[at..].find(')').unwrap() + at]).collect();
+    assert!(check_calls.iter().any(|c| c.contains("RAW_SOURCE_ITEM_ID")), "one CheckMenuItem is Raw Source: {check_calls:?}");
+    assert!(check_calls.iter().any(|c| c.contains("SHOW_FORMAT_TOOLBAR_ITEM_ID")), "the other CheckMenuItem is Show Formatting Toolbar: {check_calls:?}");
+    assert!(check_calls.iter().all(|c| !c.contains("THEME")), "no theme item is a CheckMenuItem: {check_calls:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -432,13 +444,18 @@ fn toggle_full_width_item_is_fixed() {
 ///    区切り線の直後に **[3] Reload File・[4] 区切り線** を足し、Appearance 以降の添字が 2 つずつずれた
 ///    (13 項目。acceptance_req80.rs が同じ列を固定する)。Appearance と Toggle Full Width が「タブの項目と
 ///    Zoom の間」にあることは同じ。
+///
+/// 要件側更新(2026-11-17 仮・要件#74 第2段 2-3・契約23・(ao)・棚卸し 3=req-74.md で事前承認): View ▸ Raw Source
+/// (`raw_source_item`・CheckMenuItem)を Toggle Full Width の直後に足した(acceptance_req74_menu.rs が同じ列を固定する)。
+/// 項目数は 13 → 14。それ以外の相対順はそのまま。
 #[test]
 fn view_menu_holds_appearance_and_full_width_between_the_tab_items_and_zoom() {
     let code = menu_rs_code();
     let view = submenu_call_with_label(&code, "View").expect("menu.rs must build a \"View\" submenu");
     let idents = submenu_item_idents(view);
     let separators = separator_bindings(&code);
-    assert_eq!(idents.len(), 13, "View must hold exactly 13 entries ({idents:?})");
+    // 要件#74 第4段 4-2(2026-11-17 由谷の決定 4-5・棚卸し 3): Raw Source の直後に `show_format_toolbar_item`(View ▸ Show Formatting Toolbar)。14 → 15。
+    assert_eq!(idents.len(), 15, "View must hold exactly 15 entries ({idents:?})");
 
     let show_tab_bar = menu_item_binding(&code, "SHOW_TAB_BAR_ITEM_ID");
     let show_all_tabs = menu_item_binding(&code, "SHOW_ALL_TABS_ITEM_ID");
@@ -457,12 +474,14 @@ fn view_menu_holds_appearance_and_full_width_between_the_tab_items_and_zoom() {
     assert!(separators.contains(idents[4]), "View[4] must be a separator (requirement #80) ({idents:?})");
     assert_eq!(idents[5], appearance, "View[5] must be the Appearance submenu ({idents:?})");
     assert_eq!(idents[6], full_width, "View[6] must be Toggle Full Width ({idents:?})");
-    assert!(separators.contains(idents[7]), "View[7] must be a separator ({idents:?})");
-    assert_eq!(idents[8], zoom_in, "View[8] ({idents:?})");
-    assert_eq!(idents[9], zoom_out, "View[9] ({idents:?})");
-    assert_eq!(idents[10], actual_size, "View[10] ({idents:?})");
-    assert!(separators.contains(idents[11]), "View[11] must be a separator ({idents:?})");
-    assert_eq!(idents[12], devtools, "View[12] ({idents:?})");
+    assert_eq!(idents[7], "raw_source_item", "View[7] must be Raw Source (requirement #74 (ao)) ({idents:?})");
+    assert_eq!(idents[8], "show_format_toolbar_item", "View[8] must be Show Formatting Toolbar (requirement #74 4-2) ({idents:?})");
+    assert!(separators.contains(idents[9]), "View[9] must be a separator ({idents:?})");
+    assert_eq!(idents[10], zoom_in, "View[10] ({idents:?})");
+    assert_eq!(idents[11], zoom_out, "View[11] ({idents:?})");
+    assert_eq!(idents[12], actual_size, "View[12] ({idents:?})");
+    assert!(separators.contains(idents[13]), "View[13] must be a separator ({idents:?})");
+    assert_eq!(idents[14], devtools, "View[14] ({idents:?})");
 }
 
 // ---------------------------------------------------------------------------

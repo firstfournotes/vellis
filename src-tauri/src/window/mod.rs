@@ -1,5 +1,6 @@
 pub mod lifecycle;
 pub mod manager;
+pub mod navigation;
 pub mod open_with;
 pub mod placement;
 pub mod tab;

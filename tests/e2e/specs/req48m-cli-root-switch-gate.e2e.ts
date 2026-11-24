@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+	revertFace,
+	appendToFace,
 	assertIpcInterceptionWorks,
 	clickExplorerRow,
 	emitMenu,
@@ -220,17 +222,17 @@ interface EditorView {
 	emptyState: boolean;
 }
 
+/** 要件74 2-5: the editor is the view (a CodeMirror face). `editing` = the face is dirty (unsaved badge); `text` = the face's lines. */
 async function editorView(): Promise<EditorView> {
-	return browser.execute((body) => {
-		const editing = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`);
-		const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext`);
+	return browser.execute(() => {
+		const content = document.querySelector('article.viewer [data-testid="code-editor"] .cm-content');
 		return {
-			editing: editing !== null,
-			text: pre?.textContent ?? null,
+			editing: document.querySelector('article.viewer [data-testid="unsaved-badge"]') !== null,
+			text: content ? Array.from(content.querySelectorAll('.cm-line')).map((l) => l.textContent ?? '').join('\n') : null,
 			doneButton: document.querySelector('[data-testid="edit-done"]') !== null,
 			emptyState: document.querySelector('.empty-state') !== null,
 		};
-	}, BODY);
+	});
 }
 
 /**
@@ -404,7 +406,7 @@ async function ensureGateDirExpanded(): Promise<void> {
 	await waitForExplorerRow(uri(editFile), { timeout: 15_000 });
 }
 
-/** Open edit-me.txt from the tree, enter the editor with the Edit menu event, type EDIT (unsaved). */
+/** Open edit-me.txt from the tree (the face is the editor from the start), append EDIT (unsaved). 要件74 2-5: no Edit ▸ Edit. */
 async function openFileAndEdit(): Promise<void> {
 	await ensureGateDirExpanded();
 	await clickExplorerRow(uri(editFile));
@@ -413,26 +415,16 @@ async function openFileAndEdit(): Promise<void> {
 			const v = await editorView();
 			return !v.editing && v.text === ORIGINAL;
 		},
-		{ timeout: 15_000, timeoutMsg: 'edit-me.txt did not open in the plain-text view' },
+		{ timeout: 15_000, timeoutMsg: 'edit-me.txt did not open in the CodeMirror face' },
 	);
-	await emitMenu('menu_edit');
+	expect(await appendToFace(EDIT)).toBe(true);
 	await browser.waitUntil(async () => (await editorView()).editing, {
 		timeout: 5_000,
-		timeoutMsg: 'menu_edit did not enter the editor',
+		timeoutMsg: 'the appended text did not make the face dirty (no unsaved badge)',
 	});
-	await browser.execute(
-		(body, extra) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-			// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel); type before it.
-			pre.textContent = (pre.textContent ?? '').slice(0, -1) + extra + '\n';
-			pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: extra }));
-		},
-		BODY,
-		EDIT,
-	);
 	const v = await editorView();
 	expect(v.editing).toBe(true);
-	expect(v.text).toBe(ORIGINAL + EDIT + '\n'); // 追補r: + sentinel
+	expect(v.text).toBe(ORIGINAL + EDIT);
 }
 
 /** Open edit-me.txt in the plain view only (no editor, nothing dirty). */
@@ -444,34 +436,18 @@ async function openFileForViewing(): Promise<void> {
 			const v = await editorView();
 			return !v.editing && v.text === fs.readFileSync(editFile, 'utf8');
 		},
-		{ timeout: 15_000, timeoutMsg: 'edit-me.txt did not open in the plain-text view' },
+		{ timeout: 15_000, timeoutMsg: 'edit-me.txt did not open in the CodeMirror face' },
 	);
 }
 
 /**
- * Leave the editor without a dialog: put the text back to what is on disk (the
- * buffer is then not dirty) and press Done Editing, which asks nothing when
- * nothing is dirty.
+ * 要件74 2-5: nothing to leave — the face is the view. Put the text back to what is on disk so the
+ * face is not dirty (the badge goes); no dialog is involved.
  */
 async function revertEditAndLeaveEditor(): Promise<void> {
 	const v = await editorView();
 	if (!v.editing) return;
-	const onDisk = fs.readFileSync(editFile, 'utf8');
-	await browser.execute(
-		(body, text) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-			pre.textContent = text;
-			pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-			document.querySelector<HTMLButtonElement>('[data-testid="edit-done"]')?.click();
-		},
-		BODY,
-		// 追補r: write the sentinel too, so the buffer (text minus one `\n`) equals the disk.
-		onDisk + '\n',
-	);
-	await browser.waitUntil(async () => !(await editorView()).editing, {
-		timeout: 5_000,
-		timeoutMsg: 'Done Editing did not leave the editor after the text was reverted',
-	});
+	await revertFace(fs.readFileSync(editFile, 'utf8'));
 }
 
 /** Back on start-root through the same CLI (no edits → immediate), for the next test / spec. */
@@ -617,7 +593,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			const root = await snapshotRoot();
 			const onDisk = fs.readFileSync(editFile, 'utf8');
 			await shot('req48m-gate1-after-cancel');
-			report(REPORT, { gate: '48m-1-cancel', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT + '\n', onDiskUnchanged: onDisk === ORIGINAL });
+			report(REPORT, { gate: '48m-1-cancel', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT, onDiskUnchanged: onDisk === ORIGINAL });
 
 			expect(asks.map((a) => a.message)).toEqual([SAVE_MESSAGE]);
 			expect(asks[0]!.title).toBe(SAVE_TITLE);
@@ -626,7 +602,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			expect(asks[0]!.autoReleased).toBe(false);
 			expect(isStartRoot(root)).toBe(true);
 			expect(view.editing).toBe(true);
-			expect(view.text).toBe(ORIGINAL + EDIT + '\n'); // 追補r: + sentinel
+			expect(view.text).toBe(ORIGINAL + EDIT); // 追補r: + sentinel
 			expect(onDisk).toBe(ORIGINAL);
 			// Nothing was switched or saved behind the dialog (契約1・3).
 			expect(rec.ipc).not.toContain('switch_root_confirmed');
@@ -749,7 +725,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			const root = await snapshotRoot();
 			const onDisk = fs.readFileSync(editFile, 'utf8');
 			await shot('req48m-gate3b-save-failed');
-			report(REPORT, { gate: '48m-3b-save-failed', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT + '\n', onDiskUnchanged: onDisk === ORIGINAL });
+			report(REPORT, { gate: '48m-3b-save-failed', cli, asks, ipc: rec.ipc, dialogs: rec.dialogs, root, editing: view.editing, textKept: view.text === ORIGINAL + EDIT, onDiskUnchanged: onDisk === ORIGINAL });
 
 			expect(cli.code).toBe(0);
 			expect(asks.map((a) => a.message)).toEqual([SAVE_MESSAGE]);
@@ -764,7 +740,7 @@ describe('Requirement #48 追補m human gate (vellis -r with unsaved edits asks 
 			expect(rec.ipc).not.toContain('set_root');
 			expect(isStartRoot(root)).toBe(true);
 			expect(view.editing).toBe(true);
-			expect(view.text).toBe(ORIGINAL + EDIT + '\n'); // 追補r: + sentinel
+			expect(view.text).toBe(ORIGINAL + EDIT); // 追補r: + sentinel
 			expect(onDisk).toBe(ORIGINAL);
 		} finally {
 			await setIpcBlock([]);

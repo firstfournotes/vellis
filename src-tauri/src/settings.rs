@@ -22,8 +22,9 @@
 //!
 //! Reading never fails: a broken file (or a broken key, or a broken line) falls
 //! back to the defaults for the broken part and reports English warnings. Only
-//! a save from inside Vellis shows them to the user (契約8); every other read
-//! only logs them.
+//! a save from inside Vellis shows them to the user (契約8) — or, when the
+//! current editing is hidden, a save from another app that the theme watcher
+//! sees (requirements.md #84 契約8); every other read only logs them.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -277,6 +278,35 @@ pub fn is_settings_file(path: &Path) -> bool {
     match (std::fs::canonicalize(path), std::fs::canonicalize(&settings)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
+    }
+}
+
+/// After `settings.json` changed (requirements.md #65 契約7・8): validate the
+/// file, tell every window to re-list its tree, and show the warnings once —
+/// from here, not from each window, so N windows do not mean N dialogs. A
+/// broken file is never rewritten; the tree and the search run on the defaults
+/// for the broken part until the user fixes it.
+///
+/// Called after a save inside Vellis (`save_document`) and — when the current
+/// editing is hidden, so the file is edited in another app — by the theme
+/// watcher when the file's text changed (requirements.md #84 契約8・(g)).
+pub fn announce_changed(app: &tauri::AppHandle<tauri::Wry>, path: &Path) {
+    use tauri::Emitter;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    let loaded = read_settings(path);
+    if let Err(e) = app.emit(SETTINGS_CHANGED_EVENT, ()) {
+        tracing::warn!("settings_changed emit failed: {e}");
+    }
+    if !loaded.warnings.is_empty() {
+        for warning in &loaded.warnings {
+            tracing::warn!("{warning}");
+        }
+        app.dialog()
+            .message(loaded.warnings.join("\n\n"))
+            .title("Vellis Settings")
+            .kind(MessageDialogKind::Warning)
+            .show(|_| {});
     }
 }
 

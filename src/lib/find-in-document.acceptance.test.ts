@@ -560,14 +560,34 @@ describe('AC-54-14 — 不変と依存(契約⑦)', () => {
 			dependencies: Record<string, string>;
 		};
 		expect(Object.keys(pkg.dependencies).sort()).toEqual([
+			// 要件74 第1段(2026-11-16・契約20 (am) 決定)= CodeMirror 6 の部品 6 つ(要件側更新=req-74.md 棚卸し 1)。
+			'@codemirror/commands',
+			'@codemirror/language',
+			'@codemirror/language-data',
+			'@codemirror/state',
+			'@codemirror/view',
+			'@lezer/highlight',
 			'@shikijs/rehype',
 			'@tauri-apps/api',
 			'@tauri-apps/plugin-dialog',
 			'@tauri-apps/plugin-opener',
-			'hast-util-to-mdast',
+			// 要件74 第2段 2-5(2026-11-17 仮・契約20・棚卸し 1=承認済み (r)(as)): 撤去で hast-util-to-mdast を外した
 			'mdast-util-to-markdown',
 			'mdast-util-to-string',
 			'mermaid',
+			// 要件74 第2段 2-1(2026-11-17・仮の前提=判断 3 で prosemirror-schema-list を含む・契約20 (D))= ProseMirror の部品 9 つ(要件側更新=req-74.md 棚卸し 1)。
+			'prosemirror-commands',
+			'prosemirror-dropcursor',
+			'prosemirror-gapcursor',
+			'prosemirror-history',
+			'prosemirror-inputrules',
+			'prosemirror-keymap',
+			'prosemirror-model',
+			'prosemirror-schema-list',
+			'prosemirror-state',
+			'prosemirror-tables',
+			'prosemirror-transform',
+			'prosemirror-view',
 			'rehype-parse',
 			'rehype-raw',
 			'rehype-sanitize',
@@ -627,9 +647,5 @@ describe('AC-54-14 — 不変と依存(契約⑦)', () => {
 
 	// 要件#49 追補h(3)(2026-10-05)で追補h 確定後の内容に更新
 	// 要件#49 追補i(3)(2026-10-07)で追補i 確定後の内容に更新
-	test('src/markdown/edit.ts は無改変(SHA-256 固定)', () => {
-		expect(sha256(readRepoFile('src/markdown/edit.ts'))).toBe(
-			'f8a5e377ffb0d7a65da0ca65965195e3a81cbc266e09178005aa7ead7b360a8b',
-		);
-	});
+	// 要件74 第2段 2-5(2026-11-17 仮・棚卸し 2=承認済み): src/markdown/edit.ts は撤去されたので SHA-256 の固定を外した(AC-74-25 が「無い」ことを見る)。
 });

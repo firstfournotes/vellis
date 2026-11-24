@@ -1,12 +1,12 @@
 //! CLI argument definitions for the `vellis` command.
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "vellis",
     version,
-    about = "A viewer and text editor for Markdown, HTML, images, 3D models, video, audio and PDF"
+    about = "A file viewer for Markdown, HTML, images, 3D models, video, audio and PDF"
 )]
 pub struct Cli {
     /// Target path or URI (file, directory, ssh://...)
@@ -81,6 +81,51 @@ pub struct Cli {
         ]
     )]
     pub self_check: Option<std::path::PathBuf>,
+}
+
+/// The argument ids of the current AI integration's options (要件84 契約6).
+/// Their `Cli` fields stay so they still parse (and still conflict with
+/// `--self-check`); only `--help` hides them and `main` refuses them when
+/// `ai_marks` is off.
+const AI_OPTION_IDS: [&str; 4] = ["marks", "changed", "fix", "inbox"];
+
+/// Exit code when `main` refuses an option this build does not offer
+/// (要件84 契約6).
+pub const UNAVAILABLE_OPTION_EXIT_CODE: i32 = 2;
+
+/// `Cli::command()`, with `--marks` / `--changed` / `--fix` / `--inbox`
+/// hidden from `--help` and `-h` when `ai_enabled` is false (要件84 契約6).
+/// Hiding does not remove them: they still parse, so `main` can refuse
+/// them with a message of its own.
+pub fn command_with(ai_enabled: bool) -> clap::Command {
+    let command = Cli::command();
+    if ai_enabled {
+        return command;
+    }
+    AI_OPTION_IDS.iter().fold(command, |command, id| {
+        command.mut_arg(*id, |arg| arg.hide(true))
+    })
+}
+
+/// The first of `--marks`, `--changed`, `--fix`, `--inbox` given on the
+/// command line when `ai_enabled` is false, or `None` (要件84 契約6).
+pub fn unavailable_option(cli: &Cli, ai_enabled: bool) -> Option<&'static str> {
+    if ai_enabled {
+        return None;
+    }
+    [
+        (cli.marks, "--marks"),
+        (cli.changed, "--changed"),
+        (cli.fix.is_some(), "--fix"),
+        (cli.inbox.is_some(), "--inbox"),
+    ]
+    .into_iter()
+    .find_map(|(given, option)| given.then_some(option))
+}
+
+/// The one line `main` prints on stderr when it refuses `option`.
+pub fn unavailable_option_message(option: &str) -> String {
+    format!("vellis: {option} is not available in this version of Vellis")
 }
 
 /// The absolute path of a local `vellis <path>` argument that is not there,

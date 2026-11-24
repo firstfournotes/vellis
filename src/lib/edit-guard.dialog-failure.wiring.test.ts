@@ -48,6 +48,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock, type MockInstance } from 'vitest';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+import type { FileEditorHandle } from '../editor/file-editor';
+import { contentHash } from '$lib/document-edit';
 
 vi.mock('$lib/ipc', () => ({
 	invoke: vi.fn(async () => null),
@@ -70,21 +72,68 @@ function txtDoc(): DocumentPayload {
 	return { uri: TXT_URI, content: TXT_CONTENT, modified: 1 };
 }
 
-/** text 文書を編集モードに入れて dirty にする。 */
+/**
+ * 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 4「緑の見込み(endEdit を前提にした件があれば書き直し)」=承認済み (r)(as)):
+ * 今の編集(editMode / editBuffer / beginEdit / endEdit)は撤去された。関門の相手は新しい面の handle(`windowState.fileEditor`)で、
+ * dirty は handle の dirty・Save は `saveFileEditor(handle)`(save_document に { uri, content, expectedHash })・
+ * "Don't Save" は進むだけ(面は文書と一緒に消える)。`windowState.dirty` は handle の dirty を映す(確定契約)。
+ */
+type FakeFace = FileEditorHandle & { setText(next: string): void };
+function fakeFace(uri: string, base: string): FakeFace {
+	let current = base;
+	let savedBase = base;
+	const face: FakeFace = {
+		kind: 'text',
+		uri,
+		readOnly: false,
+		get dirty() {
+			return current !== savedBase;
+		},
+		conflict: false,
+		notice: null,
+		text: () => current,
+		expectedHash: () => contentHash(savedBase),
+		markSaved(text: string) {
+			savedBase = text;
+			current = text;
+		},
+		applyFileChanged: () => 'apply',
+		keepMyEdits() {},
+		useFileOnDisk() {},
+		showSaveConflict() {},
+		reset(content: string) {
+			current = content;
+			savedBase = content;
+		},
+		preparePrint: async () => undefined,
+		setText(next: string) {
+			current = next;
+		},
+	};
+	return face;
+}
+let face: FakeFace | null = null;
+/** text 文書を面に載せて dirty にする(今の編集の beginEdit / updateBuffer の代わり)。 */
 function makeDirty() {
 	windowState.setDocument(txtDoc());
-	expect(windowState.beginEdit()).toBe(true);
-	windowState.updateBuffer(EDITED);
-	expect(windowState.dirty).toBe(true);
+	face = fakeFace(TXT_URI, TXT_CONTENT);
+	windowState.fileEditor = face;
+	face.setText(EDITED);
+	expect(windowState.dirty, 'windowState.dirty は面の dirty を映す').toBe(true);
 }
-
-/** 編集中のまま何も変わっていないこと(endEdit されていない・バッファ・dirty が維持)。 */
+/** 進まなかった: 面は dirty のまま・文字列も文書もそのまま。 */
 function expectStillEditing() {
-	expect(windowState.editMode).toBe('edit');
-	expect(windowState.editBuffer).toBe(EDITED);
+	expect(face?.dirty).toBe(true);
+	expect(face?.text()).toBe(EDITED);
 	expect(windowState.dirty).toBe(true);
 	expect(windowState.currentDocument?.uri).toBe(TXT_URI);
 }
+/** 進んだ(呼び手が true を受ける)。保存の有無は saveCalls で見る。捨てた場合、面は呼び手が文書ごと閉じるまで残るので中身は見ない。 */
+function expectEnded() {
+	expect(windowState.currentDocument?.uri ?? TXT_URI).toBe(TXT_URI);
+}
+
+
 
 function expectNoSave() {
 	expect(invokeMock).not.toHaveBeenCalledWith('save_document', expect.anything());
@@ -94,7 +143,8 @@ let errorSpy: MockInstance<typeof console.error>;
 let alertMock: Mock<(message?: unknown) => void>;
 
 beforeEach(() => {
-	windowState.endEdit();
+	windowState.fileEditor = null;
+	face = null;
 	windowState.clearDocument();
 	errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 	alertMock = vi.fn();
@@ -180,8 +230,8 @@ describe('confirmDiscardEdits — ダイアログ(message)が失敗したら取�
 		messageMock.mockResolvedValueOnce("Don't Save");
 		await expect(confirmDiscardEdits()).resolves.toBe(true);
 
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
+		// Don't Save は進むだけ(面は呼び手が文書ごと閉じる・切り替えるまで残る=関門は面に触らない)。
+		expect(face?.text()).toBe(EDITED);
 		expectNoSave();
 	});
 });
@@ -189,7 +239,8 @@ describe('confirmDiscardEdits — ダイアログ(message)が失敗したら取�
 describe('confirmDiscardEdits — ダイアログが成功したときの振る舞いは不変(追補k(3) / AC-48-追k(d))', () => {
 	it('非 dirty なら聞かずに true(message も ask も呼ばれない・console.error も無い)', async () => {
 		windowState.setDocument(txtDoc());
-		windowState.beginEdit();
+		face = fakeFace(TXT_URI, TXT_CONTENT);
+		windowState.fileEditor = face;
 		expect(windowState.dirty).toBe(false);
 
 		await expect(confirmDiscardEdits()).resolves.toBe(true);
@@ -197,7 +248,7 @@ describe('confirmDiscardEdits — ダイアログが成功したときの振る�
 		expect(messageMock).not.toHaveBeenCalled();
 		expect(askMock).not.toHaveBeenCalled();
 		expect(errorSpy).not.toHaveBeenCalled();
-		expect(windowState.editMode).toBe('view');
+		expect(windowState.dirty).toBe(false);
 	});
 
 	it('Cancel → false・編集中のまま・console.error は無い', async () => {
@@ -213,14 +264,14 @@ describe('confirmDiscardEdits — ダイアログが成功したときの振る�
 		expect(alertMock).not.toHaveBeenCalled();
 	});
 
-	it("Don't Save → true・閲覧へ戻りバッファ破棄・保存は走らない", async () => {
+	it("Don't Save → true・保存は走らない(面の中身は呼び手が文書ごと畳む=関門は面に触らない)", async () => {
 		makeDirty();
 		messageMock.mockResolvedValueOnce("Don't Save");
 
 		await expect(confirmDiscardEdits()).resolves.toBe(true);
 
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
+		expect(face?.text()).toBe(EDITED);
+		expect(windowState.fileEditor).toBe(face);
 		expectNoSave();
 		expect(errorSpy).not.toHaveBeenCalled();
 	});
@@ -231,10 +282,9 @@ describe('confirmDiscardEdits — ダイアログが成功したときの振る�
 
 		await expect(confirmDiscardEdits()).resolves.toBe(true);
 
-		expect(invokeMock).toHaveBeenCalledWith('save_document', { uri: TXT_URI, content: EDITED });
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
+		expect(invokeMock).toHaveBeenCalledWith('save_document', { uri: TXT_URI, content: EDITED, expectedHash: contentHash(TXT_CONTENT) });
 		expect(windowState.dirty).toBe(false);
+				expect(windowState.dirty).toBe(false);
 		expect(errorSpy).not.toHaveBeenCalled();
 	});
 

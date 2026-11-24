@@ -11,9 +11,11 @@ fn env_opt(key: &str) -> Option<String> {
 
 fn main() {
     // Channel (feature-flags.md §3.2): positive-signal — anchored release
-    // tag ∧ CI context var. `git dirty` is deliberately NOT an input.
+    // (or, 要件87, development-release) tag ∧ CI context var. `git dirty` is
+    // deliberately NOT an input.
+    let commit_tag = env_opt("CI_COMMIT_TAG");
     let channel = derive_channel(
-        env_opt("CI_COMMIT_TAG").as_deref(),
+        commit_tag.as_deref(),
         env_opt("GITLAB_CI").as_deref(),
         env_opt("CI_PIPELINE_ID").as_deref(),
     );
@@ -39,8 +41,14 @@ fn main() {
     let now = chrono::Utc::now().with_timezone(&jst);
     let build_time = now.format("%Y-%m-%d %H:%M JST").to_string();
 
+    // 要件87 契約2: the preview build's name (`dev-<name> #<n>(<time>)`),
+    // empty on release / dev. Same string in About, `--print-build-info`
+    // and the GitHub Release title.
+    let name = build_name(channel, commit_tag.as_deref(), &build_time);
+
     println!("cargo:rustc-env=VELLIS_BUILD_NUMBER={}", build_number);
     println!("cargo:rustc-env=VELLIS_BUILD_TIME={}", build_time);
+    println!("cargo:rustc-env=VELLIS_BUILD_NAME={}", name);
 
     // Re-run when ANY channel input changes (R2-B / impl NEW-A): omitting
     // CI_COMMIT_TAG or GITLAB_CI would let a cache-reusing runner bake a

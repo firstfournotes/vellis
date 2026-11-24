@@ -156,7 +156,8 @@ const NON_SEARCHABLE = [
 	['image', 'file:///Users/a/pics/photo.png'],
 	['audio', 'file:///Users/a/sounds/song.mp3'],
 	['video', 'file:///Users/a/movies/clip.mp4'],
-	['model', 'file:///Users/a/models/shape.glb'],
+	// 要件74 第2段 2-5: `.glb` は detectFileType が text に落とす拡張子で、撤去の後は CodeMirror の面(検索できる)になる。3D モデルの種別の例は MODEL3D_EXTENSIONS のもの。
+	['model', 'file:///Users/a/models/shape.stl'],
 ] as const;
 
 let renderedMd: { html: string; index: SourceIndex };
@@ -331,8 +332,9 @@ async function mouseDownOn(el: Element) {
 	await settle();
 }
 
+// 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 7=承認済み (r)(as)): 今の編集の store の口(endEdit / editMode)は撤去。後片付けは面の handle を外す。
 beforeEach(() => {
-	windowState.endEdit();
+	windowState.fileEditor = null;
 	windowState.clearDocument();
 	menuHandlers.clear();
 	// JSDOM に scrollIntoView が無い(現在一致へのスクロールが呼んでも落ちないように)。
@@ -361,8 +363,8 @@ describe('AC-54-7 — ⌘F で検索バー(契約①)', () => {
 		expect(accessibleName(button(container, 'find-prev'))).toBe('Prev');
 		expect(accessibleName(button(container, 'find-next'))).toBe('Next');
 		expect(accessibleName(button(container, 'find-close'))).toBe('Close');
-		// 検索は閲覧のまま(編集モードに入らない・ソース編集の pre も出ない)。
-		expect(windowState.editMode).toBe('view');
+		// 検索で文書は変わらない(今の編集のソース編集の pre は撤去で無い)。
+		expect(windowState.dirty).toBe(false);
 		expect(container.querySelector('pre.vellis-plaintext[contenteditable]')).toBeNull();
 	});
 
@@ -483,7 +485,10 @@ describe('AC-54-9 — Esc で閉じてハイライトが消える(契約⑤)', (
 		const { container } = mountMd();
 		await emitMenuFind();
 		await typeQuery(container, 'zebra');
-		expect(marks(container).length).toBeGreaterThan(0);
+		// 要件74 第2段 2-5: Markdown は面(ProseMirror)で、面の検索は DOM を変えない(Highlight API。無い jsdom では塗らない=2-2 AC-74-18・37)。
+		// ハイライトが出ていることは件数で見る。<mark> の代替は面には出ない。
+		expect(countText(container)).not.toBe('');
+		expect(countText(container)).not.toBe('No results');
 
 		await keyOn(findInput(container), 'Escape');
 
@@ -502,25 +507,26 @@ describe('AC-54-9 — Esc で閉じてハイライトが消える(契約⑤)', (
 		expect(countText(container)).toBe('1 of 4');
 	});
 
-	it('検索バーが開いているときの Esc は検索バーが先に食う(ブロック編集は破棄されない。閉じた後の Esc は従来どおり破棄)', async () => {
+	// 要件74 第2段 2-5(2026-11-17 仮・契約21・契約17・棚卸し 4「ブロック編集中の Esc の件を編集面の件に書き直し」=承認済み (r)(as)):
+	// ブロック編集は撤去。Markdown は開いた時点から ProseMirror の編集面(contenteditable 1 つ=PM の根)で、検索バーが開いているときの
+	// Esc は検索バーが先に食い、面はそのまま(閉じた後の Esc で面が消えることは無い=面は常に出ている)。
+	it('検索バーが開いているときの Esc は検索バーが先に食う(編集面はそのまま残り、dirty にならない)', async () => {
 		const { container } = mountMd();
 		await emitMenuFind();
 		await typeQuery(container, 'zebra');
-
-		// ブロック編集に入る(要件#49 の経路はそのまま生きている)。
-		const p = plainParagraph(container);
-		await dblClickOn(p);
+		await settle();
+		const face = container.querySelector('[data-testid="markdown-editor"] .ProseMirror[contenteditable="true"]') as HTMLElement | null;
+		expect(face, 'Markdown の編集面(ProseMirror)が出ている').not.toBeNull();
 		expect(editables(container)).toHaveLength(1);
 
-		// 編集面の上の Esc: 検索バーだけが閉じ、編集は続く(req-54 棚卸しの推奨)。
-		await keyOn(editables(container)[0], 'Escape');
+		await keyOn(face!, 'Escape');
 		expect(findBar(container)).toBeNull();
-		expect(editables(container)).toHaveLength(1);
+		expect(editables(container), '面は消えない').toHaveLength(1);
 		expect(windowState.dirty).toBe(false);
 
-		// バーが閉じた後の Esc は既存どおりブロック編集の破棄(退行しない)。
-		await keyOn(editables(container)[0], 'Escape');
-		expect(editables(container)).toHaveLength(0);
+		// バーが閉じた後の Esc でも面は残る(今の編集の「破棄して閲覧へ」は無い)。
+		await keyOn(face!, 'Escape');
+		expect(editables(container)).toHaveLength(1);
 		expect(windowState.dirty).toBe(false);
 	});
 });
@@ -544,7 +550,6 @@ describe('AC-54-10 — html は複製面を読み取り専用で使う(契約②
 		// ダブルクリックしても編集に入らない(⌘F は編集の入口ではない)。
 		await dblClickOn(a as Element);
 		expect(editables(shadow)).toHaveLength(0);
-		expect(windowState.editMode).toBe('view');
 		expect(windowState.dirty).toBe(false);
 
 		// 検索できる('Hello' は #a に1つ)。
@@ -689,38 +694,36 @@ describe('AC-54-13 — 索引を壊さない(契約④⑦)', () => {
 	it('ハイライトを出した状態でも data-vellis-node-id の値と数が変わらない', async () => {
 		const { container } = mountMd();
 		const idsBefore = nodeIds(container);
-		expect(idsBefore.length).toBeGreaterThan(0);
+		// 要件74 第2段 2-5: 面(ProseMirror)の DOM は今の描画の data-vellis-node-id を持たない(索引は文書モデルの切片)。集合が変わらないことだけ見る。
 
 		await emitMenuFind();
 		await typeQuery(container, 'zebra');
-		expect(marks(container).length).toBeGreaterThan(0);
+		expect(countText(container)).not.toBe('');
+		expect(marks(container), '面の DOM に <mark> は混入しない').toHaveLength(0);
 
 		expect(nodeIds(container)).toEqual(idsBefore);
 	});
 
-	it('フォールバックの mark は確定の直前に外れている(確定後の原文に mark / data-vellis-find が混入しない)', async () => {
+	// 要件74 第2段 2-5: ブロック編集(ダブルクリック → 確定)は撤去。Markdown は ProseMirror の面なので、ハイライトを出したまま面で打っても
+	// 書き出し(handle.text())に mark / data-vellis-find が混入しないことを見る(面の検索は DOM を変えない Highlight API=契約17)。
+	it('ハイライトを出したまま面で打っても、書き出しに mark / data-vellis-find が混入しない', async () => {
 		const { container } = mountMd();
 		await emitMenuFind();
 		await typeQuery(container, 'zebra');
-		expect(marks(container).length).toBeGreaterThan(0);
-
-		// ハイライトの残る段落をブロック編集(検索語 'zebra' は 'crossing' を含む
-		// テキストノードを包まないので、編集操作は mark の分割の影響を受けない)。
-		const p = plainParagraph(container);
-		await dblClickOn(p);
-		expect(editables(container)).toHaveLength(1);
-		const node = textNodeContaining(editables(container)[0], 'crossing');
-		node.nodeValue = (node.nodeValue as string).replace('crossing', 'crawling');
-
-		// ブロック外クリックで確定(blockedit の家風)。
-		const heading = container.querySelector('h1[data-vellis-node-id]') as HTMLElement;
-		expect(heading).toBeTruthy();
-		await mouseDownOn(heading);
-
+		expect(countText(container)).not.toBe('');
+		const face = windowState.fileEditor;
+		expect(face, 'Markdown の面の handle').toBeTruthy();
+		const pm = container.querySelector('[data-testid="markdown-editor"] .ProseMirror') as HTMLElement | null;
+		expect(pm).toBeTruthy();
+		// 面に 1 文字打つ(ProseMirror の取引)。
+		const view = (face as unknown as { view: { state: { tr: { insertText: (t: string, pos: number) => unknown } }; dispatch: (tr: unknown) => void } }).view;
+		const tr = (view.state.tr as unknown as { insertText: (t: string, pos: number) => unknown }).insertText('Q', 1);
+		view.dispatch(tr);
+		await settle();
 		expect(windowState.dirty).toBe(true);
-		const buffer = windowState.editBuffer as string;
-		expect(buffer).toBe(MD_COMMITTED);
-		expect(buffer).not.toContain('<mark');
-		expect(buffer).not.toContain('data-vellis-find');
+		const out = face!.text();
+		expect(out).not.toContain('<mark');
+		expect(out).not.toContain('data-vellis-find');
+		expect(container.querySelectorAll('[contenteditable="true"]')).toHaveLength(1);
 	});
 });

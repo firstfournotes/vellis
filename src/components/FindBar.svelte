@@ -24,6 +24,12 @@
 		onNext,
 		onClose,
 		onComposingChange,
+		replaceOpen = false,
+		replaceQuery = '',
+		replaceInputEl = $bindable(),
+		onReplaceQueryChange,
+		onReplace,
+		onReplaceAll,
 	}: {
 		/** 入力欄に出す語。 */
 		query: string;
@@ -37,7 +43,26 @@
 		onClose: () => void;
 		/** IME の変換中か(Esc の宛先を決める Viewer 側へ伝える=契約⑤)。 */
 		onComposingChange: (composing: boolean) => void;
+		/** 要件#74 第3段 3-3: 置換の行(2 段目)を出すか(Find and Replace… で、置換を出せる面のとき)。 */
+		replaceOpen?: boolean;
+		/** 置換の入力欄に出す語。 */
+		replaceQuery?: string;
+		/** 置換の入力欄の実体(Find and Replace… でフォーカスを置く)。 */
+		replaceInputEl?: HTMLInputElement;
+		onReplaceQueryChange?: (value: string) => void;
+		/** Replace(置換の入力欄の Return も)。 */
+		onReplace?: () => void;
+		/** Replace All(ボタンだけ=キーは無い)。 */
+		onReplaceAll?: () => void;
 	} = $props();
+
+	/** 置換の入力欄の Return=Replace(IME の変換確定の Return は送らない)。 */
+	function handleReplaceKeydown(e: KeyboardEvent) {
+		if (e.isComposing) return;
+		if (e.key !== 'Enter') return;
+		e.preventDefault();
+		onReplace?.();
+	}
 
 	function handleInput(e: Event) {
 		onQueryChange((e.currentTarget as HTMLInputElement).value);
@@ -69,6 +94,8 @@
 		aria-label="Find in document"
 		placeholder="Find"
 		spellcheck="false"
+		autocapitalize="off"
+		autocorrect="off"
 		autocomplete="off"
 		value={query}
 		bind:this={inputEl}
@@ -108,6 +135,34 @@
 	>
 		Close
 	</button>
+	{#if replaceOpen}
+		<!-- 要件#74 第3段 3-3: 置換の行(2 段目)。文言は英語。 -->
+		<div class="replace-row">
+			<input
+				type="text"
+				class="find-input"
+				data-testid="replace-input"
+				aria-label="Replace with"
+				placeholder="Replace"
+				spellcheck="false"
+				autocapitalize="off"
+				autocorrect="off"
+				autocomplete="off"
+				value={replaceQuery}
+				bind:this={replaceInputEl}
+				oninput={(e) => onReplaceQueryChange?.((e.currentTarget as HTMLInputElement).value)}
+				onkeydown={handleReplaceKeydown}
+				oncompositionstart={() => onComposingChange(true)}
+				oncompositionend={() => onComposingChange(false)}
+			/>
+			<button type="button" class="find-button" data-testid="replace-one" title="Replace the current match (Return)" onclick={() => onReplace?.()}>
+				Replace
+			</button>
+			<button type="button" class="find-button" data-testid="replace-all" title="Replace all matches" onclick={() => onReplaceAll?.()}>
+				Replace All
+			</button>
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -122,6 +177,7 @@
 	 */
 	.find-bar {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: 4px;
 		align-self: flex-end;
@@ -203,5 +259,13 @@
 	.find-button:hover {
 		background-color: var(--color-bg-hover);
 		color: var(--color-text-primary);
+	}
+
+	/* 要件#74 第3段 3-3: 置換の行は 2 段目(札の幅いっぱい) */
+	.replace-row {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		flex-basis: 100%;
 	}
 </style>

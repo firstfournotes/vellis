@@ -13,17 +13,11 @@
  * output keyed by `renderedUri`. The page component performs the render call;
  * the Viewer is a passive presenter (rendering-engine.md §3.1).
  */
-import {
-	canEnterEdit,
-	contentHash,
-	decideFileChanged,
-	isDirty,
-	type EditMode,
-	type FileChangedDecision,
-} from '../lib/document-edit';
-import { detectFileType, type DisplayResult } from '../lib/file-type';
+import { contentHash, type FileChangedDecision } from '../lib/document-edit';
+import { type DisplayResult } from '../lib/file-type';
 import { applyDirectoryChanged } from '../lib/tree-refresh';
 import type { SourceIndex } from '../markdown/types';
+import type { FileEditorHandle } from '../editor/file-editor';
 
 export type DocumentPayload = {
 	uri: string;
@@ -106,18 +100,9 @@ class WindowState {
 	renderedAudioSrc = $state<string | null>(null);
 	renderedPdfSrc = $state<string | null>(null);
 
-	// --- その場編集(要件#48) ------------------------------------------
-	// 判断そのもの(入れるか・dirty か・届いた変更をどう扱うか)は
-	// `$lib/document-edit` の純関数が持ち、ここは状態の置き場と遷移だけを持つ。
-
-	/** 表示中の文書のモード。`view` が既定で、編集は明示操作でしか始まらない(契約③)。 */
-	editMode = $state<EditMode>('view');
-
-	/**
-	 * 編集バッファ。`view` のときは null — 「編集していない」と「空文字を編集中」を
-	 * 取り違えないため(空ファイルの編集は `''` を持つ)。
-	 */
-	editBuffer = $state<string | null>(null);
+	// --- 編集(要件#48 → 要件#74 の面) -----------------------------------
+	// 編集の中身(バッファ・dirty・外部変更の取り込み)は面の handle(`fileEditor`)の持ち場。
+	// ここは handle の置き場と、文書に付く印(削除・保存のハッシュ)だけを持つ。
 
 	/**
 	 * 直近に保存した content のハッシュ(契約⑥)。自分の書き込みが `file_changed`
@@ -126,31 +111,43 @@ class WindowState {
 	lastSavedHash = $state<string | null>(null);
 
 	/**
-	 * 編集中に届いた、衝突する外部変更(契約⑥)。null = 衝突していない。
-	 * 保持しているのは「読み直す」を選ばれたときに採用する版。
-	 */
-	externalChange = $state<{ content: string; modified: number | null } | null>(null);
-
-	/**
 	 * 編集中(dirty)の文書のファイルが外部で削除された印(要件#48 追補g)。
 	 * 立っている間は Viewer が帯で知らせる。消えるのは保存の成功(`markSaved`)・
-	 * 同じ文書の `file_changed`・文書や root の切替(`resetEditState`)・保存せずに
-	 * 編集を終えたとき(`endEdit` が文書ごと閉じる)。
+	 * 同じ文書の `file_changed`・文書や root の切替(`resetEditState`)・Close。
 	 */
 	externalRemoved = $state(false);
 
-	/** 編集バッファが保存済み content と違うか(契約④)。閲覧中は常に false。 */
-	dirty = $derived(
-		this.editBuffer !== null &&
-			this.currentDocument !== null &&
-			isDirty(this.editBuffer, this.currentDocument.content)
-	);
+	/**
+	 * 要件#74: コードのファイルと plain text の新しい面(`CodeEditor.svelte`)の handle。面が mount で
+	 * 置き、unmount で外す。置かれている間は、dirty・外部変更・保存がこの面を見る。
+	 * handle は面の中の状態を getter で見せる物なので、深い追跡はしない(`$state.raw`)。
+	 */
+	fileEditor = $state.raw<FileEditorHandle | null>(null);
+
+	/**
+	 * 要件#74 第2段の作り(案)の項目 1 (a)(b): 新しい編集のもとで Markdown を読み取り専用の今の描画(SSH root・閾値超え)で
+	 * 出している間は真。Viewer が立てて下ろす(面の無い読み取り専用の描画の印)。
+	 */
+	editBlocked = $state(false);
+
+	/**
+	 * 未保存の編集があるか(契約④)= 面の handle の dirty(要件#74 契約21: 今の編集のバッファは無い)。
+	 * 未保存の確認・削除の帯・Reload File が見る。
+	 */
+	get dirty(): boolean {
+		return this.fileEditor?.dirty ?? false;
+	}
 
 	setDocument(doc: DocumentPayload) {
-		// 別のファイルへ移るときは編集状態を持ち越さない(契約④)。同じ URI の
-		// 内容更新(`file_changed` の apply)ではモードもバッファも畳まない —
-		// あちらは `applyFileChanged` が扱いを決めた上で通ってくる。
-		if (this.currentDocument?.uri !== doc.uri) this.resetEditState();
+		// 別のファイルへ移るときは編集状態を持ち越さない(契約④)。
+		if (this.currentDocument?.uri !== doc.uri) {
+			this.resetEditState();
+			// 要件#74: 別の文書の面は外す(新しい文書の面が mount で置き直す)。
+			this.fileEditor = null;
+		} else if (this.fileEditor && !this.fileEditor.dirty) {
+			// 要件#74: 同じ文書の開き直しは文書モデルを作り直す(未保存の編集があれば畳まない)。
+			this.fileEditor.reset(doc.content);
+		}
 		// 文書を開けば選択はその行についてくる(要件#60 起案時判断 (a))。
 		this.selectedTreeUri = null;
 		this.currentDocument = doc;
@@ -165,6 +162,9 @@ class WindowState {
 	applyReloadedText(doc: DocumentPayload): void {
 		// 実行列が今の文書の URI でだけ呼ぶので通らないが、別の文書へ編集状態を持ち越さない(契約④)。
 		if (this.currentDocument?.uri !== doc.uri) this.resetEditState();
+		// 要件#74 (ak)・AC-80-19 (3): 面は `setDocument` の同じ URI の扱いと同じ=未保存の編集が無ければ文書モデルを
+		// 作り直し、あれば畳まない。未保存の確認(Don't Save)の後の作り直しは Reload File の流れ(+page.svelte)が持つ。
+		if (this.fileEditor && this.fileEditor.uri === doc.uri && !this.fileEditor.dirty) this.fileEditor.reset(doc.content);
 		this.currentDocument = doc;
 	}
 
@@ -173,136 +173,61 @@ class WindowState {
 		this.selectedTreeUri = uri;
 	}
 
-	/** 編集に関わる状態をまとめて初期化する(文書・root の切替と `endEdit` の共通部)。 */
+	/** 文書に付く編集の印をまとめて初期化する(文書・root の切替)。 */
 	private resetEditState(): void {
-		this.editMode = 'view';
-		this.editBuffer = null;
 		this.lastSavedHash = null;
-		this.externalChange = null;
 		this.externalRemoved = false;
-	}
-
-	/**
-	 * 編集モードへ入る(契約③)。入れたら true。
-	 *
-	 * 入れるかは種別と root が決める(`canEnterEdit`)。バッファは現在の content の
-	 * 複製から始まるので、入った直後は dirty ではない = 開いただけ・触っただけで
-	 * 「保存しますか」を聞かれることがない。
-	 */
-	beginEdit(): boolean {
-		const doc = this.currentDocument;
-		if (!doc) return false;
-		if (!canEnterEdit(detectFileType(doc.uri), doc.uri)) return false;
-		this.editMode = 'edit';
-		this.editBuffer = doc.content;
-		return true;
-	}
-
-	/** 編集中の内容を差し替える(contenteditable の `input` ごと)。 */
-	updateBuffer(content: string): void {
-		this.editBuffer = content;
-	}
-
-	/**
-	 * 閲覧へ戻る(Esc / Done)。バッファと衝突表示は捨てる。
-	 *
-	 * 要件#48 追補g: 外部で削除された印が立ったまま編集を終える=保存せずに終える
-	 * (保存が成功していれば `markSaved` が印を消している)。守るものが無くなるので
-	 * 閲覧へ戻らず文書を閉じる。
-	 */
-	endEdit(): void {
-		if (this.externalRemoved) {
-			this.clearDocument();
-			return;
-		}
-		this.editMode = 'view';
-		this.editBuffer = null;
-		this.externalChange = null;
 	}
 
 	/**
 	 * 保存が済んだことを記帳する(契約⑤⑥)。呼ぶのは `saveDocument` の成功後だけ。
 	 *
 	 * content を保存済みの版として取り込むので dirty が消え、ハッシュを覚えることで
-	 * この保存が起こす `file_changed` をエコーとして捨てられる。モードは `edit` の
-	 * まま — 保存は編集の区切りであって終わりではない。衝突表示も畳む(上書き保存を
-	 * 選んだ後の「外部で変更あり」は用済み)。
+	 * この保存が起こす `file_changed` をエコーとして捨てられる。
 	 */
 	markSaved(content: string): void {
 		if (this.currentDocument) {
 			this.currentDocument = { ...this.currentDocument, content };
 		}
 		this.lastSavedHash = contentHash(content);
-		this.externalChange = null;
 		// 要件#48 追補g: 同じパスに書き直したので、削除の印も用済み。
 		this.externalRemoved = false;
 	}
 
 	/**
-	 * `file_changed` 1件を扱う(契約⑥)。決めるのは `decideFileChanged`(純関数)で、
-	 * ここは決まった扱いを状態へ移すだけ。返り値は呼び出し側の記録・試験用。
+	 * `file_changed` 1件を扱う(契約⑥)。返り値は呼び出し側の記録・試験用。
 	 *
-	 * - `ignore-echo`: 何もしない。自分が書いた内容がそのまま返ってきただけ
-	 * - `external-conflict`: 文書は動かさず、外部版を脇に置く(画面はバナーを出す)
-	 * - `apply`: 従来どおり差し替える。編集中(未変更、または編集と同じ中身)なら
-	 *   失うものが無いのでバッファも外部版へ揃える — 揃えないと、触ってもいないのに
-	 *   dirty になる。脇に置いた外部版があれば畳む(要件#48 追補h 契約3=帯は出ない)
+	 * 面の文書は面が取り込む(要件#74 契約12・13=差分の取引・3 方向マージ・重なりの帯)。
+	 * 面の無い文書(画像・html・SSH など)は従来どおり差し替える(自分の保存のエコーは捨てる)。面の handle には
+	 * 触らない(別の uri の知らせが面を外さない)。
 	 */
 	applyFileChanged(payload: DocumentPayload): FileChangedDecision {
-		// 要件#48 追補g: 削除の印が立った文書の `file_changed` =作り直された。印を
-		// 下ろし、以後は契約⑥ のとおり(編集と違えば外部変更の帯)。
+		// 要件#48 追補g: 削除の印が立った文書の `file_changed` =作り直された。印を下ろす。
 		if (this.currentDocument?.uri === payload.uri) this.externalRemoved = false;
-		const decision = decideFileChanged({
-			incomingContent: payload.content,
-			lastSavedHash: this.lastSavedHash,
-			mode: this.editMode,
-			dirty: this.dirty,
-			editBuffer: this.editBuffer,
-		});
-		if (decision === 'external-conflict') {
-			this.externalChange = { content: payload.content, modified: payload.modified };
-		} else if (decision === 'apply') {
-			this.currentDocument = payload;
-			if (this.editMode === 'edit') this.editBuffer = payload.content;
-			this.externalChange = null;
+		if (this.fileEditor && this.fileEditor.uri === payload.uri) {
+			return this.fileEditor.applyFileChanged(payload);
 		}
-		return decision;
+		if (this.lastSavedHash !== null && contentHash(payload.content) === this.lastSavedHash) return 'ignore-echo';
+		this.currentDocument = payload;
+		return 'apply';
 	}
 
 	/**
 	 * `file_removed` 1件を扱う(要件#48 追補g)。返り値は呼び出し側の記録・試験用。
 	 *
-	 * 表示中の文書が dirty なら閉じない — 削除して作り直す書き方のツールが書き換えた
-	 * だけでも、未保存の編集が黙って消えるため。文書・バッファ・モードを保って印を
-	 * 立てる(Viewer が帯で知らせ、保存すれば同じパスに書き直す)。dirty でなければ
-	 * 従来どおり閉じる(編集中でも未変更なら閉じる。画像などのバイナリは dirty に
-	 * ならないので常にこちら=要件#22 ②)。
+	 * 表示中の文書の面が dirty なら閉じない — 削除して作り直す書き方のツールが書き換えた
+	 * だけでも、未保存の編集が黙って消えるため。文書と面を保って印を立てる(Viewer が帯で
+	 * 知らせ、保存すれば同じパスに書き直す)。dirty でなければ従来どおり閉じる(画像などの
+	 * バイナリは dirty にならないので常にこちら=要件#22 ②)。
 	 */
 	applyFileRemoved(uri: string): FileRemovedDecision {
 		if (this.currentDocument?.uri !== uri) return 'ignore';
 		if (this.dirty) {
 			this.externalRemoved = true;
-			// 要件#48 追補h 契約1: 脇に置いた外部版はもう無いので、外部変更の帯
-			// (Reload)を畳む。削除の帯と同時に出さない。
-			this.externalChange = null;
 			return 'keep';
 		}
 		this.clearDocument();
 		return 'close';
-	}
-
-	/** 衝突表示の「読み直す」(契約⑥)。外部版を採用し、編集中の変更は捨てる。 */
-	acceptExternalChange(): void {
-		const external = this.externalChange;
-		if (!external) return;
-		if (this.currentDocument) {
-			this.currentDocument = {
-				...this.currentDocument,
-				content: external.content,
-				modified: external.modified,
-			};
-		}
-		this.endEdit();
 	}
 
 	/**
@@ -322,6 +247,10 @@ class WindowState {
 		// root が変われば編集は持ち越さない(要件#48 契約④)。文書が残る切替
 		// (documentRetained)でも同じ — root の外へ出た編集を書き戻す先が無い。
 		this.resetEditState();
+		// 要件#74: 文書が残る切替でも、新しい面の未保存の編集は持ち越さない(保存済みの版に戻す)。
+		if (documentRetained && this.fileEditor?.dirty && this.currentDocument) {
+			this.fileEditor.reset(this.currentDocument.content);
+		}
 		if (!documentRetained) this.clearDocument();
 	}
 
@@ -369,6 +298,8 @@ class WindowState {
 	clearDocument() {
 		// 表示を閉じる=編集も終わる(要件#48 契約④)。
 		this.resetEditState();
+		this.fileEditor = null;
+		this.editBlocked = false;
 		this.selectedTreeUri = null;
 		this.currentDocument = null;
 		this.renderedHtml = '';

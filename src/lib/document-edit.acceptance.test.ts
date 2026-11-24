@@ -46,16 +46,12 @@ vi.mock('../stores/window-state.svelte', () => ({
 }));
 
 import { invoke } from '$lib/ipc';
-import {
-	bufferFromPre,
-	canEnterEdit,
-	contentHash,
-	decideFileChanged,
-	isDirty,
-	type EditableKind,
-	type EditMode,
-	type FileChangedDecision,
-} from './document-edit';
+// 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 4「一部を書き直し」=承認済み (r)(as)): 今の編集の撤去で
+// `bufferFromPre`(<pre contenteditable> の読み取り)・`decideFileChanged` の `mode`(「dirty なら必ず衝突」は契約13 の
+// 3 方向マージ=面の handle の applyFileChanged へ)・`shouldSaveOnCommand`・`MENU_EDIT_EVENT`・`EditMode` は document-edit.ts から
+// 消える。残るのは canEnterEdit / isDirty / contentHash(と FileChangedDecision の型)。
+import * as documentEdit from './document-edit';
+import { canEnterEdit, contentHash, isDirty, type EditableKind, type FileChangedDecision } from './document-edit';
 import { saveDocument } from './save-document';
 import { windowState } from '../stores/window-state.svelte';
 import type { FileType } from './file-type';
@@ -150,98 +146,6 @@ describe('contentHash — 同一 content→同一値・異なれば異なる(契
 	});
 });
 
-// ---------------------------------------------------------------------------
-// decideFileChanged — file_changed の3分岐(契約⑥)
-// ---------------------------------------------------------------------------
-
-describe('decideFileChanged — エコー抑止と外部変更の分岐(契約⑥)', () => {
-	const SAVED = '# saved content\n';
-
-	test('保存直後のエコー(ハッシュ一致)は ignore-echo — 編集中', () => {
-		const d: FileChangedDecision = decideFileChanged({
-			incomingContent: SAVED,
-			lastSavedHash: contentHash(SAVED),
-			mode: 'edit',
-			dirty: false,
-		});
-		expect(d).toBe('ignore-echo');
-	});
-
-	test('エコーは mode を問わず ignore-echo — 閲覧中でも setDocument へ流さない', () => {
-		const d = decideFileChanged({
-			incomingContent: SAVED,
-			lastSavedHash: contentHash(SAVED),
-			mode: 'view',
-			dirty: false,
-		});
-		expect(d).toBe('ignore-echo');
-	});
-
-	test('エコーは dirty(保存後にさらに編集)でも ignore-echo — 編集 DOM を破棄しない', () => {
-		const d = decideFileChanged({
-			incomingContent: SAVED,
-			lastSavedHash: contentHash(SAVED),
-			mode: 'edit',
-			dirty: true,
-		});
-		expect(d).toBe('ignore-echo');
-	});
-
-	test('編集中+dirty に不一致の外部変更 → external-conflict(再レンダーしない)', () => {
-		const d = decideFileChanged({
-			incomingContent: '# rewritten outside\n',
-			lastSavedHash: contentHash(SAVED),
-			mode: 'edit',
-			dirty: true,
-		});
-		expect(d).toBe('external-conflict');
-	});
-
-	test('閲覧中の外部変更 → apply(従来どおり外部版で更新)', () => {
-		const d = decideFileChanged({
-			incomingContent: '# rewritten outside\n',
-			lastSavedHash: contentHash(SAVED),
-			mode: 'view',
-			dirty: false,
-		});
-		expect(d).toBe('apply');
-	});
-
-	test('編集中でも未変更(dirty=false)なら apply — 失うものがないので外部版に追従', () => {
-		const d = decideFileChanged({
-			incomingContent: '# rewritten outside\n',
-			lastSavedHash: contentHash(SAVED),
-			mode: 'edit',
-			dirty: false,
-		});
-		expect(d).toBe('apply');
-	});
-
-	test('一度も保存していない(lastSavedHash=null)閲覧中は apply', () => {
-		const d = decideFileChanged({
-			incomingContent: '# anything\n',
-			lastSavedHash: null,
-			mode: 'view',
-			dirty: false,
-		});
-		expect(d).toBe('apply');
-	});
-
-	test('lastSavedHash=null でも編集中+dirty なら external-conflict', () => {
-		const d = decideFileChanged({
-			incomingContent: '# anything\n',
-			lastSavedHash: null,
-			mode: 'edit',
-			dirty: true,
-		});
-		expect(d).toBe('external-conflict');
-	});
-});
-
-// ---------------------------------------------------------------------------
-// bufferFromPre — renderPlainText マークアップとのラウンドトリップ(契約②)
-// ---------------------------------------------------------------------------
-
 /**
  * file-type.ts の escapeHtml と同じ写像(テスト側フィクスチャとして再定義)。
  *
@@ -276,36 +180,27 @@ function preFromContent(content: string): HTMLElement {
 	return pre;
 }
 
-describe('bufferFromPre — textContent ラウンドトリップ(契約②の境界4ケース)', () => {
-	test('改行で始まるソースが byte 等価で戻る', () => {
-		const content = '\nfirst line was empty\nsecond\n';
-		expect(bufferFromPre(preFromContent(content))).toBe(content);
-	});
-
-	test('末尾改行なしのソースが byte 等価で戻る', () => {
-		const content = 'no trailing newline';
-		expect(bufferFromPre(preFromContent(content))).toBe(content);
-	});
-
-	test('CRLF 改行のソースが byte 等価で戻る(LF へ潰さない)', () => {
-		const content = 'line1\r\nline2\r\n';
-		expect(bufferFromPre(preFromContent(content))).toBe(content);
-	});
-
-	test('BOM 付き UTF-8 のソースが byte 等価で戻る', () => {
-		const content = '﻿# bom heading\nbody\n';
-		expect(bufferFromPre(preFromContent(content))).toBe(content);
-	});
-
-	test('HTML 特殊文字(& < > " \')が escape/unescape 対称で戻る', () => {
-		const content = 'if (a < b && c > "d") { s = \'&amp;\'; }\n';
-		expect(bufferFromPre(preFromContent(content))).toBe(content);
-	});
-});
-
 // ---------------------------------------------------------------------------
 // saveDocument — 保存経路(契約⑤の TS 側)
 // ---------------------------------------------------------------------------
+
+describe('要件74 第2段 2-5(契約21・AC-74-25): 今の編集の口は document-edit.ts から消えている', () => {
+	const removed = ['bufferFromPre', 'decideFileChanged', 'shouldSaveOnCommand', 'MENU_EDIT_EVENT'] as const;
+	for (const name of removed) {
+		test(`${name} は export されていない`, () => {
+			expect(name in documentEdit, `${name} must be gone from document-edit.ts`).toBe(false);
+		});
+	}
+	test('残るのは canEnterEdit / isDirty / contentHash', () => {
+		expect(typeof documentEdit.canEnterEdit).toBe('function');
+		expect(typeof documentEdit.isDirty).toBe('function');
+		expect(typeof documentEdit.contentHash).toBe('function');
+	});
+	test('FileChangedDecision の型は残る(面の handle が返す)', () => {
+		const d: FileChangedDecision = 'apply';
+		expect(['apply', 'ignore-echo', 'external-conflict']).toContain(d);
+	});
+});
 
 describe('saveDocument — invoke("save_document") と markSaved(契約⑤)', () => {
 	const URI = 'file:///Users/a/notes/memo.txt';
@@ -371,6 +266,3 @@ describe('設計文書の改訂 — FR-02 撤廃の反映(契約⑧)', () => {
 	});
 });
 
-// EditMode 型は VM の公開契約(view/edit の2値)。型レベルの参照で pnpm check に載せる。
-const _modeCheck: EditMode[] = ['view', 'edit'];
-void _modeCheck;

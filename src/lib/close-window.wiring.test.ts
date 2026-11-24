@@ -52,6 +52,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleCloseRequested } from './close-window';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+import type { FileEditorHandle } from '../editor/file-editor';
+import { contentHash } from '$lib/document-edit';
 
 vi.mock('$lib/ipc', () => ({
 	invoke: vi.fn(async () => null),
@@ -80,16 +82,59 @@ function closeRequest() {
 	};
 }
 
-/** text 文書を編集モードに入れて dirty にする。 */
+
+/**
+ * 要件74 第2段 2-5(2026-11-17 仮・契約21・オーケストレーターの仮の承認=朝に由谷に確かめる): 今の編集の store の口
+ * (beginEdit / updateBuffer / editMode / editBuffer / endEdit)は撤去で消えるため、用意だけを新しい面の偽の handle
+ * (`windowState.fileEditor`=edit-guard の 2 本と同じ形)に置き換えた。見ている振る舞いの期待値は変えていない。
+ * `windowState.dirty` は面の dirty を映す(確定契約)。
+ */
+type FakeFace = FileEditorHandle & { setText(next: string): void };
+function fakeFace(uri: string, base: string): FakeFace {
+	let current = base;
+	let savedBase = base;
+	return {
+		kind: 'text',
+		uri,
+		readOnly: false,
+		get dirty() {
+			return current !== savedBase;
+		},
+		conflict: false,
+		notice: null,
+		text: () => current,
+		expectedHash: () => contentHash(savedBase),
+		markSaved(text: string) {
+			savedBase = text;
+			current = text;
+		},
+		applyFileChanged: () => 'apply',
+		keepMyEdits() {},
+		useFileOnDisk() {},
+		showSaveConflict() {},
+		reset(content: string) {
+			current = content;
+			savedBase = content;
+		},
+		preparePrint: async () => undefined,
+		setText(next: string) {
+			current = next;
+		},
+	};
+}
+let face: FakeFace | null = null;
+/** text 文書を面に載せて dirty にする。 */
 function makeDirty() {
 	windowState.setDocument(txtDoc());
-	windowState.beginEdit();
-	windowState.updateBuffer(EDITED);
+	face = fakeFace(TXT_URI, TXT_CONTENT);
+	windowState.fileEditor = face;
+	face.setText(EDITED);
 	expect(windowState.dirty).toBe(true);
 }
 
 beforeEach(() => {
-	windowState.endEdit();
+	windowState.fileEditor = null;
+	face = null;
 	windowState.clearDocument();
 });
 
@@ -141,6 +186,7 @@ describe('handleCloseRequested — 閉窓要求の分岐(backlog 139・要件#48
 		expect(invokeMock).toHaveBeenCalledWith('save_document', {
 			uri: TXT_URI,
 			content: EDITED,
+			expectedHash: contentHash(TXT_CONTENT),
 		});
 		expect(appWindow.destroy).toHaveBeenCalledTimes(1);
 		// 保存 → destroy の順(保存できてから閉じる=edit-guard の意味論)。
@@ -160,7 +206,8 @@ describe('handleCloseRequested — 閉窓要求の分岐(backlog 139・要件#48
 
 		expect(event.preventDefault).toHaveBeenCalledTimes(1);
 		expect(appWindow.destroy).not.toHaveBeenCalled();
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe(EDITED);
+		expect(face?.dirty).toBe(true);
+		expect(face?.text()).toBe(EDITED);
+		expect(windowState.dirty).toBe(true);
 	});
 });

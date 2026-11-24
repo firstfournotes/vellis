@@ -39,6 +39,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+import type { FileEditorHandle } from '../editor/file-editor';
+import { contentHash } from '$lib/document-edit';
 
 vi.mock('$lib/ipc', () => ({
 	invoke: vi.fn(async () => null),
@@ -71,11 +73,53 @@ function requestSwitch(onError?: (err: unknown) => void) {
 	);
 }
 
-/** text 文書を編集モードに入れて dirty にする。 */
+
+/**
+ * 要件74 第2段 2-5(2026-11-17 仮・契約21・オーケストレーターの仮の承認=朝に由谷に確かめる): 今の編集の store の口
+ * (beginEdit / updateBuffer / editMode / editBuffer / endEdit)は撤去で消えるため、用意だけを新しい面の偽の handle
+ * (`windowState.fileEditor`=edit-guard の 2 本と同じ形)に置き換えた。見ている振る舞いの期待値は変えていない。
+ * `windowState.dirty` は面の dirty を映す(確定契約)。
+ */
+type FakeFace = FileEditorHandle & { setText(next: string): void };
+function fakeFace(uri: string, base: string): FakeFace {
+	let current = base;
+	let savedBase = base;
+	return {
+		kind: 'text',
+		uri,
+		readOnly: false,
+		get dirty() {
+			return current !== savedBase;
+		},
+		conflict: false,
+		notice: null,
+		text: () => current,
+		expectedHash: () => contentHash(savedBase),
+		markSaved(text: string) {
+			savedBase = text;
+			current = text;
+		},
+		applyFileChanged: () => 'apply',
+		keepMyEdits() {},
+		useFileOnDisk() {},
+		showSaveConflict() {},
+		reset(content: string) {
+			current = content;
+			savedBase = content;
+		},
+		preparePrint: async () => undefined,
+		setText(next: string) {
+			current = next;
+		},
+	};
+}
+let face: FakeFace | null = null;
+/** text 文書を面に載せて dirty にする。 */
 function makeDirty() {
 	windowState.setDocument(txtDoc());
-	expect(windowState.beginEdit()).toBe(true);
-	windowState.updateBuffer(EDITED);
+	face = fakeFace(TXT_URI, TXT_CONTENT);
+	windowState.fileEditor = face;
+	face.setText(EDITED);
 	expect(windowState.dirty).toBe(true);
 }
 
@@ -83,8 +127,8 @@ function makeDirty() {
 function expectUntouched() {
 	expect(windowState.root).toBe(OLD_ROOT);
 	expect(windowState.currentDocument?.uri).toBe(TXT_URI);
-	expect(windowState.editMode).toBe('edit');
-	expect(windowState.editBuffer).toBe(EDITED);
+	expect(face?.dirty).toBe(true);
+	expect(face?.text()).toBe(EDITED);
 	expect(windowState.dirty).toBe(true);
 }
 
@@ -109,7 +153,8 @@ async function flush() {
 let alertMock: Mock<(message?: unknown) => void>;
 
 beforeEach(() => {
-	windowState.endEdit();
+	windowState.fileEditor = null;
+	face = null;
 	windowState.clearDocument();
 	windowState.applyRoot(OLD_ROOT, [], false);
 	alertMock = vi.fn();
@@ -171,9 +216,8 @@ describe("AC-48-追m (b): Don't Save なら切り替わって編集は捨てら�
 		expect(switchCalls()).toHaveLength(1);
 		expect(switchCalls()[0][1]).toEqual({ uri: NEW_ROOT });
 		expect(saveCalls()).toHaveLength(0);
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBe(null);
-		expect(windowState.dirty).toBe(false);
+		// 捨てる=面は切り替え(applyRoot)で文書ごと外れる。関門は面に触らない(ここでは保存が走っていないことだけ)。
+		expect(face?.text()).toBe(EDITED);
 	});
 
 	it('Save → save_document が先・switch_root_confirmed が後(どちらも 1 回)', async () => {
@@ -188,7 +232,7 @@ describe("AC-48-追m (b): Don't Save なら切り替わって編集は捨てら�
 		expect(saveAt).toBeGreaterThanOrEqual(0);
 		expect(switchAt).toBeGreaterThan(saveAt);
 		expect(saveCalls()).toHaveLength(1);
-		expect(saveCalls()[0][1]).toEqual({ uri: TXT_URI, content: EDITED });
+		expect(saveCalls()[0][1]).toEqual({ uri: TXT_URI, content: EDITED, expectedHash: contentHash(TXT_CONTENT) });
 		expect(switchCalls()).toHaveLength(1);
 		expect(switchCalls()[0][1]).toEqual({ uri: NEW_ROOT });
 		expect(windowState.dirty).toBe(false);
@@ -260,7 +304,8 @@ describe('AC-48-追m (c): 編集が無ければ確認なしで切り替えを頼
 
 	it('編集モードでも未変更なら聞かずに頼む(関門は dirty でなければ聞かない)', async () => {
 		windowState.setDocument(txtDoc());
-		expect(windowState.beginEdit()).toBe(true);
+		face = fakeFace(TXT_URI, TXT_CONTENT);
+		windowState.fileEditor = face;
 		expect(windowState.dirty).toBe(false);
 
 		await expect(requestSwitch()).resolves.toBe('switched');
@@ -277,5 +322,55 @@ describe('AC-48-追m (c): 編集が無ければ確認なしで切り替えを頼
 		expect(messageMock).not.toHaveBeenCalled();
 		expect(switchCalls()).toHaveLength(1);
 		expect(switchCalls()[0][1]).toEqual({ uri: NEW_ROOT });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// reviewer の照合(2026-11-17・P2 の穴 F11)— root を変えて文書が残る(documentRetained)ときの面の reset
+// ---------------------------------------------------------------------------
+
+describe('F11・契約16・(ak): Don\'t Save の後に root が変わり文書が残る(applyRoot の documentRetained=true)と、dirty の面は読み直した中身で reset される', () => {
+	it('documentRetained=true: 文書は残り、面は currentDocument の中身に戻って dirty でない(root の外へ出た編集を書き戻す先は無い)', async () => {
+		makeDirty();
+		messageMock.mockResolvedValueOnce("Don't Save");
+		await expect(requestSwitch()).resolves.toBe('switched');
+		expect(saveCalls()).toHaveLength(0);
+		expect(face?.dirty, '切り替えを頼んだ時点では面はまだ dirty(Rust の root_changed を待つ)').toBe(true);
+
+		// Rust からの root_changed(文書が残る形)を store に当てる。
+		windowState.applyRoot(NEW_ROOT, [], true);
+
+		expect(windowState.root).toBe(NEW_ROOT);
+		expect(windowState.currentDocument?.uri).toBe(TXT_URI);
+		expect(windowState.fileEditor).toBe(face);
+		expect(face?.text(), '面は文書の中身(読み直した版)に戻る').toBe(TXT_CONTENT);
+		expect(face?.dirty).toBe(false);
+		expect(windowState.dirty).toBe(false);
+		expect(windowState.externalRemoved).toBe(false);
+	});
+
+	it('documentRetained=false: 文書が閉じ、面の handle も外れる', async () => {
+		makeDirty();
+		messageMock.mockResolvedValueOnce("Don't Save");
+		await expect(requestSwitch()).resolves.toBe('switched');
+
+		windowState.applyRoot(NEW_ROOT, [], false);
+
+		expect(windowState.root).toBe(NEW_ROOT);
+		expect(windowState.currentDocument).toBeNull();
+		expect(windowState.fileEditor).toBeNull();
+		expect(windowState.dirty).toBe(false);
+	});
+
+	it('dirty でない面は documentRetained=true でも触らない(reset が呼ばれない)', async () => {
+		windowState.setDocument(txtDoc());
+		face = fakeFace(TXT_URI, TXT_CONTENT);
+		windowState.fileEditor = face;
+		const spy = vi.spyOn(face, 'reset');
+		await expect(requestSwitch()).resolves.toBe('switched');
+		windowState.applyRoot(NEW_ROOT, [], true);
+		expect(spy).not.toHaveBeenCalled();
+		expect(windowState.fileEditor).toBe(face);
+		expect(windowState.dirty).toBe(false);
 	});
 });

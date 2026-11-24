@@ -10,11 +10,20 @@
 // load-bearing gate that keeps in-development code out of a signed
 // release is the `dev-features` *compile-time* exclusion. The channel
 // guard is an independent second layer.
+//
+// 要件87: a third channel, `preview` (開発版), for the signed and
+// notarized pre-releases `.github/workflows/dev-release.yml` publishes to
+// the development repository. It carries the same feature set as
+// `release` and a build name (`build_name`) that tells which of two
+// installed previews is newer.
 
 /// Resolved build channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
     Release,
+    /// 開発版 (要件87): a CI build of a `dev/<name>/<n>` tag. Same feature
+    /// set as `Release`; never checks for updates on its own.
+    Preview,
     Dev,
 }
 
@@ -22,6 +31,7 @@ impl Channel {
     pub fn as_str(self) -> &'static str {
         match self {
             Channel::Release => "release",
+            Channel::Preview => "preview",
             Channel::Dev => "dev",
         }
     }
@@ -31,6 +41,9 @@ impl Channel {
 /// (§3.2): `release` iff `commit_tag` matches the anchored release
 /// version pattern `^v\d+\.\d+\.\d+$` **and** a CI context variable
 /// (`GITLAB_CI` or `CI_PIPELINE_ID`) is present and non-empty.
+/// `preview` (要件87) iff, with the same CI context, `commit_tag` matches
+/// the anchored development-release pattern
+/// `^dev/[a-z0-9][a-z0-9-]*/[1-9][0-9]*$` ([`parse_preview_tag`]).
 ///
 /// Everything else — local builds, a locally-spoofed `CI_COMMIT_TAG`
 /// without CI context, manual CI, branch builds — resolves to `dev`.
@@ -42,12 +55,53 @@ pub fn derive_channel(
     gitlab_ci: Option<&str>,
     pipeline_id: Option<&str>,
 ) -> Channel {
-    let tag_ok = commit_tag.map(is_release_tag).unwrap_or(false);
     let ci_present = non_empty(gitlab_ci) || non_empty(pipeline_id);
-    if tag_ok && ci_present {
-        Channel::Release
-    } else {
-        Channel::Dev
+    if !ci_present {
+        return Channel::Dev;
+    }
+    match commit_tag {
+        Some(tag) if is_release_tag(tag) => Channel::Release,
+        Some(tag) if parse_preview_tag(tag).is_some() => Channel::Preview,
+        _ => Channel::Dev,
+    }
+}
+
+/// Split a development-release tag `dev/<name>/<n>` into `(name, n)`.
+///
+/// Anchored, ASCII-only equivalent of `^dev/[a-z0-9][a-z0-9-]*/[1-9][0-9]*$`
+/// (hand-rolled for the same reason as [`is_release_tag`]): `name` starts
+/// with a lowercase letter or digit and continues with those or `-`; `n`
+/// has no leading zero. Anything else — a full-width letter, a sign, a
+/// trailing newline, an extra segment — is `None`.
+pub fn parse_preview_tag(tag: &str) -> Option<(&str, u32)> {
+    let rest = tag.strip_prefix("dev/")?;
+    let (name, number) = rest.split_once('/')?;
+    let name_ok = name
+        .bytes()
+        .enumerate()
+        .all(|(i, b)| b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && b == b'-'));
+    if name.is_empty() || !name_ok {
+        return None;
+    }
+    if !is_all_digits(number) || number.starts_with('0') {
+        return None;
+    }
+    let n = number.parse::<u32>().ok()?;
+    Some((name, n))
+}
+
+/// The build name shown in About, `--print-build-info` (`buildName`) and
+/// the GitHub Release title (要件87 契約2): for a preview,
+/// `dev-<name> #<n>(<build_time>)` with full-width brackets (U+FF08 /
+/// U+FF09), `build_time` being `VELLIS_BUILD_TIME` as is
+/// (`YYYY-MM-DD HH:MM JST`). Release and dev builds have no name: `""`.
+pub fn build_name(channel: Channel, commit_tag: Option<&str>, build_time: &str) -> String {
+    if channel != Channel::Preview {
+        return String::new();
+    }
+    match commit_tag.and_then(parse_preview_tag) {
+        Some((name, n)) => format!("dev-{name} #{n}\u{FF08}{build_time}\u{FF09}"),
+        None => String::new(),
     }
 }
 

@@ -50,6 +50,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock, type MockInstance } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { windowState, type DocumentPayload, type Entry } from '../stores/window-state.svelte';
+import type { FileEditorHandle } from '../editor/file-editor';
+import { contentHash } from '$lib/document-edit';
 
 vi.mock('$lib/ipc', () => ({
 	invoke: vi.fn(async () => null),
@@ -117,28 +119,69 @@ function txtDoc(): DocumentPayload {
 	return { uri: TXT_URI, content: TXT_CONTENT, modified: 1 };
 }
 
-/** text 文書を編集モードに入れて dirty にする。 */
+/**
+ * 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 4「緑の見込み(endEdit を前提にした件があれば書き直し)」=承認済み (r)(as)):
+ * 今の編集(editMode / editBuffer / beginEdit / endEdit)は撤去された。関門の相手は新しい面の handle(`windowState.fileEditor`)で、
+ * dirty は handle の dirty・Save は `saveFileEditor(handle)`(save_document に { uri, content, expectedHash })・
+ * "Don't Save" は進むだけ(面は文書と一緒に消える)。`windowState.dirty` は handle の dirty を映す(確定契約)。
+ */
+type FakeFace = FileEditorHandle & { setText(next: string): void };
+function fakeFace(uri: string, base: string): FakeFace {
+	let current = base;
+	let savedBase = base;
+	const face: FakeFace = {
+		kind: 'text',
+		uri,
+		readOnly: false,
+		get dirty() {
+			return current !== savedBase;
+		},
+		conflict: false,
+		notice: null,
+		text: () => current,
+		expectedHash: () => contentHash(savedBase),
+		markSaved(text: string) {
+			savedBase = text;
+			current = text;
+		},
+		applyFileChanged: () => 'apply',
+		keepMyEdits() {},
+		useFileOnDisk() {},
+		showSaveConflict() {},
+		reset(content: string) {
+			current = content;
+			savedBase = content;
+		},
+		preparePrint: async () => undefined,
+		setText(next: string) {
+			current = next;
+		},
+	};
+	return face;
+}
+let face: FakeFace | null = null;
+/** text 文書を面に載せて dirty にする(今の編集の beginEdit / updateBuffer の代わり)。 */
 function makeDirty() {
 	windowState.setDocument(txtDoc());
-	expect(windowState.beginEdit()).toBe(true);
-	windowState.updateBuffer(EDITED);
-	expect(windowState.dirty).toBe(true);
+	face = fakeFace(TXT_URI, TXT_CONTENT);
+	windowState.fileEditor = face;
+	face.setText(EDITED);
+	expect(windowState.dirty, 'windowState.dirty は面の dirty を映す').toBe(true);
 }
-
-/** 編集中のまま何も変わっていないこと(endEdit されていない・バッファ・dirty が維持)。 */
+/** 進まなかった: 面は dirty のまま・文字列も文書もそのまま。 */
 function expectStillEditing() {
-	expect(windowState.editMode).toBe('edit');
-	expect(windowState.editBuffer).toBe(EDITED);
+	expect(face?.dirty).toBe(true);
+	expect(face?.text()).toBe(EDITED);
 	expect(windowState.dirty).toBe(true);
 	expect(windowState.currentDocument?.uri).toBe(TXT_URI);
 }
-
-/** 閲覧へ戻り、バッファは捨てられている(endEdit 済み)。 */
+/** 進んだ(呼び手が true を受ける)。保存の有無は saveCalls で見る。捨てた場合、面は呼び手が文書ごと閉じるまで残るので中身は見ない。 */
 function expectEnded() {
-	expect(windowState.editMode).toBe('view');
-	expect(windowState.editBuffer).toBe(null);
-	expect(windowState.dirty).toBe(false);
+	expect(windowState.currentDocument?.uri ?? TXT_URI).toBe(TXT_URI);
 }
+
+
+
 
 const callsOf = (cmd: string) => invokeMock.mock.calls.filter((c) => c[0] === cmd);
 const saveCalls = () => callsOf('save_document');
@@ -180,7 +223,8 @@ let errorSpy: MockInstance<typeof console.error>;
 let alertMock: Mock<(message?: unknown) => void>;
 
 beforeEach(() => {
-	windowState.endEdit();
+	windowState.fileEditor = null;
+	face = null;
 	windowState.clearDocument();
 	windowState.applyRoot(OLD_ROOT, [], false);
 	errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -296,7 +340,7 @@ describe("AC-48-追o (b): 'Save' は保存が成功してから進む・\"Don't 
 		await expect(confirmDiscardEdits()).resolves.toBe(true);
 
 		expectSingleDialog();
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
+		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED, expectedHash: contentHash(TXT_CONTENT) }]]);
 		expectEnded();
 		expect(alertMock).not.toHaveBeenCalled();
 		expect(errorSpy).not.toHaveBeenCalled();
@@ -319,8 +363,8 @@ describe("AC-48-追o (b): 'Save' は保存が成功してから進む・\"Don't 
 		await flush();
 		expect(saveCalls()).toHaveLength(1);
 		expect(settled).toBe(null);
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe(EDITED);
+		expect(face?.dirty).toBe(true);
+		expect(face?.text()).toBe(EDITED);
 
 		save.resolve(null);
 		await expect(outcome).resolves.toBe(true);
@@ -456,13 +500,14 @@ describe('AC-48-追o (d): dirty でなければ message も ask も呼ばれず�
 
 	it('編集モードでも未変更なら聞かずに true・閲覧へ戻る', async () => {
 		windowState.setDocument(txtDoc());
-		expect(windowState.beginEdit()).toBe(true);
+		face = fakeFace(TXT_URI, TXT_CONTENT);
+		windowState.fileEditor = face;
 		expect(windowState.dirty).toBe(false);
 
 		await expect(confirmDiscardEdits()).resolves.toBe(true);
 
 		expectNoDialog();
-		expect(windowState.editMode).toBe('view');
+		expect(windowState.dirty).toBe(false);
 		expectNoSave();
 	});
 
@@ -522,7 +567,7 @@ describe('AC-48-追o (e) 閉窓(handleCloseRequested): 確認は 1 枚だけ', (
 		await handleCloseRequested(event, appWindow);
 
 		expectSingleDialog();
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
+		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED, expectedHash: contentHash(TXT_CONTENT) }]]);
 		expect(appWindow.destroy).toHaveBeenCalledTimes(1);
 		const saveOrder = invokeMock.mock.invocationCallOrder[
 			invokeMock.mock.calls.findIndex(([command]) => command === 'save_document')
@@ -614,7 +659,7 @@ describe('AC-48-追o (e) 別ファイル(Explorer の行のクリック): 確認
 		expectNoSave();
 		expect(callsOf('open_document')).toEqual([['open_document', { uri: OTHER_URI }]]);
 		expect(windowState.currentDocument?.uri).toBe(OTHER_URI);
-		expect(windowState.editMode).toBe('view');
+		expect(windowState.dirty).toBe(false);
 	});
 
 	it("'Save' → message 1 回・ask 0 回・save_document が成功してから open_document", async () => {
@@ -630,7 +675,7 @@ describe('AC-48-追o (e) 別ファイル(Explorer の行のクリック): 確認
 		const openAt = names.indexOf('open_document');
 		expect(saveAt).toBeGreaterThanOrEqual(0);
 		expect(openAt).toBeGreaterThan(saveAt);
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
+		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED, expectedHash: contentHash(TXT_CONTENT) }]]);
 		expect(windowState.currentDocument?.uri).toBe(OTHER_URI);
 	});
 });
@@ -690,7 +735,7 @@ describe('AC-48-追o (e) root 変更(pickFolderAndSetRoot=履歴選択画面の�
 		const rootAt = names.indexOf('set_root');
 		expect(saveAt).toBeGreaterThanOrEqual(0);
 		expect(rootAt).toBeGreaterThan(saveAt);
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
+		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED, expectedHash: contentHash(TXT_CONTENT) }]]);
 	});
 });
 
@@ -746,7 +791,7 @@ describe('AC-48-追o (e) CLI の切り替え(handleRootSwitchRequest): 確認は
 		const switchAt = names.indexOf('switch_root_confirmed');
 		expect(saveAt).toBeGreaterThanOrEqual(0);
 		expect(switchAt).toBeGreaterThan(saveAt);
-		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED }]]);
+		expect(saveCalls()).toEqual([['save_document', { uri: TXT_URI, content: EDITED, expectedHash: contentHash(TXT_CONTENT) }]]);
 		expect(callsOf('switch_root_confirmed')).toHaveLength(1);
 	});
 

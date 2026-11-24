@@ -99,7 +99,9 @@ pub async fn create_window(
         .title(derive_window_title(root_for_title.as_deref()))
         .tabbing_identifier(&tab_key)
         .visible(placement.visible)
-        .inner_size(1280.0, 800.0);
+        .inner_size(1280.0, 800.0)
+        // Let drags reach WKWebView (requirements.md #74 第3段 3-5, as in lib.rs).
+        .disable_drag_drop_handler();
     let builder = match new_window_position(kind, front) {
         Some(NewWindowPosition::At { x, y }) => builder.position(x, y),
         Some(NewWindowPosition::Center) => builder.center(),

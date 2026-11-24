@@ -203,20 +203,38 @@ export async function clearIpcLog(): Promise<void> {
 }
 
 /**
- * Prove the fetch-layer interception is live before relying on it: block a
- * harmless command, call it, and expect the stub's error back.
+ * The command `assertIpcInterceptionWorks` blocks and calls. It is not a
+ * Tauri command: the wrapped `fetch` answers a blocked name with the stub's
+ * `Tauri-Response: error` before `originalFetch` runs (see
+ * `installGateRecorder`), so nothing is ever sent to Rust and the name does
+ * not have to exist there. It must be a name the app never invokes: the
+ * probe used to block `get_build_info`, and since `waitForAppMounted` returns
+ * on the static shell of `src/app.html` (before SvelteKit mounts), the page's
+ * first `get_build_info` — shared by the StatusBar and `featureFlags.init()`,
+ * which runs once — could land inside the ~20–40 ms block window, get
+ * `blocked by gate check`, and leave the requirement #84 flags on their
+ * closed side for the rest of the session (the requirement #84 `legacy.ai`
+ * gates then stayed shut; `menu_edit` is gone since requirement #74 2-5).
+ * Requirement #84 approval 4 (2026-11-08).
+ */
+export const IPC_PROBE_COMMAND = '__gate_interception_probe';
+
+/**
+ * Prove the fetch-layer interception is live before relying on it: block
+ * `IPC_PROBE_COMMAND` (a name the app never calls), call it, and expect the
+ * stub's error back.
  */
 export async function assertIpcInterceptionWorks(): Promise<void> {
-	await setIpcBlock(['get_build_info']);
-	const res = await browser.executeAsync<string, []>((done) => {
+	await setIpcBlock([IPC_PROBE_COMMAND]);
+	const res = await browser.executeAsync<string, [string]>((probe, done) => {
 		const internals = (window as unknown as {
 			__TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
 		}).__TAURI_INTERNALS__;
-		internals.invoke('get_build_info').then(
+		internals.invoke(probe).then(
 			() => done('reached-rust'),
 			(e) => done(`rejected:${String(e)}`),
 		);
-	});
+	}, IPC_PROBE_COMMAND);
 	await setIpcBlock([]);
 	if (!res.includes('blocked by gate check')) {
 		throw new Error(`IPC interception is not effective (${res}); refusing to drive further`);
@@ -808,4 +826,204 @@ export async function removeEventRecorder(): Promise<void> {
 		});
 		Promise.all(calls).then(() => done(), () => done());
 	});
+}
+
+// ---------------------------------------------------------------------------------------
+// The editing face of requirement #74 (2-5: the current editing is removed — a text / code
+// file is a CodeMirror face from the moment it opens, a Markdown file a ProseMirror face;
+// there is no Edit ▸ Edit, no Done Editing, no `<pre contenteditable>`). These helpers read
+// and drive the face from the page the way the old `<pre>` helpers did. Typing goes through
+// `document.execCommand('insertText')` on the focused `.cm-content`: CodeMirror reads the DOM
+// mutation back into its state (the same route an IME takes). Confirmed on the device by the
+// release.yml run 45354850519 (2026-11-24: req69 gate 2 typed into the face and saved).
+// The ProseMirror helpers below (`mdFaceText` / `appendToMdFace` / `deleteMdFaceTail`) use the
+// same route on the `.ProseMirror` root; ProseMirror's DOMObserver reads the mutation back into
+// a transaction (the IME route as well). Not run on a device yet (2026-11-24).
+// ---------------------------------------------------------------------------------------
+
+/** The CodeMirror face of a text / code file (src/components/CodeEditor.svelte). */
+export const FACE = 'article.viewer [data-testid="code-editor"]';
+export const FACE_CONTENT = `${FACE} .cm-content`;
+/** The ProseMirror face of a Markdown file (src/components/MarkdownEditor.svelte). */
+export const MD_FACE = 'article.viewer [data-testid="markdown-editor"] .ProseMirror';
+/** The unsaved badge of either face (requirement #74 契約3 (aj)). */
+export const UNSAVED_BADGE = 'article.viewer [data-testid="unsaved-badge"]';
+
+/** The lines CodeMirror has rendered (the viewport; every line for a small file). */
+export async function faceLines(): Promise<string[] | null> {
+	return browser.execute((sel) => {
+		const content = document.querySelector(sel);
+		if (!content) return null;
+		return Array.from(content.querySelectorAll('.cm-line')).map((l) => l.textContent ?? '');
+	}, FACE_CONTENT);
+}
+
+/** The face's text as rendered (`\n`-joined lines; a trailing newline shows as an empty last line). */
+export async function faceText(): Promise<string | null> {
+	const lines = await faceLines();
+	return lines === null ? null : lines.join('\n');
+}
+
+/** Whether either face shows the unsaved badge. */
+export async function faceDirty(): Promise<boolean> {
+	return browser.execute((sel) => document.querySelector(sel) !== null, UNSAVED_BADGE);
+}
+
+/** Wait until the CodeMirror face is up and its text holds `marker`. */
+export async function waitForFace(marker: string, timeout = 15_000): Promise<void> {
+	await browser.waitUntil(async () => ((await faceText()) ?? '').includes(marker), {
+		timeout,
+		timeoutMsg: `the CodeMirror face never showed ${JSON.stringify(marker)} (now: ${JSON.stringify(((await faceText()) ?? '').slice(0, 80))})`,
+	});
+}
+
+/**
+ * Replace the whole text of the CodeMirror face with `text` (select all inside `.cm-content`,
+ * then `insertText`). Returns false when there is no face.
+ */
+export async function replaceFaceText(text: string): Promise<boolean> {
+	return browser.execute(
+		(sel, t) => {
+			const content = document.querySelector<HTMLElement>(sel);
+			if (!content) return false;
+			content.focus();
+			const range = document.createRange();
+			range.selectNodeContents(content);
+			const selection = window.getSelection();
+			selection?.removeAllRanges();
+			selection?.addRange(range);
+			return document.execCommand('insertText', false, t);
+		},
+		FACE_CONTENT,
+		text,
+	);
+}
+
+/** Append `extra` at the very end of the CodeMirror face (the caret goes to the end first). */
+export async function appendToFace(extra: string): Promise<boolean> {
+	return browser.execute(
+		(sel, t) => {
+			const content = document.querySelector<HTMLElement>(sel);
+			if (!content) return false;
+			content.focus();
+			const lines = content.querySelectorAll('.cm-line');
+			const last = lines[lines.length - 1];
+			if (!last) return false;
+			const range = document.createRange();
+			range.selectNodeContents(last);
+			range.collapse(false);
+			const selection = window.getSelection();
+			selection?.removeAllRanges();
+			selection?.addRange(range);
+			return document.execCommand('insertText', false, t);
+		},
+		FACE_CONTENT,
+		extra,
+	);
+}
+
+/** Put the face back to `onDisk` so nothing is dirty (the badge goes); no dialog is involved. */
+export async function revertFace(onDisk: string): Promise<void> {
+	if (!(await faceDirty())) return;
+	await replaceFaceText(onDisk);
+	await browser.waitUntil(async () => !(await faceDirty()), {
+		timeout: 5_000,
+		timeoutMsg: `the unsaved badge did not go after the text was put back (face: ${JSON.stringify(((await faceText()) ?? '').slice(0, 80))})`,
+	});
+}
+
+// --- the ProseMirror face of a Markdown file (要件74 第2段) ---------------------------------
+
+/**
+ * The visible text of the ProseMirror face: the view's own document (`pmViewDesc.node` on the root,
+ * set by prosemirror-view) with the top-level blocks joined by `\n` and atoms as a space; the DOM's
+ * blocks when that internal is not there. Null = no Markdown face on screen (a text file, an image,
+ * the empty state). Headings lose their `#`, so `# T\n\nbody\n` reads `T\nbody`.
+ */
+export async function mdFaceText(): Promise<string | null> {
+	return browser.execute((sel) => {
+		interface PMNodeLike {
+			content: { size: number };
+			textBetween(from: number, to: number, block?: string, leaf?: string): string;
+		}
+		const el = document.querySelector(sel) as (HTMLElement & { pmViewDesc?: { node?: PMNodeLike } }) | null;
+		if (!el) return null;
+		const node = el.pmViewDesc?.node;
+		if (node && typeof node.textBetween === 'function') return node.textBetween(0, node.content.size, '\n', ' ');
+		return Array.from(el.children).map((c) => c.textContent ?? '').join('\n');
+	}, MD_FACE);
+}
+
+/** The text of whichever face is up: the CodeMirror lines, else the ProseMirror blocks; null when neither. */
+export async function anyFaceText(): Promise<string | null> {
+	const cm = await faceText();
+	return cm !== null ? cm : await mdFaceText();
+}
+
+/**
+ * Append `extra` at the very end of the ProseMirror face (the caret goes to the end of the last
+ * top-level block first, then `insertText`). `extra` should hold no newline: a newline typed this way
+ * splits the block or becomes a hard break, which is not what a "type something" gate needs.
+ * Returns false when there is no face.
+ */
+export async function appendToMdFace(extra: string): Promise<boolean> {
+	return browser.execute(
+		(sel, t) => {
+			const root = document.querySelector<HTMLElement>(sel);
+			const last = root?.lastElementChild as HTMLElement | null;
+			if (!root || !last) return false;
+			root.focus();
+			const range = document.createRange();
+			range.selectNodeContents(last);
+			range.collapse(false);
+			const selection = window.getSelection();
+			selection?.removeAllRanges();
+			selection?.addRange(range);
+			return document.execCommand('insertText', false, t);
+		},
+		MD_FACE,
+		extra,
+	);
+}
+
+/**
+ * Delete the last `count` characters of the ProseMirror face's last top-level block (select them,
+ * then `delete`) — the reverse of `appendToMdFace`, used to make a face clean again without a dialog.
+ * Returns false when there is no face or the block holds fewer characters.
+ */
+export async function deleteMdFaceTail(count: number): Promise<boolean> {
+	return browser.execute(
+		(sel, n) => {
+			const root = document.querySelector<HTMLElement>(sel);
+			const last = root?.lastElementChild as HTMLElement | null;
+			if (!root || !last || n <= 0) return false;
+			const walker = document.createTreeWalker(last, NodeFilter.SHOW_TEXT);
+			const texts: Text[] = [];
+			for (let t = walker.nextNode(); t; t = walker.nextNode()) texts.push(t as Text);
+			let remaining = n;
+			let startNode: Text | null = null;
+			let startOffset = 0;
+			for (let i = texts.length - 1; i >= 0 && remaining > 0; i--) {
+				const len = texts[i]!.length;
+				if (len >= remaining) {
+					startNode = texts[i]!;
+					startOffset = len - remaining;
+					remaining = 0;
+				} else {
+					remaining -= len;
+				}
+			}
+			if (!startNode) return false;
+			root.focus();
+			const range = document.createRange();
+			range.setStart(startNode, startOffset);
+			range.setEnd(last, last.childNodes.length);
+			const selection = window.getSelection();
+			selection?.removeAllRanges();
+			selection?.addRange(range);
+			return document.execCommand('delete');
+		},
+		MD_FACE,
+		count,
+	);
 }

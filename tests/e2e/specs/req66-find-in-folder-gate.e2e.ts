@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+	FACE_CONTENT,
 	assertIpcInterceptionWorks,
 	clearCapturedIpc,
 	emitMenu,
@@ -47,6 +48,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *     match of the in-document find (#54): the find input holds the word
  *     (`matched` for .*), `n of m` has n = ordinal, and the current
  *     highlight's range sits on the clicked line at the clicked occurrence.
+ *     要件74 第2段 (2026-11-24 rewrite): a `.txt` sample opens into the CodeMirror
+ *     face, which paints the matches as decorations (`.cm-vellis-find` /
+ *     `.cm-vellis-find-current`, src/editor/cm-find.ts) and renders the lines
+ *     as `.cm-line`s — not as CSS Custom Highlights on a `<pre>`. `findState`
+ *     reads whichever is on screen: the CodeMirror face by its decorations
+ *     (the body text = the lines joined by `\n`, as the file is), anything else
+ *     (jump.md = the ProseMirror face, 契約17: the Markdown face still uses the
+ *     Highlight API) by `CSS.highlights` as before.
  *  1/5. Screenshots (OFF / each ON / all ON / broken expression) and the
  *     records for `^$`, broken expressions, ab on symbol-edged words and
  *     Japanese, and the absence of shortcuts go to $VELLIS_GATE_SHOTS and
@@ -414,43 +423,73 @@ interface FindState {
 	currentLine: string | null;
 	highlights: number;
 	bodyText: string;
+	/** Which surface was read: the CodeMirror face (decorations) or the body's CSS highlights. */
+	face: 'codemirror' | 'highlights';
+	/** Diagnosis for a red: is the window on the empty state, which Explorer row is active. */
+	emptyState: boolean;
+	activeRow: string | null;
 }
 
 async function findState(): Promise<FindState> {
-	return browser.execute((body) => {
-		const container = document.querySelector<HTMLElement>(body);
-		const input = document.querySelector<HTMLInputElement>('[data-testid="find-input"]');
-		const h = (globalThis as unknown as { CSS: { highlights?: Map<string, Iterable<Range>> } }).CSS.highlights;
-		const current = h?.get('vellis-find-current');
-		const all = h?.get('vellis-find');
-		let currentText: string | null = null;
-		let currentOffset: number | null = null;
-		let currentLine: string | null = null;
-		const text = container?.textContent ?? '';
-		if (current && container) {
-			for (const r of current) {
-				currentText = r.toString();
-				const pre = document.createRange();
-				pre.selectNodeContents(container);
-				pre.setEnd(r.startContainer, r.startOffset);
-				currentOffset = pre.toString().length;
-				const lineStart = text.lastIndexOf('\n', currentOffset - 1) + 1;
-				const lineEnd = text.indexOf('\n', currentOffset);
-				currentLine = text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd);
-				break;
+	return browser.execute(
+		(body, cmContent) => {
+			const input = document.querySelector<HTMLInputElement>('[data-testid="find-input"]');
+			const common = {
+				open: !!input,
+				input: input?.value ?? '',
+				count: document.querySelector('[data-testid="find-count"]')?.textContent ?? '',
+				emptyState: document.querySelector('.empty-state') !== null,
+				activeRow: document.querySelector<HTMLElement>('.explorer-item.active')?.title ?? null,
+			};
+			let currentText: string | null = null;
+			let currentOffset: number | null = null;
+			let currentLine: string | null = null;
+			// 要件74 第2段: a text file is the CodeMirror face; the matches are mark decorations on its lines.
+			const cm = document.querySelector<HTMLElement>(cmContent);
+			if (cm) {
+				const lines = Array.from(cm.querySelectorAll<HTMLElement>('.cm-line'));
+				const lineTexts = lines.map((l) => l.textContent ?? '');
+				const text = lineTexts.join('\n');
+				const marks = cm.querySelectorAll('.cm-vellis-find, .cm-vellis-find-current');
+				const current = cm.querySelector<HTMLElement>('.cm-vellis-find-current');
+				if (current) {
+					currentText = current.textContent ?? '';
+					const line = current.closest('.cm-line') as HTMLElement | null;
+					if (line) {
+						const idx = lines.indexOf(line);
+						const pre = document.createRange();
+						pre.selectNodeContents(line);
+						pre.setEndBefore(current);
+						currentOffset = lineTexts.slice(0, idx).reduce((n, l) => n + l.length + 1, 0) + pre.toString().length;
+						currentLine = lineTexts[idx] ?? null;
+					}
+				}
+				return { ...common, currentText, currentOffset, currentLine, highlights: marks.length, bodyText: text, face: 'codemirror' as const };
 			}
-		}
-		return {
-			open: !!input,
-			input: input?.value ?? '',
-			count: document.querySelector('[data-testid="find-count"]')?.textContent ?? '',
-			currentText,
-			currentOffset,
-			currentLine,
-			highlights: all ? Array.from(all).length : -1,
-			bodyText: text,
-		};
-	}, BODY);
+			// The Markdown face / the read-only render: CSS Custom Highlights on the body (要件54).
+			const container = document.querySelector<HTMLElement>(body);
+			const h = (globalThis as unknown as { CSS: { highlights?: Map<string, Iterable<Range>> } }).CSS.highlights;
+			const currentSet = h?.get('vellis-find-current');
+			const all = h?.get('vellis-find');
+			const text = container?.textContent ?? '';
+			if (currentSet && container) {
+				for (const r of currentSet) {
+					currentText = r.toString();
+					const pre = document.createRange();
+					pre.selectNodeContents(container);
+					pre.setEnd(r.startContainer, r.startOffset);
+					currentOffset = pre.toString().length;
+					const lineStart = text.lastIndexOf('\n', currentOffset - 1) + 1;
+					const lineEnd = text.indexOf('\n', currentOffset);
+					currentLine = text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd);
+					break;
+				}
+			}
+			return { ...common, currentText, currentOffset, currentLine, highlights: all ? Array.from(all).length : -1, bodyText: text, face: 'highlights' as const };
+		},
+		BODY,
+		FACE_CONTENT,
+	);
 }
 
 /** Click the result row for `file:line` and wait until the find bar shows `word` as match `n`. */
@@ -468,13 +507,23 @@ async function clickHit(file: string, line: number, word: string, n: number): Pr
 		line,
 	);
 	if (!ok) throw new Error(`no result row for ${file}:${line}`);
-	await browser.waitUntil(
-		async () => {
-			const s = await findState();
-			return s.open && s.input.toLowerCase() === word.toLowerCase() && s.count.startsWith(`${n} of `) && s.currentText !== null;
-		},
-		{ timeout: 15_000, timeoutMsg: `find bar did not show "${word}" as match ${n} after clicking ${file}:${line} (now: ${JSON.stringify(await findState())})` },
-	);
+	try {
+		await browser.waitUntil(
+			async () => {
+				const s = await findState();
+				return s.open && s.input.toLowerCase() === word.toLowerCase() && s.count.startsWith(`${n} of `) && s.currentText !== null;
+			},
+			{ timeout: 15_000, timeoutMsg: 'find bar did not settle' },
+		);
+	} catch {
+		// The state is read after the timeout so the error carries what was on the screen: whether the
+		// document opened at all (empty state / active row), whether the bar opened, and any dialog.
+		const s = await findState();
+		const dialogs = (await readGateRecord()).dialogs;
+		throw new Error(
+			`find bar did not show "${word}" as match ${n} after clicking ${file}:${line} (now: ${JSON.stringify({ ...s, bodyText: s.bodyText.slice(0, 120) })}, dialogs: ${JSON.stringify(dialogs)})`,
+		);
+	}
 	// The 番目合わせ effect runs after the ranges exist; give it a frame.
 	await browser.pause(300);
 	return findState();

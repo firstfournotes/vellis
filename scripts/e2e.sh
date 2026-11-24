@@ -62,13 +62,17 @@ if ! command -v tauri-webdriver >/dev/null 2>&1; then
 	exit 1
 fi
 
-echo "==> Building debug binary with webdriver feature (via tauri build)"
+echo "==> Building debug binary with webdriver + dev-features (via tauri build)"
 # `tauri build --debug --no-bundle` runs `beforeBuildCommand` (= `pnpm build`)
 # first, so the SvelteKit static export lands in `build/` before Cargo
 # compiles. Going through `cargo build` directly would leave the
 # WebView pointing at `devUrl` (Vite dev server) and the WKWebView
 # stays at `about:blank` — exactly what tripped earlier iterations.
-pnpm --silent tauri build --debug --no-bundle -f webdriver
+# `dev-features` (requirements.md #84 契約10・承認 2): the E2E binary keeps
+# today's editing and AI features turned on, so the specs that enter edit
+# mode (req48*, req69, req80, req83 …) keep passing; the shipped build hides
+# them (`editor_inline` / `ai_marks` are `kind=dev`).
+pnpm --silent tauri build --debug --no-bundle -f webdriver,dev-features
 
 binary="$repo_root/src-tauri/target/debug/vellis"
 if [[ ! -x "$binary" ]]; then

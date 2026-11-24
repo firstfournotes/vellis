@@ -1,0 +1,6 @@
+nbsp: here
+zero​width‍ join
+surrogate: 😀 🎉
+tab	here  
+trailing spaces   
+あいうえお

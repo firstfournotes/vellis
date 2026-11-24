@@ -325,7 +325,16 @@ fn export_default_theme_item_is_fixed() {
     assert_eq!(first_string_literal(call), Some("Export Default Theme…"), "{call}");
     assert!(!has_cjk(first_string_literal(call).unwrap()));
     assert!(last_argument(call).starts_with("None"), "Export has no accelerator: {}", last_argument(call));
-    assert!(!code.contains("CheckMenuItem"), "no check marks in menu.rs (judgement (a), decision 8)");
+    assert!(call.starts_with("MenuItem::with_id("), "Export is a plain MenuItem (judgement (a), decision 8): {call}");
+    // 要件側更新(2026-11-17 仮・要件74 2-3・契約23・仮の承認=由谷に確かめる): View ▸ Raw Source の CheckMenuItem を足したため、
+    // 「CheckMenuItem が無い」は「`CheckMenuItem::with_id(` は 1 つだけで、それは Raw Source(RAW_SOURCE_ITEM_ID)」に改める。
+    // 要件74 4-2(決定 4-5): View ▸ Show Formatting Toolbar(SHOW_FORMAT_TOOLBAR_ITEM_ID)も CheckMenuItem なので 2 つ(Raw Source と Show Formatting Toolbar)。
+    let checks: Vec<usize> = code.match_indices("CheckMenuItem::with_id(").map(|(i, _)| i).collect();
+    assert_eq!(checks.len(), 2, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23) and View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5)");
+    let check_calls: Vec<&str> = checks.iter().map(|&at| &code[at..code[at..].find(')').unwrap() + at]).collect();
+    assert!(check_calls.iter().any(|c| c.contains("RAW_SOURCE_ITEM_ID")), "one CheckMenuItem is Raw Source: {check_calls:?}");
+    assert!(check_calls.iter().any(|c| c.contains("SHOW_FORMAT_TOOLBAR_ITEM_ID")), "the other CheckMenuItem is Show Formatting Toolbar: {check_calls:?}");
+    assert!(check_calls.iter().all(|c| !c.contains("THEME")), "neither Export nor a theme item is a CheckMenuItem: {check_calls:?}");
 }
 
 /// 2. Appearance = Light / Dark / System / ─ / Default / (一覧) / ─ / Export Default Theme… — 区切りと Export が末尾。

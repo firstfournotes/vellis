@@ -73,6 +73,17 @@ async fn handle_show_marks(
     app: &AppHandle,
     filter_drift: bool,
 ) -> Response {
+    // The marks sidebar is part of the current AI integration, hidden in the
+    // release build (requirements.md #84 契約5). The CLI of the same build
+    // already refuses `--marks` / `--changed`; a request that still arrives
+    // (another build's CLI) is answered without telling any window.
+    let enabled = crate::features::is_enabled(crate::features::AI_MARKS);
+    if let Err(message) = crate::features::require_with(enabled, "Marks") {
+        return Response::Error {
+            code: "NOT_AVAILABLE".into(),
+            message,
+        };
+    }
     let state = app.state::<AppState>();
     let label = {
         let wm = state.window_manager.lock().await;
@@ -149,7 +160,9 @@ async fn handle_open_path(
         .tabbing_identifier(&tab_key)
         // Match the default from `tauri.conf.json` (issue #16) so
         // IPC-spawned windows aren't smaller than first-launch ones.
-        .inner_size(1280.0, 800.0);
+        .inner_size(1280.0, 800.0)
+        // Let drags reach WKWebView (requirements.md #74 第3段 3-5, as in lib.rs).
+        .disable_drag_drop_handler();
     // Placed like File ▸ New Window: 24px down and to the right of the front
     // window, or centred when there is none (requirements.md #12 追補b 契約2).
     // The window-state plugin leaves it alone — it restores only `main`.

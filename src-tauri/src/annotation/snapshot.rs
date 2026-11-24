@@ -22,6 +22,7 @@
 
 use std::fs;
 use std::io;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -71,11 +72,24 @@ pub fn snapshot_id_for(now: DateTime<Utc>) -> String {
 }
 
 pub struct SnapshotManager<'a> {
-    /// Canonical absolute path of `<root>/.vellis/`.
-    vellis_dir: &'a Path,
-    /// Canonical absolute path of `<root>` (parent of vellis_dir).
+    /// The directory the snapshots live in: `<root>/.vellis/snapshots/` for
+    /// [`SnapshotManager::new`], or the app-data store of [`snapshot_store_dir`]
+    /// for [`SnapshotManager::at`]. Each snapshot is `<store_dir>/<id>/`.
+    store_dir: PathBuf,
+    /// Canonical absolute path of `<root>` (relative paths resolve against it).
     root_dir: PathBuf,
     retention: usize,
+    _borrow: PhantomData<&'a Path>,
+}
+
+/// Where the pre-save snapshots go when the folder you opened must stay
+/// untouched (requirements.md #74 (ag)・AC-74-44): under the app's data
+/// directory, one store per root —
+/// `<app_data>/snapshots/<first 16 hex digits of SHA-256(canonical_root)>/`.
+/// Pure: touches no file.
+pub fn snapshot_store_dir(app_data: &Path, canonical_root: &Path) -> PathBuf {
+    let hash = super::sha256_hex(&canonical_root.to_string_lossy());
+    app_data.join(SNAPSHOTS_DIRNAME).join(&hash[..16])
 }
 
 impl<'a> SnapshotManager<'a> {
@@ -84,10 +98,18 @@ impl<'a> SnapshotManager<'a> {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| vellis_dir.to_path_buf());
+        Self::at(&vellis_dir.join(SNAPSHOTS_DIRNAME), root_dir)
+    }
+
+    /// Snapshots kept directly under `store_dir` (`<store_dir>/<id>/`), with
+    /// relative paths resolved against `root_dir`. `new(vellis_dir)` is
+    /// `at(&vellis_dir.join("snapshots"), <parent of vellis_dir>)`.
+    pub fn at(store_dir: &Path, root_dir: PathBuf) -> Self {
         Self {
-            vellis_dir,
+            store_dir: store_dir.to_path_buf(),
             root_dir,
             retention: DEFAULT_RETENTION,
+            _borrow: PhantomData,
         }
     }
 
@@ -97,7 +119,7 @@ impl<'a> SnapshotManager<'a> {
     }
 
     fn snapshots_dir(&self) -> PathBuf {
-        self.vellis_dir.join(SNAPSHOTS_DIRNAME)
+        self.store_dir.clone()
     }
 
     /// Copy each entry of `relative_files` into a fresh `<vellis>/snapshots/<id>/`

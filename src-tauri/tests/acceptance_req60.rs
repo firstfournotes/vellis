@@ -346,9 +346,11 @@ fn menu_bar_orders_app_file_edit_view_go_window() {
         })
         .collect();
 
+    // 要件側更新(2026-11-17 仮・要件#74 第2段 2-3・契約8・棚卸し 3=req-74.md で事前承認): Format を Edit と View の間に
+    // (acceptance_req74_menu.rs が同じ列を固定する)。
     assert_eq!(
         labels,
-        ["Vellis", "File", "Edit", "View", "Go", "Window"],
-        "menu bar must order App(Vellis) / File / Edit / View / Go / Window (契約①・追補c)"
+        ["Vellis", "File", "Edit", "Format", "View", "Go", "Window"],
+        "menu bar must order App(Vellis) / File / Edit / Format / View / Go / Window (契約①・追補c・要件#74 契約8)"
     );
 }

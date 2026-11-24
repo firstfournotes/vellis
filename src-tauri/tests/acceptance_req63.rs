@@ -141,6 +141,10 @@ fn menu_zoom_const_names(code: &str) -> Vec<&str> {
 /// 要件側更新(2026-11-04・要件#80 契約 2・12 承認 1=req-80.md で事前承認・(r) 決定): 要件#80 が
 /// `view_tab_sep` の直後に **`reload_file_item`・`view_reload_sep`** を足した(acceptance_req80.rs が同じ列を
 /// 固定する)。項目数は 11 → 13。テスト名はそのまま=「要件#80 の 2 つを除き足していない」の意味に読み替える。
+///
+/// 要件側更新(2026-11-17 仮・要件#74 第2段 2-3・契約23・(ao)・棚卸し 3=req-74.md で事前承認): View ▸ Raw Source
+/// (`raw_source_item`・CheckMenuItem)を Toggle Full Width の直後に足した(acceptance_req74_menu.rs が同じ列を固定する)。
+/// 項目数は 13 → 14。それ以外の相対順はそのまま。
 #[test]
 fn view_menu_keeps_the_eight_entries_from_before_req63() {
     let code = menu_rs_code();
@@ -155,6 +159,9 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
         "view_reload_sep",
         "appearance_menu",
         "toggle_full_width_item",
+        "raw_source_item",
+        // 要件#74 第4段 4-2(2026-11-17 由谷の決定 4-5・棚卸し 3): View ▸ Show Formatting Toolbar は Raw Source の直後。14 → 15。
+        "show_format_toolbar_item",
         "view_chrome_sep",
         "zoom_in_item",
         "zoom_out_item",
@@ -164,7 +171,7 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
     ];
     assert_eq!(
         idents, expected,
-        "the View menu must hold exactly the 13 entries of requirement #62 追補b / #56 stage 1 / #80 in this order (found {idents:?})"
+        "the View menu must hold exactly the 15 entries of requirement #62 追補b / #56 stage 1 / #80 / #74 2-3 / #74 4-2 in this order (found {idents:?})"
     );
 }
 

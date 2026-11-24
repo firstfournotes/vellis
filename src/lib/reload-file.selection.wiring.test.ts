@@ -55,6 +55,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { windowState, type DocumentPayload, type Entry } from '../stores/window-state.svelte';
+import type { FileEditorHandle } from '../editor/file-editor';
+import { contentHash } from '$lib/document-edit';
 
 // ---------------------------------------------------------------------------
 // フィクスチャ
@@ -82,33 +84,76 @@ const FRESH = doc(DOC_URI, '# fresh\n', 2);
 function resetStore(): void {
 	windowState.applyRoot(ROOT, ROOT_ENTRIES, false);
 	windowState.clearDocument();
+	windowState.fileEditor = null;
+	face = null;
 }
 
-/** 編集に関わる 5 つの状態の写し(突き合わせ用)。 */
+
+/**
+ * 要件74 第2段 2-5(2026-11-17 仮・契約21・オーケストレーターの仮の承認=朝に由谷に確かめる): 今の編集の store の口
+ * (beginEdit / updateBuffer / editMode / editBuffer / endEdit)は撤去で消えるため、用意だけを新しい面の偽の handle
+ * (`windowState.fileEditor`=edit-guard の 2 本と同じ形)に置き換えた。見ている振る舞いの期待値は変えていない。
+ * `windowState.dirty` は面の dirty を映す(確定契約)。
+ */
+type FakeFace = FileEditorHandle & { setText(next: string): void };
+function fakeFace(uri: string, base: string): FakeFace {
+	let current = base;
+	let savedBase = base;
+	return {
+		kind: 'text',
+		uri,
+		readOnly: false,
+		get dirty() {
+			return current !== savedBase;
+		},
+		conflict: false,
+		notice: null,
+		text: () => current,
+		expectedHash: () => contentHash(savedBase),
+		markSaved(text: string) {
+			savedBase = text;
+			current = text;
+		},
+		applyFileChanged: () => 'apply',
+		keepMyEdits() {},
+		useFileOnDisk() {},
+		showSaveConflict() {},
+		reset(content: string) {
+			current = content;
+			savedBase = content;
+		},
+		preparePrint: async () => undefined,
+		setText(next: string) {
+			current = next;
+		},
+	};
+}
+let face: FakeFace | null = null;
+/** 編集に関わる状態の写し(突き合わせ用)= 面の handle(同一性)・面の dirty と文字列・lastSavedHash・externalRemoved。 */
 function editSnapshot() {
 	return {
-		editMode: windowState.editMode,
-		editBuffer: windowState.editBuffer,
+		face: windowState.fileEditor,
+		dirty: windowState.dirty,
+		text: windowState.fileEditor?.text() ?? null,
 		lastSavedHash: windowState.lastSavedHash,
-		externalChange: windowState.externalChange,
 		externalRemoved: windowState.externalRemoved,
 	};
 }
 
 /**
  * 同じ URI の文書を開いて編集中にする列(両方の当て方で同じに組む)。
- * beginEdit → updateBuffer(dirty)→ markSaved(lastSavedHash を持つ)→ 外部版を脇に置く(externalChange)。
+ * 面を載せる → 打つ(dirty)→ markSaved(lastSavedHash を持つ)→ また打つ(dirty)。
  */
 function enterEditingState(): void {
 	windowState.setDocument(OLD);
-	expect(windowState.beginEdit(), 'a.md は編集に入れる').toBe(true);
-	windowState.updateBuffer('# edited\n');
+	face = fakeFace(DOC_URI, OLD.content);
+	windowState.fileEditor = face;
+	face.setText('# edited\n');
+	face.markSaved('# saved\n');
 	windowState.markSaved('# saved\n');
-	windowState.updateBuffer('# edited again\n');
-	expect(windowState.applyFileChanged(doc(DOC_URI, '# from outside\n', 3))).toBe('external-conflict');
-	expect(windowState.editMode).toBe('edit');
+	face.setText('# edited again\n');
 	expect(windowState.dirty).toBe(true);
-	expect(windowState.externalChange).not.toBeNull();
+	expect(windowState.lastSavedHash).not.toBeNull();
 }
 
 beforeEach(() => {
@@ -188,19 +233,20 @@ describe('AC-80-19 (2): selectedTreeUri が null(選択は文書に従う)なら
 // ---------------------------------------------------------------------------
 
 describe('AC-80-19 (3): 編集状態は畳まない(setDocument の同じ URI の扱いと同じ)', () => {
-	it('編集中(dirty・外部版を脇に置いた状態)に同じ URI で applyReloadedText → editMode は edit のまま・editBuffer は編集中の中身のまま', () => {
+	it('編集中(dirty)に同じ URI で applyReloadedText → 面の handle はそのまま・面の文字列も編集中の中身のまま(store は面に触らない)', () => {
 		enterEditingState();
 		windowState.selectTreeItem(DIR);
 
 		windowState.applyReloadedText(FRESH);
 
-		expect(windowState.editMode).toBe('edit');
-		expect(windowState.editBuffer).toBe('# edited again\n');
+		expect(windowState.fileEditor).toBe(face);
+		expect(face?.dirty).toBe(true);
+		expect(face?.text()).toBe('# edited again\n');
 		expect(windowState.currentDocument).toEqual(FRESH);
 		expect(windowState.selectedTreeUri).toBe(DIR);
 	});
 
-	it('編集の 5 つの状態(editMode / editBuffer / lastSavedHash / externalChange / externalRemoved)が、同じ列を setDocument で当てたときと一致する', () => {
+	it('編集の状態(面の handle / dirty / 文字列 / lastSavedHash / externalRemoved)が、同じ列を setDocument で当てたときと一致する', () => {
 		enterEditingState();
 		windowState.setDocument(FRESH);
 		const viaSetDocument = editSnapshot();
@@ -210,22 +256,21 @@ describe('AC-80-19 (3): 編集状態は畳まない(setDocument の同じ URI �
 		windowState.applyReloadedText(FRESH);
 		const viaReloadedText = editSnapshot();
 
-		expect(viaReloadedText).toEqual(viaSetDocument);
+		expect({ ...viaReloadedText, face: viaReloadedText.face !== null }).toEqual({ ...viaSetDocument, face: viaSetDocument.face !== null });
 		// 突き合わせが空の一致(両方とも畳んだ)になっていないことを直に見る。
-		expect(viaReloadedText.editMode).toBe('edit');
-		expect(viaReloadedText.editBuffer).toBe('# edited again\n');
+		expect(viaReloadedText.face).not.toBeNull();
+		expect(viaReloadedText.dirty).toBe(true);
+		expect(viaReloadedText.text).toBe('# edited again\n');
 		expect(viaReloadedText.lastSavedHash).not.toBeNull();
-		expect(viaReloadedText.externalChange).not.toBeNull();
 	});
 
-	it('閲覧中(view)に当てても view のまま・editBuffer は null のまま', () => {
+	it('面が無い(dirty でない)ときに当てても面は生まれず dirty でない', () => {
 		windowState.setDocument(OLD);
 		windowState.selectTreeItem(DIR);
 
 		windowState.applyReloadedText(FRESH);
 
-		expect(windowState.editMode).toBe('view');
-		expect(windowState.editBuffer).toBeNull();
+		expect(windowState.fileEditor).toBeNull();
 		expect(windowState.dirty).toBe(false);
 	});
 });

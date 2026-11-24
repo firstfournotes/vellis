@@ -865,7 +865,9 @@ describe('ssh root gates (#16 ⑤ #17 ⑥ #18 ⑦ #19 ⑦ #22 ④ #28 ⑤ #29 �
 		expect(state.buttons).toEqual([]);
 	});
 
-	it('#48 ⑥: Edit (menu and double-click) does nothing on an ssh document — stays read-only, no dialog', async () => {
+	// 要件74 2-5: Edit ▸ Edit (`menu_edit`) is gone; an ssh text opens as a read-only CodeMirror face (契約3・4: editable=false),
+	// so the double-click and Command + S still change nothing.
+	it('#48 ⑥: the ssh document is read-only — the face is not editable, a double-click changes nothing, no save, no dialog', async () => {
 		await ensureExpanded(uri(gateDir), uri(path.join(gateDir, 'plain.txt')));
 		await clickExplorerRow(uri(path.join(gateDir, 'plain.txt')));
 		await waitViewerText('plain text over ssh');
@@ -873,10 +875,12 @@ describe('ssh root gates (#16 ⑤ #17 ⑥ #18 ⑦ #19 ⑦ #22 ④ #28 ⑤ #29 �
 			browser.execute(() => ({
 				editDone: !!document.querySelector('[data-testid="edit-done"]'),
 				editSource: !!document.querySelector('[data-testid="edit-source"]'),
+				// The read-only CodeMirror face carries contenteditable="false" on .cm-content (要件74 契約3); "true" / "" would be an editor.
 				contentEditable: Array.from(document.querySelectorAll('[contenteditable]')).map((e) => e.getAttribute('contenteditable')),
+				face: !!document.querySelector('article.viewer [data-testid="code-editor"] .cm-content'),
+				dirty: !!document.querySelector('article.viewer [data-testid="unsaved-badge"]'),
 				textStart: (document.querySelector('article.viewer .markdown-body')?.textContent ?? '').slice(0, 40),
 			}));
-		await emitMenu('menu_edit');
 		await browser.pause(800);
 		const afterMenu = await editState();
 		await browser.execute(() => {
@@ -898,6 +902,7 @@ describe('ssh root gates (#16 ⑤ #17 ⑥ #18 ⑦ #19 ⑦ #22 ④ #28 ⑤ #29 �
 			expect(s.editDone).toBe(false);
 			expect(s.editSource).toBe(false);
 			expect(s.contentEditable.filter((v) => v === 'true' || v === '')).toEqual([]);
+			expect(s.dirty).toBe(false);
 		}
 		expect(saves.length).toBe(0);
 		expect(rec.dialogs).toEqual([]);

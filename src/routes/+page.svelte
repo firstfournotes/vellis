@@ -20,6 +20,7 @@
 	import UpdateBanner from '../components/UpdateBanner.svelte';
 	import { invoke } from '$lib/ipc';
 	import { listen } from '$lib/events';
+	import { installFileDropGuard } from '$lib/file-drop-guard';
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 	// `~` の展開(要件#60 契約②・追補c)。`core:default` に含まれる口なので
@@ -28,6 +29,9 @@
 	import { windowState, type DocumentPayload, type Entry } from '../stores/window-state.svelte';
 	import { marksStore } from '../stores/marks.svelte';
 	import { featureFlags } from '$lib/flags.svelte';
+	import { legacyUi } from '$lib/legacy-features';
+	import { saveFileEditor } from '../editor/file-editor';
+	import { MENU_FORMAT_EVENT, runFormatCommand, type FormatItemId } from '../editor/commands';
 	import { detectFileType, renderForDisplay, type FileType } from '$lib/file-type';
 	import { openCommandFor, openForDisplay, openInitialDocument } from '$lib/open-document';
 	import { imageSrcWithVersion } from '$lib/image-watch';
@@ -68,7 +72,6 @@
 	import { openInNewWindow, openInNewWindowFailedMessage } from '$lib/open-in-new-window';
 	import { newTabFailedMessage, registerNewTabListener } from '$lib/new-tab';
 	import type { NewWindowAction } from '$lib/context-menu';
-	import { MENU_EDIT_EVENT, shouldSaveOnCommand } from '$lib/document-edit';
 	import { MENU_FIND_EVENT } from '$lib/find-in-document';
 	import { MENU_FIND_IN_FOLDER_EVENT, shouldShowFindInFolder } from '$lib/find-in-folder';
 	import { MENU_GO_TO_EVENT, revealPath } from '$lib/go-to-path';
@@ -83,13 +86,14 @@
 	import {
 		createFileReloader,
 		registerReloadFileListener,
+		setReloadFileRequestHandler,
 		viewerContextMenuMode
 	} from '$lib/reload-file';
 	import { contextMenu } from '../stores/context-menu.svelte';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { registerRootSwitchRequestListener, switchRootConfirmed } from '$lib/root-switch-request';
 	import { handleCloseRequested } from '$lib/close-window';
-	import { MENU_SAVE_EVENT, saveDocument } from '$lib/save-document';
+	import { MENU_SAVE_EVENT } from '$lib/save-document';
 	import { DEFAULT_ZOOM, isZoomTarget, loadZoom } from '$lib/zoom';
 	import {
 		loadExplorerZoom,
@@ -167,6 +171,8 @@
 	 * token values for print on its own.
 	 */
 	async function redrawCodeHighlightForPrint(): Promise<void> {
+		// 要件#74 契約17: 新しい面は、刷る直前に今の文字列を今の描画(Shiki)にしたものを刷る。
+		await windowState.fileEditor?.preparePrint().catch(() => {});
 		printingCode = true;
 		const before = codeTheme;
 		redrawCodeHighlight();
@@ -233,6 +239,15 @@
 			for (const off of unlisteners) off();
 		};
 	});
+
+	// 要件#74 第3段 3-5: drags reach the page now (Tauri's drag-drop handler is off), so a file
+	// dropped anywhere in the window must not replace its content. The guard's remover is the cleanup.
+	onMount(() => installFileDropGuard(window));
+
+	// 要件#84 契約3: 今の AI 連携(ai)を出すか。判定はここの 1 回だけで、
+	// 下のメニューのイベント・マークの付け直し・show_marks・Viewer の props・マーク一覧と
+	// 差分表示と指示のダイアログの描画はすべてこれを見る。フラグが届く前は閉じた側((r))。
+	const legacy = $derived(legacyUi((name) => featureFlags.isEnabled(name)));
 
 	let showMarks = $state(false);
 	let markFilter = $state<MarkFilterMode>('all');
@@ -444,7 +459,6 @@
 	function handleMenuFind() {
 		// 要件#83 契約15: Dashboard の間は探す文書が画面に無い。
 		if (rootPicker.open) return;
-		if (windowState.editMode !== 'view') return;
 		const doc = windowState.currentDocument;
 		if (!doc || detectFileType(doc.uri) !== 'html') return;
 		htmlFindOpen = true;
@@ -530,7 +544,7 @@
 			void tick().then(() => {
 				if (windowState.currentDocument?.uri !== pending.uri) return;
 				// html の閲覧中は Viewer が居ないので、⌘F と同じ回り道(複製面)へ切り替える。
-				if (windowState.editMode === 'view' && detectFileType(pending.uri) === 'html') {
+				if (detectFileType(pending.uri) === 'html') {
 					htmlFindOpen = true;
 				}
 				findInitialQuery = pending.query;
@@ -867,53 +881,13 @@
 		};
 	});
 
-	// --- 明示保存と編集の関門(要件#48) ----------------------------------
+	// --- 明示保存(要件#48 → 要件#74 契約14) ------------------------------
 	// ⌘S / File > Save。Rust 側はフォーカス中の窓へ「保存したい」と投げるだけで、
-	// 何を保存するか(編集中か・バッファの中身)を知っているのはこの窓
-	// (Open… / Print… / ズームと同じ分担)。自動保存は無い(契約⑤)。
-	//
-	// 保存するかは `shouldSaveOnCommand` が決める(追補i): 編集中で、かつ変更がある
-	// か、外部で削除された印(追補g)が立っているとき。印があれば dirty でなくても
-	// 同じ uri に書き直す(帯の `Save` と同じ経路・成功すれば印が消える)。閲覧中の
-	// ⌘S と、未変更かつ印の無い編集中の ⌘S は何もしない — 同じ内容を書き戻せば
-	// mtime だけが動き、監視・スナップショット・drift 検知が空振りする。
+	// 何を保存するかを知っているのはこの窓の面(Open… / Print… / ズームと同じ分担)。
+	// 自動保存は無い(契約⑤)。面が無い文書(画像・html・SSH など)では何もしない。
+	// 面の保存は照合つきで、dirty か削除の印があるときだけ書く(`saveFileEditor`)。
 	async function saveCurrentEdits() {
-		const doc = windowState.currentDocument;
-		const save = shouldSaveOnCommand({
-			mode: windowState.editMode,
-			dirty: windowState.dirty,
-			externalRemoved: windowState.externalRemoved
-		});
-		if (!doc || !save) return;
-		const buffer = windowState.editBuffer;
-		if (buffer === null) return;
-		try {
-			await saveDocument(doc.uri, buffer);
-		} catch (err) {
-			alert(`Could not save: ${err}`);
-		}
-	}
-
-	// Edit メニュー「Edit」(⌘E)= 閲覧⇄編集のトグル(契約③・追補b)。本文の
-	// ダブルクリックと並ぶもう1つの明示操作で、html 種別にとっては唯一の入口
-	// (閲覧中の html は HtmlViewer の iframe の中にあり、本文のダブルクリックが
-	// アプリまで届かない)。編集に入れない文書では beginEdit が false を返して
-	// 何も起きない。
-	async function toggleEditMode() {
-		// 要件#83 契約15 (y): Dashboard の間は後ろの文書を編集の面にしない(Save だけは効く)。
-		if (rootPicker.open) return;
-		if (windowState.editMode !== 'edit') {
-			windowState.beginEdit();
-			return;
-		}
-		// 閲覧へ戻る=編集バッファを捨てる。保存していない変更があるときだけ聞く
-		// (`confirmDiscardEdits` は保存 / 破棄まで済ませてから編集を畳む。
-		// キャンセルなら編集中のまま)。
-		if (windowState.dirty) {
-			await confirmDiscardEdits();
-			return;
-		}
-		windowState.endEdit();
+		if (windowState.fileEditor) await saveFileEditor(windowState.fileEditor);
 	}
 
 	// 購読の解除があるので await を挟まない専用の onMount に分けている。
@@ -921,11 +895,15 @@
 		let unlisten: (() => void) | null = null;
 		let disposed = false;
 		void Promise.all([
+			// 要件#74 契約21: 編集は通常の機能(フラグなし)。Save は面があれば効く。
 			listen(MENU_SAVE_EVENT, () => {
 				void saveCurrentEdits();
 			}),
-			listen(MENU_EDIT_EVENT, () => {
-				void toggleEditMode();
+			// 要件#74 契約8: Format ▸ の項目。前面の面が Markdown の編集面のときだけ当たる(raw・コード・読み取り専用・
+			// HTML では runFormatCommand が何もしない)。Dashboard の間は後ろの面に当てない(要件#83 契約15)。
+			listen(MENU_FORMAT_EVENT, (e) => {
+				if (rootPicker.open) return;
+				runFormatCommand(e.payload as FormatItemId, windowState.fileEditor);
 			}),
 			// 要件#54 契約①: html の閲覧中だけの回り道(上の handleMenuFind)。
 			// markdown / text の ⌘F は Viewer が自分で受ける。
@@ -1024,7 +1002,14 @@
 		current: () => (rootPicker.open ? null : (windowState.currentDocument?.uri ?? null)),
 		confirm: confirmDiscardEdits,
 		open: openForDisplay,
-		applyText: (doc) => windowState.applyReloadedText(doc),
+		applyText: (doc) => {
+			windowState.applyReloadedText(doc);
+			// 要件#74 (ak): 未保存の確認で Don't Save を選んだ後なので、残っている未保存の編集ごと面の文書モデルを
+			// 読み直した中身で作り直す(履歴 0・dirty でない)。store の applyReloadedText は dirty の面を畳まない
+			// (AC-80-19 (3))。
+			const face = windowState.fileEditor;
+			if (face && face.uri === doc.uri && face.dirty) face.reset(doc.content);
+		},
 		bumpBinary: bumpBinaryVersion,
 		notify: (message) => alert(message),
 		changeStamp: () => documentChangeStamp,
@@ -1048,9 +1033,12 @@
 			if (disposed) off();
 			else unlisten = off;
 		});
+		// 要件#74 第2段 2-6: 編集面の右クリックの Reload File も同じ実行列に委ねる。
+		setReloadFileRequestHandler((target) => void fileReloader.reload(target));
 		return () => {
 			disposed = true;
 			unlisten?.();
+			setReloadFileRequestHandler(null);
 		};
 	});
 
@@ -1465,8 +1453,9 @@
 	onMount(async () => {
 		// Populate the feature-flag store from the shared get_build_info()
 		// cache (single IPC). Fire-and-forget — fail-safe defaults hold
-		// until it resolves (feature-flags.md §3.5).
-		void featureFlags.init();
+		// until it resolves (feature-flags.md §3.5). Only `--marks` /
+		// `--changed` below wait for it (要件#84).
+		const flagsReady = featureFlags.init();
 
 		// Single round-trip: get root_uri + entries + initial document URI.
 		// 要件#71 追補b(1)(backlog 278): root そのものを開けない(消えた・ssh に届かない)と
@@ -1499,8 +1488,12 @@
 			windowState.root = init.root_uri;
 			windowState.entries = init.entries;
 			windowState.version = init.version;
-			if (init.show_marks) showMarks = true;
-			if (init.show_changed) {
+			// 要件#84 契約5: マーク一覧は今の AI 連携(配布版では CLI が --marks / --changed を
+			// 断るので来ないが、ここでも閉じる)。起動時の 1 回きりの指示なので、頼まれたときだけ
+			// フラグが届くのを待ってから見る(開発版で取りこぼさない)。
+			if (!legacy.ai && (init.show_marks || init.show_changed)) await flagsReady.catch(() => {});
+			if (legacy.ai && init.show_marks) showMarks = true;
+			if (legacy.ai && init.show_changed) {
 				showMarks = true;
 				markFilter = 'drift';
 			}
@@ -1622,6 +1615,8 @@
 		// this to the active window with `{ filter_drift }` set
 		// (`docs/ai-collab.md` §9.1).
 		await listen<{ filter_drift: boolean } | undefined>('show_marks', (e) => {
+			// 要件#84 契約5: Rust の handle_show_marks も送らないが、ここでも閉じる(二重)。
+			if (!legacy.ai) return;
 			showMarks = true;
 			markFilter = e.payload?.filter_drift ? 'drift' : 'all';
 		});
@@ -1681,7 +1676,11 @@
 	// covers all three because file_changed updates it via setDocument.
 	// Backend short-circuits on hash match so opening an untouched file
 	// is a cheap no-op (`docs/ai-collab.md` §7).
+	//
+	// 要件#84 契約5: 今の AI 連携が隠れているビルドでは呼ばない — 付け直しは local の root に
+	// `.vellis/` を作る(開いたフォルダに何も書かない)。
 	$effect(() => {
+		if (!legacy.ai) return;
 		const doc = windowState.currentDocument;
 		if (!doc || !windowState.root) return;
 		marksStore.rebindForFile({
@@ -1789,6 +1788,20 @@
 	<symbol id="i-file-code" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5M10.5 11.5l-2 2 2 2M13.5 11.5l2 2-2 2"/></symbol>
 	<symbol id="i-file-pdf" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/><rect x="8" y="12" width="8" height="4.5" rx="1"/></symbol>
 	<symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 15.5l-4.5-4.5-8.5 8.5"/></symbol>
+	<symbol id="i-bold" viewBox="0 0 24 24"><path d="M7.5 5h5.25a3.5 3.5 0 0 1 0 7H7.5zM7.5 12h6.25a3.5 3.5 0 0 1 0 7H7.5z" stroke-width="2.2"/></symbol>
+	<symbol id="i-italic" viewBox="0 0 24 24"><path d="M10.5 5H18M6 19h7.5M14.25 5l-4.5 14"/></symbol>
+	<symbol id="i-strike" viewBox="0 0 24 24"><path d="M5 12h14M16.5 7.5c-.6-1.6-2.2-2.5-4.4-2.5-2.7 0-4.3 1.4-4.3 3.2 0 1.3.8 2.3 2.5 3M7.5 16.2C8 18 9.7 19 12.2 19c2.9 0 4.6-1.4 4.6-3.3 0-.6-.1-1.1-.4-1.5"/></symbol>
+	<symbol id="i-code" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></symbol>
+	<symbol id="i-chain" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></symbol>
+	<symbol id="i-list-ul" viewBox="0 0 24 24"><circle cx="5" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="5" cy="17" r="1.2" fill="currentColor" stroke="none"/><path d="M9.5 7H20M9.5 12H20M9.5 17H20"/></symbol>
+	<symbol id="i-list-ol" viewBox="0 0 24 24"><path d="M10.5 7H20M10.5 12H20M10.5 17H20"/><path d="M4.2 5.2L5.5 4.5v4" stroke-width="1.5"/><path d="M4 11.2a1.3 1.3 0 0 1 2.5.4c0 .8-2.5 2-2.5 2h2.6" stroke-width="1.5"/><path d="M4.1 16h2.3l-1.3 1.3a1.2 1.2 0 1 1-1 2" stroke-width="1.5"/></symbol>
+	<symbol id="i-task" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="6" height="6" rx="1.5"/><path d="M5 7.6l1.2 1.2L8.2 6.6"/><rect x="3.5" y="13.5" width="6" height="6" rx="1.5"/><path d="M13 7.5h7.5M13 16.5h7.5"/></symbol>
+	<symbol id="i-quote" viewBox="0 0 24 24"><path d="M4.5 5v14M9.5 7.5h10M9.5 12h10M9.5 16.5h6"/></symbol>
+	<symbol id="i-table" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9.5h18M3 14.5h18M9.5 4.5v15"/></symbol>
+	<symbol id="i-codeblock" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M10 9.5l-2.5 2.5 2.5 2.5M14 9.5l2.5 2.5-2.5 2.5"/></symbol>
+	<symbol id="i-footnote" viewBox="0 0 24 24"><path d="M4.5 18.5h9M4.5 14h12"/><path d="M17.5 4.5l1.8-1v6" stroke-width="1.5"/></symbol>
+	<symbol id="i-clear" viewBox="0 0 24 24"><path d="M6 5.5h12M12 5.5L9 18.5M14.5 14.5l5 5M19.5 14.5l-5 5"/></symbol>
+	<symbol id="i-format" viewBox="0 0 24 24"><path d="M7 15.5l5-11 5 11M8.9 11.5h6.2"/><path d="M5 19.5h14"/></symbol>
 	<symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="M16 10.5l5-3v9l-5-3"/></symbol>
 	<symbol id="i-audio" viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 10.5v3"/></symbol>
 	<symbol id="i-cube" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol>
@@ -1927,11 +1940,9 @@
 					{#if windowState.currentDocument}
 						<!--
 							srcdoc がある=HTML ファイル(要件#8)。生の content は {@html} 経路に載せない。
-							要件#48 契約②: 編集中(ソース編集モード)だけは HtmlViewer へ回さない —
-							編集するのはレンダリング結果ではなく RAW なので、`<pre contenteditable>` を
-							持つ Viewer(下の {:else})へ落とす。Esc / 「編集を終える」で戻ればここへ戻る。
+							要件#74 契約21: HTML は要件79 が入るまで読むだけ(検索の間だけ Viewer の複製面)。
 						-->
-						{#if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedSrcdoc !== null && windowState.editMode === 'view' && !htmlFindOpen}
+						{#if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedSrcdoc !== null && !htmlFindOpen}
 							<HtmlViewer srcdoc={windowState.renderedSrcdoc} />
 							<!-- imageSrc がある=画像ファイル(要件#16)。srcdoc と同じ形の分岐 -->
 						{:else if windowState.renderedUri === windowState.currentDocument.uri && windowState.renderedImageSrc !== null}
@@ -2050,6 +2061,8 @@
 								{findInitialIndex}
 								onFindOpenChange={handleFindOpenChange}
 								{goToOpen}
+								aiTools={legacy.ai}
+								{codeTheme}
 							/>
 						{/if}
 					{:else}
@@ -2057,7 +2070,7 @@
 					{/if}
 				</div>
 			</div>
-			{#if showMarks && windowState.root}
+			{#if legacy.ai && showMarks && windowState.root}
 				<MarkList
 					rootUri={windowState.root}
 					filter={markFilter}
@@ -2072,19 +2085,22 @@
 	<StatusBar />
 </div>
 
-<InstructionDialog
-	open={dialog.open}
-	preview={dialog.anchor?.selectedMarkdown ?? ''}
-	onSubmit={submitInstruction}
-	onCancel={cancelInstruction}
-/>
+<!-- 要件#84 契約5: 指示のダイアログと差分表示は今の AI 連携(配布版では描かない)。 -->
+{#if legacy.ai}
+	<InstructionDialog
+		open={dialog.open}
+		preview={dialog.anchor?.selectedMarkdown ?? ''}
+		onSubmit={submitInstruction}
+		onCancel={cancelInstruction}
+	/>
 
-<DiffView
-	open={diffViewState.open}
-	rootUri={windowState.root}
-	mark={diffViewState.mark}
-	onClose={() => (diffViewState = { open: false, mark: null })}
-/>
+	<DiffView
+		open={diffViewState.open}
+		rootUri={windowState.root}
+		mark={diffViewState.mark}
+		onClose={() => (diffViewState = { open: false, mark: null })}
+	/>
+{/if}
 
 <style>
 	/*

@@ -7,6 +7,7 @@
  * 枠 `outline: 2px solid #93c5fd`)が `print-color-adjust: exact` で紙に残る。
  * (要件#56 第2段・2026-11-03 要件側更新: 印の色は `#93c5fd` の直書きから `var(--color-focus-ring)` に
  * 変わる=契約 2 のハードコード色ゼロ。下の (c) の期待値も同じ。規則の数・セレクタ・置き場の判定は不変)
+ * (2026-11-20 要件側更新: (c) は書き換え=下の「判定の仕方 6」)
  *
  * 判断(要件側): 紙に載せるのは今のまま「画面の本文」(ソース編集中はソース・ブロック編集中は
  * 編集中の中身=要件#48 契約②)。編集中の**印だけ**を紙から消す。
@@ -15,8 +16,17 @@
  * 1. `src/styles/print.css` の `@media print` で、Markdown / テキストの本文の編集中の印
  *    (ソース編集の縦帯・ブロック編集の枠)を消す(`box-shadow: none`・`outline: none`)
  * 2. 不変: 画面の印(印刷のとき以外は今のまま)・紙に載る中身・ほかの印刷の規則
+ *    (2026-11-20 要件側更新・由谷の決定: 画面の印の規則 2 つは、要件#74 の撤去の続きとして Viewer.svelte から消す。
+ *    「画面の印は今のまま」は外れ、AC-38-追l (c) は「`Viewer.svelte` の `<style>` に、編集の要素に outline /
+ *    box-shadow を付ける規則が無い」に書き換わった。print.css の打ち消し= (a)(b) は残す。記録は req-38.md 追補l の
+ *    「要件側の更新(2026-11-20)」と req-74.md の状態節(2026-11-20))
  *
- * ## 画面の印の規則(Viewer.svelte の `<style>`・本テストが比較の基準にするもの)
+ * ## 撤去前の画面の印の規則((a)(b) が比較の基準にするもの・本テストの定数で持つ)
+ * 2026-11-20 まで Viewer.svelte の `<style>` にあった規則。要件48 契約②(`<pre>` のソース編集)と要件49(ブロック
+ * 編集)は要件#74 で撤去済みで、後者の規則が要件#74 の編集面(`.markdown-body` の中の ProseMirror の面の根=
+ * contenteditable="true")全体を青い枠で囲んでいたため、2 つとも消す。(a)(b) は Viewer.svelte を読まず、下の
+ * セレクタと詳細度を本テストの定数(`VIEWER_SOURCE_EDIT_SELECTOR` / `VIEWER_BLOCK_EDIT_SELECTOR` /
+ * `SVELTE_SCOPE_CLASS`)で持つ(= Viewer から消しても (a)(b) の判定は変わらない)。
  * - ソース編集: `.vellis-plaintext[contenteditable='true'] { outline: none; box-shadow: inset 3px 0 0 var(--color-focus-ring) }`
  *   (要件#48 契約②。要素は `.markdown-body` の中の `<pre class="vellis-plaintext" contenteditable="true">`
  *   = Viewer.svelte の sourceEditing 分岐)
@@ -37,9 +47,9 @@
  *    文言どおり値は `none` だけを認める。`outline: 0` 等は数えない)。セレクタリストは括弧の外の
  *    カンマだけで分け、`@page` などの at-rule はセレクタとして数えない
  * 2. アプリの実際の入れ子を再現した DOM を JSDOM で組み(`buildAppDom`。根拠は同関数のコメント)、
- *    編集中の要素を `.markdown-body` の中に置く。各要素が **Viewer.svelte の画面の印のセレクタ
- *    (`:global()` を外したもの)に当たる**ことを前提として確かめる(DOM が Viewer の印の対象を
- *    正しく再現していることの自己検査)
+ *    編集中の要素を `.markdown-body` の中に置く。各要素が **撤去前の Viewer.svelte の画面の印のセレクタ
+ *    (本テストの定数・`:global()` を外したもの)に当たる**ことを前提として確かめる(DOM が撤去前の
+ *    Viewer の印の対象を正しく再現していることの自己検査)
  * 3. (a) 要素**自身**が消す規則に当たる(`box-shadow` / `outline` は継承しないので祖先では足りない):
  *    - ソース編集の `<pre>`: `box-shadow: none` の規則と `outline: none` の規則の両方
  *    - ブロック編集の要素(直下の `<p>`・フェンスの `<pre>`・`<blockquote>` の中の `<p>`): `outline: none` の規則
@@ -50,9 +60,17 @@
  *    静的には保証できないので **等しいは不合格**
  * 5. 契約 2(印だけを消す・本文は不変): 編集中でない `<p>`(contenteditable 無し)には消す規則が
  *    当たらない(文書の HTML が持つ outline / box-shadow を紙から奪わない)
- * 6. (c) Viewer.svelte の `<style>` で、編集中の要素に当たり `outline` / `box-shadow` を宣言する規則は
- *    上の 2 つ **だけ**で、セレクタ・宣言(値・`!important` 無し)が今のまま・at-rule の中に無い
- *    (= 画面の印の規則は変わらない。印刷の直しを Viewer 側に足していないことも兼ねる)
+ * 6. (c)(2026-11-20 要件側更新)Viewer.svelte の `<style>` に、編集の要素に `outline` / `box-shadow` を
+ *    付ける規則が無い。
+ *    - 編集の要素= 撤去前の印の対象(上の 2 の DOM: ソース編集の `<pre>`・ブロック編集の要素)と、要件#74 の
+ *      編集面(`appendEditSurfaces`: MarkdownEditor の ProseMirror の面・raw の RawSourceEditor の面・CodeEditor
+ *      の面の、容れ物・エディタの根・中身)
+ *    - 付ける= 値が `none` 以外の `outline` / `box-shadow` の宣言(`!important` の有無は問わない。`none` は枠を
+ *      消す側なので数えない)
+ *    - at-rule の中(`@media print` を含む)も数える。`@keyframes` の中は数えない
+ *    - `:focus` / `:focus-visible` / `:focus-within` / `:hover` / `:active` は、その状態にあるとみなして当てる
+ *      (contenteditable="true" の要素にフォーカスが乗り、その祖先は focus-within)。擬似要素(`::before` など)は
+ *      その元の要素に当てる
  * 7. セレクタを jsdom のセレクタエンジンが解釈できず `matches` が例外を投げたら、それは**失敗**
  *    (黙って飛ばさない)。消す規則は jsdom で検査できる書き方にすること
  *
@@ -66,11 +84,27 @@
  * (a) の 4 件と (b) の 4 件が「当たる規則が無い」で赤。(c)・契約 2・自己検査は不変条件・判定器の
  * 検査なので最初から緑。
  *
+ * (2026-11-20 追記・(c) の書き換え後)Viewer.svelte に撤去前の 2 つの規則が残っているので (c) が赤:
+ * `.vellis-plaintext[contenteditable='true'] { box-shadow: inset 3px 0 0 … }` がソース編集の `<pre>` に、
+ * `.markdown-body :global([contenteditable='true']) { outline: 2px solid … }` がソース編集の `<pre>`・ブロック
+ * 編集の要素と、要件#74 の編集面の根(ProseMirror の根・CodeMirror の `.cm-content` 2 つ)に当たる。2 つを
+ * 消すと緑。(c) の判定器の自己検査は最初から緑。(a)(b)・契約 2・既存の自己検査は Viewer.svelte を読まない
+ * ので、消しても緑のまま。
+ *
  * ## 判断の記録(test-writer 2026-10-20)
  * - (a) は「Viewer.svelte で印を付けているセレクタと同じもの」を、セレクタ文字列の一致ではなく
  *   **同じ要素に当たるか**で判定する(`:global()` は print.css に書けないので文字列一致は不可能。
  *   書き方は実装裁量)
  * - ブロック編集の要素の box-shadow は Viewer が触っていないので要求しない(付いていても可)
+ *
+ * ## 判断の記録(test-writer 2026-11-20・(c) の書き換え)
+ * - (a)(b) はもともと Viewer.svelte を読まない(比べる基準のセレクタと詳細度はテストの定数)。Viewer から規則を
+ *   消しても (a)(b) は成り立つので、定数の注記と冒頭の説明だけを直した(判定・テスト名・表は不変)
+ * - (c) の編集の要素には、撤去前の印の対象(ソース編集の `<pre>`・ブロック編集の要素)も残す(消した規則が
+ *   同じ形で戻るのを拾うため)。要件#74 の編集面は `.markdown-body` の中に置く(Viewer.svelte の本文の容れ物の
+ *   中= アプリの入れ子のまま)
+ * - 本文の容れ物(Viewer の `.markdown-body` 自身)は (c) の「編集の要素」に入れない(AC の文言は編集の要素)。
+ *   容れ物の枠も含めた再発防止は `src/components/Viewer.surface-frame.wiring.test.ts` が判定する
  *
  * @vitest-environment jsdom
  */
@@ -83,7 +117,11 @@ const REPO_ROOT = resolve(__dirname, '../..');
 const PRINT_CSS_PATH = resolve(REPO_ROOT, 'src/styles/print.css');
 const VIEWER_SVELTE_PATH = resolve(REPO_ROOT, 'src/components/Viewer.svelte');
 
-/** Viewer.svelte が画面の印を付けている規則(原文のセレクタ。要件#48 契約②/要件#49 契約①)。 */
+/**
+ * 撤去前の Viewer.svelte が画面の印を付けていた規則(原文のセレクタ。要件#48 契約②/要件#49 契約①)。
+ * 2026-11-20 に Viewer.svelte から撤去(AC-38-追l (c) の要件側更新)。(a)(b) の比較の基準として本テストの中に持つ
+ * (Viewer.svelte は読まない)。
+ */
 const VIEWER_SOURCE_EDIT_SELECTOR = ".vellis-plaintext[contenteditable='true']";
 const VIEWER_BLOCK_EDIT_SELECTOR = ".markdown-body :global([contenteditable='true'])";
 
@@ -740,59 +778,213 @@ describe('print.css — 消す規則は編集中でない本文に当たらな�
 });
 
 // ---------------------------------------------------------------------------
-// AC-38-追l (c) — Viewer.svelte の画面の印の規則は変わらない
+// AC-38-追l (c)(2026-11-20 要件側更新)— Viewer.svelte の <style> に、編集の要素に outline / box-shadow を
+// 付ける規則が無い
 // ---------------------------------------------------------------------------
 
-type ViewerMarkRule = { selector: string; atRules: string[]; declarations: Decl[] };
+/** 枠になる宣言の prop(値が none 以外なら「付ける」)。 */
+const FRAME_PROPS: readonly string[] = ['outline', 'box-shadow'];
 
-function sortDecls(decls: Decl[]): Decl[] {
-	return [...decls].sort((a, b) => a.prop.localeCompare(b.prop));
+/** `none`(`!important` 付きも可)。枠を消す側の値。 */
+const NONE_VALUE = /^none(\s*!\s*important)?$/i;
+
+/** テストだけが付ける属性(jsdom はフォーカス・hover の状態を持たないので、状態の擬似クラスをこの属性に置き換えて当てる)。 */
+const FOCUS_ATTR = 'data-vellis-test-focus';
+const FOCUS_WITHIN_ATTR = 'data-vellis-test-focus-within';
+/** どの要素にも付けない属性(`:not([…])` で「常に当たる」を表す)。 */
+const NEVER_ATTR = 'data-vellis-test-never';
+
+/**
+ * 状態の擬似クラスを「その状態にある」とみなす形に置き換える。
+ * - `:focus` / `:focus-visible` → フォーカスの乗る要素(`FOCUS_ATTR`)
+ * - `:focus-within` → その要素と祖先(`FOCUS_WITHIN_ATTR`)
+ * - `:hover` / `:active` → どの要素にも当たりうる(`:not([NEVER_ATTR])` = 常に真)
+ */
+function assumeUserStates(selector: string): string {
+	return selector
+		.replace(/:focus-visible(?![-\w])/g, `[${FOCUS_ATTR}]`)
+		.replace(/:focus-within(?![-\w])/g, `[${FOCUS_WITHIN_ATTR}]`)
+		.replace(/:focus(?![-\w])/g, `[${FOCUS_ATTR}]`)
+		.replace(/:(hover|active)(?![-\w])/g, `:not([${NEVER_ATTR}])`);
 }
 
-/** 今の画面の印の規則(原文のセレクタ・宣言。順序は問わない)。 */
-const EXPECTED_VIEWER_MARK_RULES: ViewerMarkRule[] = [
-	{
-		selector: VIEWER_SOURCE_EDIT_SELECTOR,
-		atRules: [],
-		declarations: sortDecls([
-			{ prop: 'outline', value: 'none' },
-			{ prop: 'box-shadow', value: 'inset 3px 0 0 var(--color-focus-ring)' },
-		]),
-	},
-	{
-		selector: VIEWER_BLOCK_EDIT_SELECTOR,
-		atRules: [],
-		declarations: sortDecls([
-			{ prop: 'outline', value: '2px solid var(--color-focus-ring)' },
-			{ prop: 'outline-offset', value: '2px' },
-			{ prop: 'border-radius', value: '2px' },
-		]),
-	},
-];
+const PSEUDO_ELEMENT = /::[-\w]+(\([^()]*\))?|:(?:before|after|first-line|first-letter)(?![-\w])/gi;
 
-describe('Viewer.svelte — 画面の印の規則は変わらない(要件#38 追補l・AC-38-追l (c))', () => {
-	test('(c) 編集中の要素に当たり outline / box-shadow を宣言する規則は今の 2 つだけで、セレクタ・宣言・置き場が同じ', () => {
-		const dom = buildAppDom();
-		const editing = EDIT_CASES.map(([, key]) => dom[key]);
-		const found: ViewerMarkRule[] = [];
-		for (const rule of rulesOf(viewerStyleContents())) {
-			const declarations = declarationsOf(rule.body);
-			if (!declarations.some((d) => RESET_PROPS.includes(d.prop.toLowerCase() as ResetProp))) continue;
-			const selectors = splitSelectorList(rule.selector);
-			const hits = selectors.some((s) => editing.some((e) => matchesOrThrow(e, unwrapGlobal(s))));
-			if (!hits) continue;
-			found.push({
-				selector: normalizeSelector(rule.selector),
-				atRules: rule.atRules.map(normalizeSelector),
-				declarations: sortDecls(declarations),
-			});
+/**
+ * 擬似要素を外して、その元の要素に当てる形にする(`.a::before` → `.a`)。擬似要素が複合セレクタの頭にある
+ * とき(`.a ::before`・`::selection`)は全称にする(`.a *`・`*`)。
+ */
+function stripPseudoElements(selector: string): string {
+	return selector
+		.replace(PSEUDO_ELEMENT, (_m: string, _args: string | undefined, offset: number, whole: string) =>
+			offset === 0 || /[\s>+~(,]$/.test(whole.slice(0, offset)) ? '*' : '',
+		)
+		.trim();
+}
+
+/** 編集の要素(contenteditable="true")にフォーカスが乗っているとみなす印を付ける(自身と祖先には focus-within の印)。 */
+function markAssumedFocus(target: Element): void {
+	target.setAttribute(FOCUS_ATTR, '');
+	for (let n: Element | null = target; n !== null; n = n.parentElement) n.setAttribute(FOCUS_WITHIN_ATTR, '');
+}
+
+/** CodeMirror の面(`.cm-editor`(フォーカス中は `cm-focused`)> `.cm-scroller` > `.cm-content[contenteditable]` > `.cm-line`)。 */
+function appendCodeMirror(host: HTMLElement, added: HTMLElement[]): void {
+	const add = (tag: string, className: string, parent: Node): HTMLElement => {
+		const node = el(tag, className, parent);
+		added.push(node);
+		return node;
+	};
+	const editor = add('div', 'cm-editor cm-focused', host);
+	const scroller = add('div', 'cm-scroller', editor);
+	const content = add('div', 'cm-content cm-lineWrapping', scroller);
+	content.setAttribute('contenteditable', 'true');
+	content.setAttribute('spellcheck', 'false');
+	add('div', 'cm-line', content).textContent = 'line';
+}
+
+/**
+ * 要件#74 の編集面(今の編集の要素)を `.markdown-body` の中に足し、足した要素を返す。根拠(ファイル:行)=
+ *
+ * src/components/Viewer.svelte
+ *   1161  <div class="markdown-body">                 … 本文の容れ物。中に {#if faceActive} 1174 <CodeEditor>
+ *                                                      {:else if mdSurface} 1192 <MarkdownEditor>
+ * src/components/MarkdownEditor.svelte
+ *   1076  <div class="markdown-editor"> > 1146 <div class="markdown-editor-surface"> > ProseMirror の面の根
+ *         (961 `attributes: { class: 'markdown-body', … }`。prosemirror-view が class `ProseMirror`・
+ *         contenteditable="true" を付け、フォーカス中は `ProseMirror-focused`)
+ *   1132  raw の間は <RawSourceEditor>(203 で 1146 の面の中身は外す)
+ * src/components/RawSourceEditor.svelte
+ *   276   <div class="raw-source-editor"> > 282 <div class="raw-source-surface"> > CodeMirror
+ * src/components/CodeEditor.svelte
+ *   583   <div class="code-editor vellis-plaintext"> > 590 <div class="code-editor-surface"> > CodeMirror
+ *
+ * アプリでは 3 つの面は同時に出ない(文書の種類と raw で切り替わる)が、(c) は要素ごとに当てるだけなので
+ * 1 つの `.markdown-body` の中に並べてよい。
+ */
+function appendEditSurfaces(markdownBody: HTMLElement): HTMLElement[] {
+	const added: HTMLElement[] = [];
+	const add = (tag: string, className: string, parent: Node): HTMLElement => {
+		const node = el(tag, className, parent);
+		added.push(node);
+		return node;
+	};
+
+	// MarkdownEditor の面(ProseMirror)
+	const mdEditor = add('div', 'markdown-editor', markdownBody);
+	const mdSurface = add('div', 'markdown-editor-surface', mdEditor);
+	const pmRoot = add('div', 'ProseMirror markdown-body ProseMirror-focused', mdSurface);
+	pmRoot.setAttribute('contenteditable', 'true');
+	pmRoot.setAttribute('translate', 'no');
+	add('h1', '', pmRoot).textContent = 'Heading';
+	add('p', '', pmRoot).textContent = 'Paragraph';
+	add('p', '', add('li', '', add('ul', '', pmRoot))).textContent = 'Item';
+	add('p', '', add('blockquote', '', pmRoot)).textContent = 'Quote';
+	add('code', '', add('pre', '', pmRoot)).textContent = 'code';
+
+	// MarkdownEditor の raw(RawSourceEditor の CodeMirror)
+	const rawEditor = add('div', 'markdown-editor', markdownBody);
+	const raw = add('div', 'raw-source-editor', rawEditor);
+	raw.setAttribute('data-vellis-lang', 'markdown');
+	appendCodeMirror(add('div', 'raw-source-surface', raw), added);
+	add('div', 'markdown-editor-surface', rawEditor);
+
+	// CodeEditor の面(コードのファイル・plain text の CodeMirror)
+	const code = add('div', 'code-editor vellis-plaintext', markdownBody);
+	appendCodeMirror(add('div', 'code-editor-surface', code), added);
+
+	return added;
+}
+
+/**
+ * `css` の規則のうち、値が none 以外の `outline` / `box-shadow` を宣言し、`elements` のどれかに当たるものを
+ * 「置き場 セレクタ { 宣言 } → 要素」の文字列で返す。at-rule の中も数え、`@keyframes` の中は数えない。
+ */
+function frameAttachers(css: string, elements: Element[]): string[] {
+	const out: string[] = [];
+	for (const rule of rulesOf(stripCssComments(css))) {
+		if (rule.atRules.some((a) => /^@(-[a-z]+-)?keyframes\b/i.test(a.trim()))) continue;
+		const frames = declarationsOf(rule.body).filter(
+			(d) => FRAME_PROPS.includes(d.prop.toLowerCase()) && !NONE_VALUE.test(d.value),
+		);
+		if (frames.length === 0) continue;
+		for (const selector of splitSelectorList(rule.selector)) {
+			const native = assumeUserStates(stripPseudoElements(unwrapGlobal(selector)));
+			for (const target of elements) {
+				if (!matchesOrThrow(target, native)) continue;
+				const at = rule.atRules.length > 0 ? `${rule.atRules.map(normalizeSelector).join(' ')} ` : '';
+				const decls = frames.map((d) => `${d.prop}: ${d.value}`).join('; ');
+				out.push(`${at}${normalizeSelector(selector)} { ${decls} } → ${describeElement(target)}`);
+			}
 		}
-		found.sort((a, b) => a.selector.localeCompare(b.selector));
-		const expected = [...EXPECTED_VIEWER_MARK_RULES].sort((a, b) => a.selector.localeCompare(b.selector));
+	}
+	return out;
+}
+
+describe('Viewer.svelte — 編集の要素に outline / box-shadow を付ける規則が無い(要件#38 追補l・AC-38-追l (c)・2026-11-20 要件側更新)', () => {
+	test('(c) の判定器の自己検査: none 以外の outline / box-shadow を、状態の擬似クラス・at-rule・擬似要素込みで拾い、none と @keyframes は拾わない', () => {
+		expect(assumeUserStates('.a:focus-visible')).toBe(`.a[${FOCUS_ATTR}]`);
+		expect(assumeUserStates('.a:focus')).toBe(`.a[${FOCUS_ATTR}]`);
+		expect(assumeUserStates('.a:focus-within')).toBe(`.a[${FOCUS_WITHIN_ATTR}]`);
+		expect(assumeUserStates('.a:hover')).toBe(`.a:not([${NEVER_ATTR}])`);
+		expect(assumeUserStates('.a:not(:focus)')).toBe(`.a:not([${FOCUS_ATTR}])`);
+		expect(stripPseudoElements('.a::before')).toBe('.a');
+		expect(stripPseudoElements('.a:after')).toBe('.a');
+		expect(stripPseudoElements('::selection')).toBe('*');
+		expect(stripPseudoElements('.a ::marker')).toBe('.a *');
+
+		const dom = buildAppDom();
+		const surfaces = appendEditSurfaces(dom.markdownBody);
+		const pmRoot = surfaces.find((e) => e.classList.contains('ProseMirror'));
+		const cmContents = surfaces.filter((e) => e.classList.contains('cm-content'));
+		expect(pmRoot, 'ProseMirror の面の根がある').toBeDefined();
+		expect(cmContents, 'CodeMirror の .cm-content が 2 つ(raw と CodeEditor)').toHaveLength(2);
+		for (const root of [pmRoot!, ...cmContents]) {
+			expect(root.getAttribute('contenteditable')).toBe('true');
+			expect(root.closest('.markdown-body:not(.ProseMirror)')).toBe(dom.markdownBody);
+		}
+		markAssumedFocus(pmRoot!);
+
+		// 撤去したブロック編集の枠の形は、ProseMirror の根と 2 つの .cm-content に当たる(文書全体の青い枠)
+		const block = frameAttachers(
+			".markdown-body :global([contenteditable='true']) { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; border-radius: 2px; }",
+			surfaces,
+		);
+		expect(block).toHaveLength(3);
+		// 撤去したソース編集の縦帯の形は、撤去前のソース編集の <pre> に当たる(outline: none は数えない)
+		const source = frameAttachers(
+			".vellis-plaintext[contenteditable='true'] { outline: none; box-shadow: inset 3px 0 0 var(--color-focus-ring); }",
+			[dom.sourcePre, ...surfaces],
+		);
+		expect(source).toEqual([
+			`.vellis-plaintext[contenteditable='true'] { box-shadow: inset 3px 0 0 var(--color-focus-ring) } → ${describeElement(dom.sourcePre)}`,
+		]);
+		// none は数えない
+		expect(frameAttachers(':global(.ProseMirror) { outline: none; box-shadow: none !important; }', [pmRoot!])).toEqual([]);
+		// 状態の擬似クラスはその状態とみなす(フォーカスの乗る要素・その祖先・hover)
+		expect(frameAttachers('[contenteditable]:focus-visible { box-shadow: 0 0 0 2px red; }', [pmRoot!])).toHaveLength(1);
+		expect(frameAttachers('.markdown-body:focus-within { outline: 1px solid red; }', [dom.markdownBody])).toHaveLength(1);
+		expect(frameAttachers(':global(.ProseMirror:hover) { outline: 1px solid red; }', [pmRoot!])).toHaveLength(1);
+		expect(frameAttachers(':global(.ProseMirror:not(:focus)) { outline: 1px solid red; }', [pmRoot!])).toEqual([]);
+		// at-rule の中も数える・擬似要素は元の要素に当てる・@keyframes の中は数えない
+		expect(frameAttachers('@media screen { :global(.ProseMirror) { outline: 1px solid red; } }', [pmRoot!])).toHaveLength(1);
+		expect(frameAttachers('@media print { :global(.ProseMirror) { outline: 1px solid red; } }', [pmRoot!])).toHaveLength(1);
+		expect(frameAttachers(':global(.ProseMirror::before) { box-shadow: 0 0 0 1px red; }', [pmRoot!])).toHaveLength(1);
+		expect(frameAttachers('@keyframes k { to { outline: 1px solid red; } }', [pmRoot!])).toEqual([]);
+	});
+
+	test('(c) Viewer.svelte の <style> に、編集の要素(撤去前の印の対象と要件#74 の編集面)に outline / box-shadow(none 以外)を付ける規則が無い', () => {
+		const dom = buildAppDom();
+		const editing: Element[] = [...EDIT_CASES.map(([, key]) => dom[key]), ...appendEditSurfaces(dom.markdownBody)];
+		for (const target of editing) {
+			if (target.getAttribute('contenteditable') === 'true') markAssumedFocus(target);
+		}
+		const offenders = frameAttachers(viewerStyleContents(), editing);
 		expect(
-			found,
-			'Viewer.svelte の <style> で編集中の要素に outline / box-shadow を当てる規則は、' +
-				'要件#48 契約②・要件#49 契約① の 2 つだけ・宣言(値・!important 無し)も同じ・トップレベル(at-rule の中でない)であること',
-		).toEqual(expected);
+			offenders,
+			'Viewer.svelte の <style> に、編集の要素(ソース編集の <pre>・ブロック編集の要素・ProseMirror の面・' +
+				'CodeMirror の面とその容れ物)に none 以外の outline / box-shadow を付ける規則が無いこと' +
+				'(要件#48 契約②・要件#49 契約① の画面の印は 2026-11-20 に撤去=由谷の決定)',
+		).toEqual([]);
 	});
 });

@@ -7,8 +7,8 @@
 //! - Compile-time `dev-features` is the **outermost, uncircumventable
 //!   hard-AND**: a `kind=dev` flag is `false` whenever `dev-features`
 //!   is not compiled in, regardless of channel / env.
-//! - **release branch**: `cfg ∧ default_release` (a `dev` flag is
-//!   always `false`; `ops` may be killed).
+//! - **release branch** (and `preview`, 要件87): `cfg ∧ default_release`
+//!   (a `dev` flag is always `false`; `ops` may be killed).
 //! - **dev branch**: `cfg ∧ channel==dev ∧ (default_dev ∨
 //!   flag ∈ VELLIS_FLAGS)`.
 //! - `VELLIS_FLAGS` enables **only `kind=dev`** flags and **only on the
@@ -62,16 +62,38 @@ pub struct FlagSpec {
     pub description: &'static str,
 }
 
-/// The single source of truth. Empty in v1 — the mechanism ships with no
-/// in-development features registered yet; entries are added per
+/// 要件84: the current AI integration — marks and instructions,
+/// agent-inbox and `vellis --fix`, drift detection, diff view and revert
+/// (feature list #48〜#51).
+pub const AI_MARKS: &str = "ai_marks";
+
+/// The single source of truth. Entries are added (and removed) per
 /// `docs/feature-flags.md` §3.7 lifecycle.
-pub const REGISTRY: &[FlagSpec] = &[];
+pub const REGISTRY: &[FlagSpec] = &[
+    FlagSpec {
+        name: AI_MARKS,
+        kind: FlagKind::Dev,
+        default_dev: true,
+        default_release: false,
+        owner: "yutani",
+        removal: "#812",
+        description: "Current AI integration (marks, instructions, agent inbox, vellis --fix, drift and snapshot diff)",
+    },
+];
 
 /// Channel baked at compile time by `build.rs`. `option_env!` + default
 /// to `Dev` keeps this fail-safe if the env was somehow not injected.
 pub fn current_channel() -> Channel {
-    match option_env!("VELLIS_CHANNEL") {
+    channel_from_baked(option_env!("VELLIS_CHANNEL"))
+}
+
+/// The baked `VELLIS_CHANNEL` string back to a [`Channel`]: exactly
+/// `"release"` / `"preview"` (要件87); anything else — missing, empty, a
+/// different case, an unknown word — is `Dev` (fail-safe).
+pub fn channel_from_baked(baked: Option<&str>) -> Channel {
+    match baked {
         Some("release") => Channel::Release,
+        Some("preview") => Channel::Preview,
         _ => Channel::Dev,
     }
 }
@@ -96,7 +118,8 @@ fn resolve(
     }
 
     let base = match channel {
-        Channel::Release => match spec.kind {
+        // 要件87: a preview (開発版) ships exactly what a release ships.
+        Channel::Release | Channel::Preview => match spec.kind {
             FlagKind::Dev => false,
             FlagKind::Ops | FlagKind::Experiment => spec.default_release,
         },
@@ -120,6 +143,27 @@ fn parse_list(raw: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// [`resolve`] looked up by name (要件84 契約3: the pure entry point the
+/// tests drive with both sides). Unknown flag → `false` (fail-safe), the
+/// same as [`is_enabled`].
+pub fn resolve_by_name(
+    name: &str,
+    channel: Channel,
+    dev_features_compiled: bool,
+    vellis_flags: &[&str],
+    ops_killed: bool,
+) -> bool {
+    lookup(name).is_some_and(|spec| {
+        resolve(
+            spec,
+            channel,
+            dev_features_compiled,
+            vellis_flags,
+            ops_killed,
+        )
+    })
 }
 
 /// Runtime entry point. Unknown flag → `false` (fail-safe).
@@ -150,11 +194,67 @@ pub fn flags_map() -> BTreeMap<&'static str, bool> {
     let channel = current_channel();
     REGISTRY
         .iter()
-        .filter(|spec| {
-            !(channel == Channel::Release && matches!(spec.kind, FlagKind::Dev))
-        })
+        .filter(|spec| carried_in_payload(spec, channel))
         .map(|spec| (spec.name, is_enabled(spec.name)))
         .collect()
+}
+
+/// Pure counterpart of [`flags_map`] (要件84 AC-84-2): the same rows and
+/// the same release-channel omission, resolved from explicit inputs.
+/// `VELLIS_DISABLE` is not an input (it only narrows `kind=ops` rows).
+pub fn flags_map_for(
+    channel: Channel,
+    dev_features_compiled: bool,
+    vellis_flags: &[&str],
+) -> BTreeMap<&'static str, bool> {
+    REGISTRY
+        .iter()
+        .filter(|spec| carried_in_payload(spec, channel))
+        .map(|spec| {
+            (
+                spec.name,
+                resolve(spec, channel, dev_features_compiled, vellis_flags, false),
+            )
+        })
+        .collect()
+}
+
+/// §3.5 payload minimization: on `release` (and `preview`, 要件87),
+/// `kind=dev` rows never cross IPC.
+fn carried_in_payload(spec: &FlagSpec, channel: Channel) -> bool {
+    let ships = matches!(channel, Channel::Release | Channel::Preview);
+    !(ships && matches!(spec.kind, FlagKind::Dev))
+}
+
+/// The gate at the top of a Tauri command (要件84 契約4・5): `Err` when
+/// the flag is off in this build, so the command does nothing.
+pub fn require(name: &str, what: &str) -> Result<(), String> {
+    require_with(is_enabled(name), what)
+}
+
+/// [`require`] for several flags (要件74 契約14): `Ok` when any of them is
+/// on in this build.
+pub fn require_any(names: &[&str], what: &str) -> Result<(), String> {
+    require_any_with(
+        &names.iter().map(|name| is_enabled(name)).collect::<Vec<_>>(),
+        what,
+    )
+}
+
+/// Pure counterpart of [`require_any`]: `Ok` when any of `enabled` is true,
+/// otherwise (also when empty) the same `Err` as [`require_with`].
+pub fn require_any_with(enabled: &[bool], what: &str) -> Result<(), String> {
+    require_with(enabled.iter().any(|on| *on), what)
+}
+
+/// Pure counterpart of [`require`]: `Err("<what> is not available in this
+/// version of Vellis")` when `enabled` is false.
+pub fn require_with(enabled: bool, what: &str) -> Result<(), String> {
+    if enabled {
+        Ok(())
+    } else {
+        Err(format!("{what} is not available in this version of Vellis"))
+    }
 }
 
 #[cfg(test)]
@@ -261,9 +361,17 @@ mod tests {
         assert!(!is_enabled("does_not_exist"));
     }
 
+    /// 要件84 契約1(承認 1・2026-11-06): レジストリは要件84 の 2 本(`editor_inline`・`ai_marks`)。
+    /// 「v1 は空」の 2 つの assert はここで外した。中身の確かめ(名前・kind・既定・removal・順)は
+    /// `tests/acceptance_req84.rs` の AC-84-1 に任せ、ここでは本数だけを見る。
+    /// 要件74 第1段(2026-11-16・契約21・棚卸し 8=要件側更新): 新しい編集の `editor_file` が 3 本目に入った。
+    /// 要件74 第2段 2-5(2026-11-17・契約21・AC-74-46): `editor_inline` と `editor_file` を撤去し、`ai_marks` の 1 本だけ。
+    /// 中身は `tests/acceptance_req74_removal.rs`。
     #[test]
-    fn v1_registry_is_empty() {
-        assert!(REGISTRY.is_empty());
-        assert!(flags_map().is_empty());
+    fn registry_holds_ai_marks_alone_after_the_editing_flags_were_removed() {
+        // requirements.md #74 契約21: editor_inline (#811) and editor_file (#820)
+        // went with the removal round; only ai_marks (#812) remains.
+        assert_eq!(REGISTRY.len(), 1);
+        assert_eq!(REGISTRY[0].name, AI_MARKS);
     }
 }

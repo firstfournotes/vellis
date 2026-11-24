@@ -747,14 +747,16 @@ describe('AC-83-26: +page.svelte と Dashboard.svelte のソース走査(契約 
 		expect(inits).toHaveLength(1);
 	});
 
-	test('ズームの対象(zoomTarget)・toggleEditMode・handleMenuFind が rootPicker.open を見る(契約 15 の門)', () => {
+	test('ズームの対象(zoomTarget)・handleMenuFind が rootPicker.open を見る(契約 15 の門。toggleEditMode は要件74 2-5 で撤去)', () => {
 		const src = page();
 		const zoomAt = src.search(/\blet\s+zoomTarget\s*=\s*\$derived\s*\(/);
 		expect(zoomAt, 'let zoomTarget = $derived(…)').toBeGreaterThan(-1);
 		const derivedAt = src.indexOf('$derived', zoomAt);
 		const zoomExpr = balancedFrom(src, derivedAt, '(');
 		expect(zoomExpr).toContain('rootPicker.open');
-		expect(functionBody(src, 'toggleEditMode')).toContain('rootPicker.open');
+		// 要件74 第2段 2-5(2026-11-17 仮・オーケストレーターの仮の承認): toggleEditMode(Edit ▸ Edit)は撤去。Format の受け手が rootPicker.open を見る
+		// (contract 15 の門)ことは commands.acceptance.test.ts が固定する。
+		expect(src).not.toContain('toggleEditMode');
 		expect(functionBody(src, 'handleMenuFind')).toContain('rootPicker.open');
 	});
 

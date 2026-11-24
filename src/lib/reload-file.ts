@@ -275,6 +275,24 @@ export function createFolderReloader<E>(deps: FolderReloaderDeps<E>): {
 }
 
 // ---------------------------------------------------------------------------
+// 編集面の右クリックの Reload File(要件#74 第2段 2-6・契約8)
+// ---------------------------------------------------------------------------
+
+let reloadFileRequestHandler: ((target?: string | null) => void) | null = null;
+
+/** +page が Reload File の実体(`fileReloader.reload`)を登録する。null で外す。 */
+export function setReloadFileRequestHandler(handler: ((target?: string | null) => void) | null): void {
+	reloadFileRequestHandler = handler;
+}
+
+/** 面のメニューの Reload File。登録があれば呼んで true、無ければ false(何もしない)。 */
+export function requestReloadFile(target: string | null = null): boolean {
+	if (!reloadFileRequestHandler) return false;
+	reloadFileRequestHandler(target);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // メニューの購読(契約 2)
 // ---------------------------------------------------------------------------
 

@@ -1,11 +1,15 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use clap::Parser;
+use clap::FromArgMatches;
 
-use vellis_lib::cli::{missing_local_path, Cli};
+use vellis_lib::cli::{
+    command_with, missing_local_path, unavailable_option, unavailable_option_message, Cli,
+    UNAVAILABLE_OPTION_EXIT_CODE,
+};
 use vellis_lib::cli_fix;
 use vellis_lib::cli_install;
+use vellis_lib::features;
 use vellis_lib::ipc::client::IpcClient;
 use vellis_lib::ipc::launch::{launch, Launch, LaunchError, STARTUP_RESPONSE_WAIT, STARTUP_WAIT};
 use vellis_lib::ipc::protocol::{Request, Response};
@@ -14,7 +18,19 @@ use vellis_lib::self_check;
 use vellis_lib::window::manager::WindowArgs;
 
 fn main() {
-    let cli = Cli::parse();
+    // 要件84 契約6: the current AI integration's options are hidden from
+    // `--help` and refused when `ai_marks` is off in this build. They still
+    // parse, so the refusal below can name the one that was typed.
+    let ai_enabled = features::is_enabled(features::AI_MARKS);
+    let matches = command_with(ai_enabled).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // Refused before anything else runs: no window opens, nothing is sent
+    // to a running instance and `--fix` never reaches the agent.
+    if let Some(option) = unavailable_option(&cli, ai_enabled) {
+        eprintln!("{}", unavailable_option_message(option));
+        std::process::exit(UNAVAILABLE_OPTION_EXIT_CODE);
+    }
 
     // `--self-check <file>` (requirements.md #72) never talks to a running
     // instance: it branches off before the IPC probe / send and before any
@@ -290,6 +306,11 @@ fn resolve_path_to_uri(path: &str) -> String {
     let canonical = abs.canonicalize().unwrap_or(abs);
     format!("file://{}", canonical.display())
 }
+
+// `main` parses through `cli::command_with`; the unit tests below still
+// build a `Cli` with `Cli::parse_from` (`use super::*`).
+#[cfg(test)]
+use clap::Parser;
 
 #[cfg(test)]
 mod tests {

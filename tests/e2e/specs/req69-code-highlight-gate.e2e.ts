@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+	faceDirty,
+	appendToFace,
 	assertIpcInterceptionWorks,
 	clickExplorerRow,
 	contrastRatio,
@@ -22,13 +24,21 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
+ * 要件74 第2段 2-5(2026-11-17・撤去)の後: a code file is a CodeMirror face from the moment it opens
+ * (契約5: the colours come from Lezer, not Shiki; Shiki is kept for printing only = AC-74-39). Edit ▸ Edit
+ * and the plain-text editor are gone. The gates below read the face (`[data-testid="code-editor"] .cm-content`,
+ * tokens = `.cm-line span[class]`), the fences of fences.md are embedded CodeMirror faces too (2-4), and the
+ * Shiki size limits of 契約6 no longer apply (recorded, not judged). Not run on a device since the rewrite.
+ *
  * Requirement #69 human gates 1-4, driven on the webdriver build
  * (docs/requirements/req-69.md「人間ゲート」). Gate 5 (judgement) stays with a
  * human.
  *
- *  1. Each sample (.ts/.rs/.py/.json/.yaml/.sh) is coloured; the `<pre>`'s
+ *  1. Each sample (.ts/.rs/.py/.json/.yaml/.sh) is coloured; the face's
  *     computed font-size / white-space / padding / background / line-height
- *     equal the plain (.txt) view of the same text; the per-character colours
+ *     equal the plain (.txt) view of the same text (`tab-size` is the one
+ *     property that follows the file's own indent — 要件74 契約5 — and is
+ *     judged against the file, 2026-11-24); the per-character colours
  *     equal the same code in a Markdown fence.
  *  2. Double click (and the Edit menu event) enters the plain-text editor;
  *     `menu_save` saves; leaving edit mode brings the colours back with the
@@ -228,45 +238,55 @@ function heavyFixtures(): Record<string, string> {
 	return out;
 }
 
+/** The CodeMirror face of the open code file (要件74 2-5). */
+const FACE = 'article.viewer [data-testid="code-editor"]';
+const FACE_CONTENT = `${FACE} .cm-content`;
+
 /**
- * Wait until the viewer shows a *new* `<pre>` (not one marked by
- * `markCurrentPre`) whose text has `len` characters. Two files of the same
- * length (sample.ts and its .txt twin) would otherwise satisfy the wait with
- * the previous document's `<pre>`.
+ * Wait until the viewer shows a *new* face (not one marked by `markCurrentPre`) whose first
+ * rendered line is the file's first line (CodeMirror renders the viewport only, so the whole
+ * text cannot be compared for the heavy files).
  */
-async function waitForPre(len: number, timeout = 30_000): Promise<void> {
+async function waitForFace(text: string, timeout = 30_000): Promise<void> {
+	const first = text.split('\n').find((l) => l.trim().length > 0) ?? '';
 	await browser.waitUntil(
 		async () =>
 			browser.execute(
-				(body, n) =>
-					(document.querySelector(`${body} pre.vellis-plaintext:not([data-gate-old])`)?.textContent ?? '')
-						.length === n,
-				BODY,
-				len,
+				(sel, line) => {
+					const content = document.querySelector(`${sel}:not([data-gate-old])`);
+					if (!content) return false;
+					const lines = Array.from(content.querySelectorAll('.cm-line')).map((l) => l.textContent ?? '');
+					return lines.length > 0 && lines.find((l) => l.trim().length > 0) === line;
+				},
+				FACE_CONTENT,
+				first,
 			),
-		{ timeout, timeoutMsg: `viewer never showed a new <pre> of ${len} chars` },
+		{ timeout, timeoutMsg: `viewer never showed a new face starting with ${JSON.stringify(first.slice(0, 60))}` },
 	);
 }
 
 async function markCurrentPre(): Promise<void> {
-	await browser.execute((body) => {
-		document.querySelectorAll(`${body} pre`).forEach((p) => p.setAttribute('data-gate-old', '1'));
-	}, BODY);
+	await browser.execute((body, sel) => {
+		document.querySelectorAll(`${body} pre, ${sel}`).forEach((p) => p.setAttribute('data-gate-old', '1'));
+	}, BODY, FACE_CONTENT);
 }
 
-async function openFile(p: string, len: number): Promise<void> {
+async function openFile(p: string, text: string): Promise<void> {
+	const first = text.split('\n').find((l) => l.trim().length > 0) ?? '';
 	const showing = await browser.execute(
-		(body, u, n) =>
-			document.querySelector<HTMLElement>('.explorer-item.active')?.title === u &&
-			(document.querySelector(`${body} pre.vellis-plaintext:not([contenteditable])`)?.textContent ?? '').length === n,
-		BODY,
+		(sel, u, line) => {
+			const content = document.querySelector(sel);
+			const lines = content ? Array.from(content.querySelectorAll('.cm-line')).map((l) => l.textContent ?? '') : [];
+			return document.querySelector<HTMLElement>('.explorer-item.active')?.title === u && lines.find((l) => l.trim().length > 0) === line;
+		},
+		FACE_CONTENT,
 		uri(p),
-		len,
+		first,
 	);
 	if (showing) return;
 	await markCurrentPre();
 	await clickExplorerRow(uri(p));
-	await waitForPre(len);
+	await waitForFace(text);
 }
 
 const STYLE_PROPS = [
@@ -287,35 +307,81 @@ const STYLE_PROPS = [
 	'word-break',
 ];
 
+/**
+ * 要件74 契約5: the face's `tab-size` is the indent unit detected from the file (a tab = 4 columns, N spaces
+ * = N; `src/editor/text-document.ts` `detectIndentUnit` → `EditorState.tabSize`), so it is not a fixed value
+ * shared with the plain face any more. This mirrors that detection (tab lines vs space lines; the most
+ * frequent change of indent width, the smaller on a tie; `\t` when undecidable or when spaces never indent).
+ */
+function expectedTabSize(code: string): string {
+	const MAX_SPACE_UNIT = 8;
+	let tabLines = 0;
+	let spaceLines = 0;
+	const steps = new Map<number, number>();
+	let previous = 0;
+	for (const line of code.split(/\r\n?|\n/)) {
+		if (line.trim().length === 0) continue;
+		const lead = /^[ \t]*/.exec(line)![0];
+		if (lead.startsWith('\t')) {
+			tabLines++;
+			continue;
+		}
+		const width = lead.length;
+		if (width > 0) spaceLines++;
+		const step = Math.abs(width - previous);
+		if (step > 0 && step <= MAX_SPACE_UNIT && (width > 0 || previous > 0)) steps.set(step, (steps.get(step) ?? 0) + 1);
+		previous = width;
+	}
+	if (spaceLines === 0 || tabLines >= spaceLines) return '4';
+	let best = 0;
+	let bestCount = 0;
+	for (const [step, count] of steps) {
+		if (count > bestCount || (count === bestCount && step < best)) {
+			best = step;
+			bestCount = count;
+		}
+	}
+	return best > 0 ? String(best) : '4';
+}
+
+/** `style` without `tab-size` (compared face to face) and `tab-size` on its own (compared with the file's indent). */
+function splitTabSize(style: Record<string, string>): { rest: Record<string, string>; tabSize: string } {
+	const { 'tab-size': tabSize, ...rest } = style;
+	return { rest, tabSize: tabSize ?? '' };
+}
+
+/** The face's style (`.cm-content`), its language, and the Lezer token colours (`.cm-line span[class]`, computed). */
 async function preStyle(): Promise<{ pre: Record<string, string>; code: Record<string, string> | null; height: number; width: number; lang: string | null; colours: number; spans: number }> {
 	return browser.execute(
-		(body, props) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext`)!;
-			const code = pre.querySelector('code');
+		(face, sel, props) => {
+			const content = document.querySelector<HTMLElement>(sel)!;
 			const pick = (el: Element) => {
 				const cs = getComputedStyle(el);
 				return Object.fromEntries(props.map((p) => [p, cs.getPropertyValue(p)]));
 			};
+			const base = getComputedStyle(content).color;
 			const colours = new Set<string>();
 			let spans = 0;
-			for (const s of pre.querySelectorAll<HTMLElement>('span[style]')) {
-				if (s.style.color) {
-					colours.add(s.style.color);
+			for (const sp of content.querySelectorAll<HTMLElement>('.cm-line span[class]')) {
+				const c = getComputedStyle(sp).color;
+				if (c && c !== base) {
+					colours.add(c);
 					spans++;
 				}
 			}
-			const r = pre.getBoundingClientRect();
+			const r = content.getBoundingClientRect();
 			return {
-				pre: pick(pre),
-				code: code ? pick(code) : null,
+				pre: pick(content),
+				code: null,
 				height: r.height,
 				width: r.width,
-				lang: pre.getAttribute('data-vellis-lang'),
+				lang: document.querySelector(face)?.getAttribute('data-vellis-lang') ?? null,
 				colours: colours.size,
 				spans,
 			};
 		},
-		BODY,
+		FACE,
+		FACE_CONTENT,
 		STYLE_PROPS,
 	);
 }
@@ -336,15 +402,16 @@ async function waitForFence(marker: string, fence: string): Promise<void> {
 			browser.execute(
 				(body, m) => {
 					if ((document.querySelector(`${body} h1`)?.textContent ?? '') !== 'Fences') return false;
-					const pre = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre:not([data-gate-old])`)).find((p) =>
-						(p.textContent ?? '').includes(m),
+					// 要件74 2-4: a fence is an embedded CodeMirror (`pre[data-lang] .cm-content`); the colours are Lezer classes.
+					const content = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre[data-lang] .cm-content:not([data-gate-old])`)).find((c) =>
+						(c.textContent ?? '').includes(m),
 					);
-					return !!pre && pre.querySelector('span[style*="color"]') !== null;
+					return !!content && content.querySelector('.cm-line span[class]') !== null;
 				},
 				BODY,
 				marker,
 			),
-		{ timeout: 15_000, timeoutMsg: `fence for ${fence} not rendered in fences.md` },
+		{ timeout: 15_000, timeoutMsg: `fence for ${fence} not rendered as an embedded face in fences.md` },
 	);
 }
 
@@ -355,30 +422,24 @@ async function waitForFence(marker: string, fence: string): Promise<void> {
  */
 async function charColours(marker: string | null): Promise<Array<[string, string]>> {
 	const pairs: string[][] = await browser.execute(
-		(body, m) => {
-			const pres = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre`));
-			const pre =
-				m === null
-					? pres[0]
-					: pres.find((p) => !p.hasAttribute('data-gate-old') && (p.textContent ?? '').includes(m));
-			if (!pre) return [];
+		(body, face, m) => {
+			const contents = Array.from(document.querySelectorAll<HTMLElement>(m === null ? face : `${body} pre[data-lang] .cm-content`));
+			const content =
+				m === null ? contents[0] : contents.find((c) => !c.hasAttribute('data-gate-old') && (c.textContent ?? '').includes(m));
+			if (!content) return [];
+			const base = getComputedStyle(content).color;
 			const out: string[][] = [];
-			const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT);
+			const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
 			for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-				let el: HTMLElement | null = n.parentElement;
-				let colour = '';
-				while (el && el !== pre) {
-					if (el.style?.color) {
-						colour = el.style.color;
-						break;
-					}
-					el = el.parentElement;
-				}
+				const el = n.parentElement;
+				const c = el ? getComputedStyle(el).color : '';
+				const colour = c === base ? '' : c;
 				for (const ch of n.textContent ?? '') if (!/\s/.test(ch)) out.push([ch, colour]);
 			}
 			return out;
 		},
 		BODY,
+		FACE_CONTENT,
 		marker,
 	);
 	return pairs.map(([ch, colour]) => [ch ?? '', colour ?? '']);
@@ -408,10 +469,11 @@ interface Timing {
  */
 async function timeOpen(p: string, text: string): Promise<Timing> {
 	await waitForExplorerRow(uri(p), { timeout: 15_000 });
-	const res = await browser.executeAsync<Omit<Timing, 'file' | 'chars' | 'lines'>, [string, string, number]>(
-		(body, target, len, done) => {
+	const res = await browser.executeAsync<Omit<Timing, 'file' | 'chars' | 'lines'>, [string, string, string]>(
+		(body, target, firstLine, done) => {
 			const host = document.querySelector(body);
 			host?.querySelector('pre')?.setAttribute('data-gate-old', '1');
+			host?.querySelector('.cm-content')?.setAttribute('data-gate-old', '1');
 			const row = Array.from(document.querySelectorAll<HTMLElement>('.explorer-item')).find(
 				(r) => r.title === target,
 			);
@@ -436,15 +498,18 @@ async function timeOpen(p: string, text: string): Promise<Timing> {
 			};
 			const t0 = performance.now();
 			const check = () => {
-				const pre = host.querySelector<HTMLElement>('pre.vellis-plaintext:not([data-gate-old])');
-				if (!pre || (pre.textContent ?? '').length !== len) return;
+				// 要件74 2-5: the face renders the viewport only — the first non-empty line is the mark of "shown".
+				const pre = host.querySelector<HTMLElement>('.cm-content:not([data-gate-old])');
+				if (!pre) return;
+				const lines = Array.from(pre.querySelectorAll('.cm-line')).map((l) => l.textContent ?? '');
+				if ((lines.find((l) => l.trim().length > 0) ?? '') !== firstLine) return;
 				const dom = performance.now() - t0;
 				const record = (paint: { paintMs: number } | { frameStalled: true }) => ({
 					domMs: Math.round(dom),
 					...paint,
 					maxTimerGapMs: Math.round(Math.max(maxGap, performance.now() - last)),
-					lang: pre.getAttribute('data-vellis-lang'),
-					colouredSpans: pre.querySelectorAll('span[style*="color"]').length,
+					lang: pre.closest('[data-testid="code-editor"]')?.getAttribute('data-vellis-lang') ?? null,
+					colouredSpans: pre.querySelectorAll('.cm-line span[class]').length,
 					visibility: document.visibilityState,
 				});
 				// WKWebView runs no animation frames while the display is asleep, so
@@ -462,7 +527,7 @@ async function timeOpen(p: string, text: string): Promise<Timing> {
 		},
 		BODY,
 		uri(p),
-		text.length,
+		text.split('\n').find((l) => l.trim().length > 0) ?? '',
 	);
 	return {
 		file: path.basename(p),
@@ -536,8 +601,8 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		}
 	});
 
-	it('gate 1: the plain .txt view of the sample is the baseline (no colour)', async () => {
-		await openFile(path.join(gateDir, 'sample-ts-as.txt'), samples.ts!.code.length);
+	it('gate 1: the plain .txt face of the sample is the baseline (no colour; 要件74 2-5: a CodeMirror face without a language)', async () => {
+		await openFile(path.join(gateDir, 'sample-ts-as.txt'), samples.ts!.code);
 		const plain = await preStyle();
 		expect(plain.lang).toBeNull();
 		expect(plain.spans).toBe(0);
@@ -546,14 +611,21 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 	});
 
 	for (const [key, s] of Object.entries(samples)) {
-		it(`gate 1: ${s.file} is coloured, styled like the plain view, and coloured like the \`\`\`${s.fence} fence`, async () => {
-			await openFile(path.join(gateDir, 'sample-ts-as.txt'), samples.ts!.code.length);
+		it(`gate 1: ${s.file} is coloured (Lezer), styled like the plain face (tab-size = the file's indent), and coloured like the \`\`\`${s.fence} fence (an embedded face = 2-4)`, async () => {
+			await openFile(path.join(gateDir, 'sample-ts-as.txt'), samples.ts!.code);
 			const plain = await preStyle();
-			await openFile(path.join(gateDir, s.file), s.code.length);
+			await openFile(path.join(gateDir, s.file), s.code);
 			const coloured = await preStyle();
 			expect(coloured.lang).toBe(s.lang);
 			expect(coloured.colours).toBeGreaterThanOrEqual(2);
-			expect(coloured.pre).toEqual(plain.pre);
+			// Font, line height, wrapping, padding, margin, background, radius: the same as the plain face (要件74 契約5
+			// 「書体・文字の大きさ・行間・余白・折り返し・幅は今の <pre> と同じ」). `tab-size` follows each file's own
+			// indent (契約5「Tab=字下げの単位(ファイルから検出)」), so it is judged against the file, not the plain face.
+			const plainStyle = splitTabSize(plain.pre);
+			const colouredStyle = splitTabSize(coloured.pre);
+			expect(colouredStyle.rest).toEqual(plainStyle.rest);
+			expect(colouredStyle.tabSize).toBe(expectedTabSize(s.code));
+			expect(plainStyle.tabSize).toBe(expectedTabSize(samples.ts!.code));
 			const fileColours = await charColours(null);
 			await shot(`req69-gate1-${key}`);
 
@@ -573,7 +645,8 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 				lang: coloured.lang,
 				distinctColours: coloured.colours,
 				colouredSpans: coloured.spans,
-				sameStyleAsPlain: JSON.stringify(coloured.pre) === JSON.stringify(plain.pre),
+				sameStyleAsPlain: JSON.stringify(splitTabSize(coloured.pre).rest) === JSON.stringify(splitTabSize(plain.pre).rest),
+				tabSize: { face: splitTabSize(coloured.pre).tabSize, fromFile: expectedTabSize(s.code), plainFace: splitTabSize(plain.pre).tabSize },
 				heightColoured: coloured.height,
 				heightPlainTs: key === 'ts' ? plain.height : undefined,
 				chars: fileColours.length,
@@ -593,70 +666,53 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		await shot('req69-gate1-fences-md');
 	});
 
-	it('gate 2: double click enters the plain-text editor; menu_save + Done Editing brings the colours back', async () => {
+	// 要件74 2-5: the face is the editor — a double-click enters nothing else; typing stays coloured; menu_save writes; no Edit ▸ Edit.
+	it('gate 2: the face is the editor — a double-click changes nothing, typing stays coloured, menu_save writes the file, no Done Editing / menu_edit', async () => {
 		const file = path.join(gateDir, 'sample.ts');
 		const original = samples.ts!.code;
-		await openFile(file, original.length);
-		await browser.execute((body) => {
-			const span = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext span[style*="color"]`)!;
+		await openFile(file, original);
+		const before = await preStyle();
+		await browser.execute((sel) => {
+			const span = document.querySelector<HTMLElement>(`${sel} .cm-line span[class]`)!;
 			span.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }));
-		}, BODY);
-		await browser.waitUntil(
-			async () => browser.execute((body) => !!document.querySelector(`${body} pre.vellis-plaintext[contenteditable="true"]`), BODY),
-			{ timeout: 5_000, timeoutMsg: 'double click did not enter the editor' },
-		);
-		const editor = await browser.execute((body) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-			return { children: pre.childElementCount, text: pre.textContent ?? '', lang: pre.getAttribute('data-vellis-lang') };
-		}, BODY);
-		expect(editor.children).toBe(0);
-		// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel).
-		expect(editor.text).toBe(original + '\n');
-		expect(editor.lang).toBeNull();
-		await shot('req69-gate2-editing-plain');
+		}, FACE_CONTENT);
+		await browser.pause(500);
+		const afterDbl = await browser.execute((sel) => ({
+			editables: Array.from(document.querySelectorAll('[contenteditable="true"]')).map((e) => e.className),
+			done: document.querySelector('[data-testid="edit-done"]') !== null,
+			plainPre: document.querySelector(`article.viewer pre.vellis-plaintext`) !== null,
+			face: document.querySelector(sel) !== null,
+		}), FACE_CONTENT);
+		expect(afterDbl.face).toBe(true);
+		expect(afterDbl.plainPre).toBe(false);
+		expect(afterDbl.done).toBe(false);
+		expect(afterDbl.editables.filter((c) => !c.includes('cm-content'))).toEqual([]);
+		expect(await faceDirty()).toBe(false);
+		await shot('req69-gate2-face-after-dblclick');
 
 		const added = 'export const added = 42; // saved by the gate check\n';
-		await browser.execute(
-			(body, extra) => {
-				const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-				// 追補r: type before the sentinel (the editor's final `\n`), so the buffer is original + extra.
-				pre.textContent = (pre.textContent ?? '').slice(0, -1) + extra + '\n';
-				pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: extra }));
-			},
-			BODY,
-			added,
-		);
+		expect(await appendToFace(added)).toBe(true);
+		await browser.waitUntil(async () => await faceDirty(), { timeout: 5_000, timeoutMsg: 'the appended text did not make the face dirty' });
+		const whileDirty = await preStyle();
+		expect(whileDirty.lang).toBe('typescript');
+		expect(whileDirty.colours).toBeGreaterThanOrEqual(2);
 		await emitMenu('menu_save');
 		await browser.waitUntil(async () => fs.readFileSync(file, 'utf8') === original + added, {
 			timeout: 10_000,
 			timeoutMsg: `menu_save did not write the file (now: ${JSON.stringify(fs.readFileSync(file, 'utf8').slice(-80))})`,
 		});
-		await markCurrentPre();
-		await browser.execute(() => document.querySelector<HTMLButtonElement>('[data-testid="edit-done"]')?.click());
-		await waitForPre((original + added).length);
+		await browser.waitUntil(async () => !(await faceDirty()), { timeout: 5_000, timeoutMsg: 'the unsaved badge did not go after the save' });
 		const after = await preStyle();
 		expect(after.lang).toBe('typescript');
 		expect(after.colours).toBeGreaterThanOrEqual(2);
-		const lastLineColoured = await browser.execute((body) => {
-			const lines = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre.vellis-plaintext .line`));
+		const lastLineColoured = await browser.execute((sel) => {
+			const lines = Array.from(document.querySelectorAll<HTMLElement>(`${sel} .cm-line`));
 			const line = lines.find((l) => (l.textContent ?? '').includes('added = 42'));
-			return line ? line.querySelectorAll('span[style*="color"]').length : -1;
-		}, BODY);
+			return line ? line.querySelectorAll('span[class]').length : -1;
+		}, FACE_CONTENT);
 		expect(lastLineColoured).toBeGreaterThan(1);
-		report(REPORT, { gate: '69-2-dblclick', editorChildren: editor.children, savedOnDisk: true, colouredAfter: after.colours, addedLineSpans: lastLineColoured, dialogs: (await readGateRecord()).dialogs });
+		report(REPORT, { gate: '69-2-face', before: before.colours, whileDirty: whileDirty.colours, savedOnDisk: true, colouredAfter: after.colours, addedLineSpans: lastLineColoured, dialogs: (await readGateRecord()).dialogs });
 		await shot('req69-gate2-after-save-coloured');
-
-		// The Edit menu event (Command + E) goes in and out the same way.
-		await emitMenu('menu_edit');
-		await browser.waitUntil(
-			async () => browser.execute((body) => !!document.querySelector(`${body} pre.vellis-plaintext[contenteditable="true"]`), BODY),
-			{ timeout: 5_000, timeoutMsg: 'menu_edit did not enter the editor' },
-		);
-		await emitMenu('menu_edit');
-		await browser.waitUntil(
-			async () => browser.execute((body) => !!document.querySelector(`${body} pre.vellis-plaintext[data-vellis-lang]`), BODY),
-			{ timeout: 5_000, timeoutMsg: 'second menu_edit did not return to the coloured view' },
-		);
 		expect((await readGateRecord()).dialogs).toEqual([]);
 	});
 
@@ -683,7 +739,7 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		for (const pass of [1, 2]) {
 			for (const name of order) {
 				// A small file in between so every heavy file starts from the same state.
-				await openFile(path.join(gateDir, 'sample.json'), samples.json!.code.length);
+				await openFile(path.join(gateDir, 'sample.json'), samples.json!.code);
 				const t = await timeOpen(path.join(heavyDir, name), heavy[name]!);
 				if (pass === 1) timings.push(t);
 				report(REPORT, { gate: '69-3', pass, ...t });
@@ -692,40 +748,39 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		}
 		const by = Object.fromEntries(timings.map((t) => [t.file, t]));
 		for (const t of timings) expect(t.timeout).toBeUndefined();
-		// The hard limits (contract 6 (1)(2)) are deterministic.
-		expect(by['ts-524289-chars.ts']!.lang).toBeNull();
-		expect(by['ts-10001-lines.ts']!.lang).toBeNull();
-		expect(by['ts-10000-lines.ts']!.lang === 'typescript' || by['ts-10000-lines.ts']!.lang === null).toBe(true);
+		// 要件74 2-5 / 契約5: the CodeMirror face has no size limit (the Shiki limits of 契約6 (1)(2) belonged to the
+		// removed view); the language of the boundary files is recorded, not judged (AC-74-33 / 10 for the timing).
+		report(REPORT, { gate: '69-3-langs', langs: Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v.lang ?? null])) });
 
-		// Lines of 2,000 characters or more stay uncoloured; shorter ones are coloured.
-		const perLine = await browser.execute((body) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext`)!;
+		// 要件74 2-5: the per-line length limit of Shiki (契約6) is gone with the view; the colouring of the long lines is recorded.
+		const perLine = await browser.execute((sel) => {
+			const content = document.querySelector<HTMLElement>(sel)!;
+			const base = getComputedStyle(content).color;
 			return {
-				lang: pre.getAttribute('data-vellis-lang'),
-				lines: Array.from(pre.querySelectorAll<HTMLElement>('.line')).map((l) => {
+				lang: content.closest('[data-testid="code-editor"]')?.getAttribute('data-vellis-lang') ?? null,
+				lines: Array.from(content.querySelectorAll<HTMLElement>('.cm-line')).map((l) => {
 					const colours = new Set<string>();
-					for (const s of l.querySelectorAll<HTMLElement>('span[style]')) if (s.style.color) colours.add(s.style.color);
+					for (const sp of l.querySelectorAll<HTMLElement>('span[class]')) {
+						const c = getComputedStyle(sp).color;
+						if (c !== base) colours.add(c);
+					}
 					return { length: (l.textContent ?? '').length, colours: colours.size };
 				}),
 			};
-		}, BODY);
+		}, FACE_CONTENT);
 		report(REPORT, { gate: '69-3-long-lines', ...perLine });
 		expect(perLine.lang).toBe('typescript');
-		const of = (n: number) => perLine.lines.find((l) => l.length === n)!;
-		expect(of(1_999).colours).toBeGreaterThanOrEqual(2);
-		expect(of(2_000).colours).toBeLessThanOrEqual(1);
-		expect(of(5_000).colours).toBeLessThanOrEqual(1);
 	});
 
 	it('gate 4: find gives the same counts on the coloured view and on the plain .txt', async () => {
 		const queries = ['value', '= ', 'item.id > 0', "'node:fs/promises'"];
 		const results: Record<string, { coloured: unknown; plain: unknown }> = {};
 		for (const q of queries) {
-			await openFile(path.join(gateDir, 'sample.ts'), samples.ts!.code.length + 'export const added = 42; // saved by the gate check\n'.length);
+			await openFile(path.join(gateDir, 'sample.ts'), samples.ts!.code + 'export const added = 42; // saved by the gate check\n');
 			const coloured = await find(q);
 			if (q === 'value') await shot('req69-gate4-find-coloured');
 			await closeFind();
-			await openFile(path.join(gateDir, 'sample-ts-as.txt'), samples.ts!.code.length);
+			await openFile(path.join(gateDir, 'sample-ts-as.txt'), samples.ts!.code);
 			const plain = await find(q);
 			if (q === 'value') await shot('req69-gate4-find-plain');
 			await closeFind();
@@ -733,13 +788,15 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		}
 		// The .ts gained one line in gate 2; none of the queries occur in it, except
 		// '= ' which is counted separately below.
+		// 要件74 2-5: both are CodeMirror faces whose count is the whole document (AC-74-31); `CSS.highlights` is not used
+		// by the face (its highlights are decorations of the viewport), so the counts are compared, not the highlight sizes.
+		const total = (c: string) => Number(/ of (\d+)$/.exec(c)?.[1] ?? -1);
 		for (const q of queries.filter((x) => x !== '= ')) {
 			const r = results[q]!;
-			expect((r.coloured as { highlights: number }).highlights).toBe((r.plain as { highlights: number }).highlights);
 			expect((r.coloured as { count: string }).count).toBe((r.plain as { count: string }).count);
 		}
 		const eq = results['= ']!;
-		expect((eq.coloured as { highlights: number }).highlights).toBe((eq.plain as { highlights: number }).highlights + 1);
+		expect(total((eq.coloured as { count: string }).count)).toBe(total((eq.plain as { count: string }).count) + 1);
 
 		// Legibility: each token colour against the find highlight colours.
 		// 要件56 の見た目に合わせた(2026-11-06 由谷承認): the `::highlight()` rules
@@ -778,14 +835,17 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 			for (const [name, value] of Object.entries(raw)) resolved[name] = resolve(value);
 			return { raw, resolved };
 		});
-		await openFile(path.join(gateDir, 'sample.ts'), samples.ts!.code.length + 'export const added = 42; // saved by the gate check\n'.length);
-		const tokenColours = await browser.execute((body) => {
+		await openFile(path.join(gateDir, 'sample.ts'), samples.ts!.code + 'export const added = 42; // saved by the gate check\n');
+		const tokenColours = await browser.execute((sel) => {
 			const set = new Set<string>();
-			for (const s of document.querySelectorAll<HTMLElement>(`${body} pre.vellis-plaintext span[style]`)) {
-				if (s.style.color) set.add(getComputedStyle(s).color);
+			const content = document.querySelector<HTMLElement>(sel)!;
+			const base = getComputedStyle(content).color;
+			for (const s of content.querySelectorAll<HTMLElement>('.cm-line span[class]')) {
+				const c = getComputedStyle(s).color;
+				if (c !== base) set.add(c);
 			}
 			return Array.from(set);
-		}, BODY);
+		}, FACE_CONTENT);
 		const unresolved: Record<string, string> = {};
 		const legibility: Record<string, Record<string, number>> = {};
 		for (const [name, bg] of Object.entries(hl.resolved)) {
@@ -805,47 +865,56 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 		});
 	});
 
-	it('gate 4: viewer zoom scales the coloured <pre> without re-rendering it', async () => {
-		const len = samples.ts!.code.length + 'export const added = 42; // saved by the gate check\n'.length;
-		await openFile(path.join(gateDir, 'sample.ts'), len);
+	// 要件74 2-5 / AC-74-31: the face is zoomed by its font-size, not by the body's CSS zoom; the EditorView is not re-created.
+	it('gate 4: viewer zoom scales the face by font-size (no CSS zoom on the body), without re-creating it', async () => {
+		const text = samples.ts!.code + 'export const added = 42; // saved by the gate check\n';
+		await openFile(path.join(gateDir, 'sample.ts'), text);
 		await pointAtRegion('.viewer-stack');
 		await emitMenu('menu_zoom_reset');
 		await browser.pause(200);
-		const before = await browser.execute((body) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext`)! as HTMLElement & { __gate?: number };
-			pre.__gate = 1;
-			const r = pre.getBoundingClientRect();
-			return { h: r.height, w: r.width, spans: pre.querySelectorAll('span[style]').length };
-		}, BODY);
+		const before = await browser.execute((face, sel) => {
+			const content = document.querySelector<HTMLElement>(sel)! as HTMLElement & { __gate?: number };
+			content.__gate = 1;
+			const r = content.getBoundingClientRect();
+			return { h: r.height, w: r.width, spans: content.querySelectorAll('.cm-line span[class]').length, fontSize: document.querySelector<HTMLElement>(face)!.style.fontSize };
+		}, FACE, FACE_CONTENT);
 		await emitMenu('menu_zoom_in');
 		await emitMenu('menu_zoom_in');
 		await browser.pause(300);
-		const after = await browser.execute((body) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext`)! as HTMLElement & { __gate?: number };
-			const r = pre.getBoundingClientRect();
+		const after = await browser.execute((face, sel, body) => {
+			const content = document.querySelector<HTMLElement>(sel)! as HTMLElement & { __gate?: number };
+			const r = content.getBoundingClientRect();
 			return {
 				h: r.height,
 				w: r.width,
-				spans: pre.querySelectorAll('span[style]').length,
-				sameElement: pre.__gate === 1,
-				zoom: document.querySelector<HTMLElement>(body)!.style.zoom,
-				lang: pre.getAttribute('data-vellis-lang'),
+				spans: content.querySelectorAll('.cm-line span[class]').length,
+				sameElement: content.__gate === 1,
+				bodyZoom: document.querySelector<HTMLElement>(body)!.style.zoom,
+				fontSize: document.querySelector<HTMLElement>(face)!.style.fontSize,
+				lang: document.querySelector(face)?.getAttribute('data-vellis-lang') ?? null,
 			};
-		}, BODY);
+		}, FACE, FACE_CONTENT, BODY);
 		await shot('req69-gate4-zoom-120pct');
 		await emitMenu('menu_zoom_reset');
 		report(REPORT, { gate: '69-4-zoom', before, after, heightRatio: after.h / before.h });
-		expect(after.zoom).toBe('120%');
+		expect(after.bodyZoom).toBe('');
+		expect(after.fontSize).toMatch(/120/);
 		expect(after.sameElement).toBe(true);
 		expect(after.spans).toBe(before.spans);
 		expect(after.lang).toBe('typescript');
 		expect(Math.abs(after.h / before.h - 1.2)).toBeLessThan(0.05);
 	});
 
-	it('gate 4: the print rule keeps token colours (stylesheet check + rules applied on screen)', async () => {
-		const len = samples.ts!.code.length + 'export const added = 42; // saved by the gate check\n'.length;
-		await openFile(path.join(gateDir, 'sample.ts'), len);
-		const res = await browser.execute((body) => {
+	// 要件74 2-5 / AC-74-39: Shiki is used for printing only — `beforeprint` builds `[data-testid="code-editor-print"] pre.vellis-plaintext`.
+	it('gate 4: the print rule keeps token colours on the Shiki <pre> that beforeprint builds (stylesheet check + rules applied on screen)', async () => {
+		const text = samples.ts!.code + 'export const added = 42; // saved by the gate check\n';
+		await openFile(path.join(gateDir, 'sample.ts'), text);
+		await browser.execute(() => window.dispatchEvent(new Event('beforeprint')));
+		await browser.waitUntil(
+			async () => browser.execute(() => document.querySelector('[data-testid="code-editor-print"] pre.vellis-plaintext span[style*="color"]') !== null),
+			{ timeout: 10_000, timeoutMsg: 'beforeprint did not build the Shiki <pre> with coloured spans' },
+		);
+		const res = await browser.execute(() => {
 			const printRules: string[] = [];
 			for (const sheet of Array.from(document.styleSheets)) {
 				let rules: CSSRuleList;
@@ -861,7 +930,7 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 				}
 			}
 			const spanRule = printRules.find((t) => /\.markdown-body span/.test(t) && /print-color-adjust:\s*exact/.test(t)) ?? null;
-			const spans = Array.from(document.querySelectorAll<HTMLElement>(`${body} pre.vellis-plaintext span[style]`)).filter((s) => s.style.color);
+			const spans = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="code-editor-print"] pre.vellis-plaintext span[style]')).filter((s) => s.style.color);
 			const colourBefore = spans.map((s) => getComputedStyle(s).color);
 			const style = document.createElement('style');
 			style.id = 'gate-print-sim';
@@ -874,12 +943,17 @@ describe('Requirement #69 human gates 1-4 (code files are highlighted)', () => {
 				colourSame: spans.every((s, i) => getComputedStyle(s).color === colourBefore[i]),
 				adjust: cs ? cs.getPropertyValue('print-color-adjust') || cs.getPropertyValue('-webkit-print-color-adjust') : null,
 				explorerHidden: getComputedStyle(document.querySelector('aside.explorer')!).display === 'none',
+				printSpans: spans.length,
 			};
-		}, BODY);
+		});
 		await shot('req69-gate4-print-rules-applied-on-screen');
-		await browser.execute(() => document.getElementById('gate-print-sim')?.remove());
+		await browser.execute(() => {
+			document.getElementById('gate-print-sim')?.remove();
+			window.dispatchEvent(new Event('afterprint'));
+		});
 		report(REPORT, { gate: '69-4-print', ...res });
 		expect(res.spanRule).not.toBeNull();
+		expect(res.printSpans).toBeGreaterThan(0);
 		expect(res.colourSame).toBe(true);
 		expect(res.adjust).toBe('exact');
 	});

@@ -38,9 +38,10 @@ const ALERT_LABELS: Record<string, string> = {
 };
 
 // The marker must occupy the whole first line: `[!TYPE]` optionally followed
-// by trailing spaces, then a newline or end-of-text.  Body text on the same
-// line means it is not an alert (GitHub behaves the same way).
-const MARKER = /^\[!(note|tip|important|warning|caution)\][^\S\n]*(\n|$)/i;
+// by trailing spaces, then a line ending (`\r\n`, `\r` or `\n` — CR-only and
+// CRLF documents too) or end-of-text.  Body text on the same line means it is
+// not an alert (GitHub behaves the same way).
+const MARKER = /^\[!(note|tip|important|warning|caution)\][^\S\r\n]*(\r\n|\r|\n|$)/i;
 
 interface HData {
 	hProperties?: Record<string, unknown>;

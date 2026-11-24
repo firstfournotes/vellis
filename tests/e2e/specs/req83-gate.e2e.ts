@@ -3,6 +3,10 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+	waitForFace,
+	replaceFaceText,
+	faceText,
+	faceDirty,
 	assertEventRecorderWorks,
 	assertIpcInterceptionWorks,
 	clearEventRecord,
@@ -879,31 +883,17 @@ async function marginPoint(): Promise<{ x: number; y: number; target: string } |
 
 // --- the unsaved edit (plain.txt, as req80's gate 4) ---------------------------------
 
-const PLAIN_VIEW = `${BODY} pre.vellis-plaintext`;
-const PLAIN_EDITOR = `${PLAIN_VIEW}[contenteditable="true"]`;
+// 要件74 2-5: plain.txt opens as a CodeMirror face (the editor is the view); an edit = replace the face's text.
 async function makeDirty(text: string): Promise<boolean> {
 	await closeOverlays();
 	await clickExplorerRow(uri('alpha/plain.txt'));
-	await browser.waitUntil(async () => (await exists(PLAIN_VIEW)) && (await textOf(PLAIN_VIEW)).includes('first line'), { timeout: 15_000, timeoutMsg: 'plain.txt did not open in the plain-text view' });
-	if (!(await exists(PLAIN_EDITOR))) {
-		await emitMenu('menu_edit');
-		await waitFor(PLAIN_EDITOR, 'the editor', 5_000);
-	}
-	return browser.execute(
-		(sel, t) => {
-			const el = document.querySelector<HTMLElement>(sel);
-			if (!el) return false;
-			el.focus();
-			el.textContent = t;
-			el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: t }));
-			return true;
-		},
-		PLAIN_EDITOR,
-		text,
-	);
+	await waitForFace('first line');
+	const ok = await replaceFaceText(text);
+	await browser.waitUntil(async () => await faceDirty(), { timeout: 5_000, timeoutMsg: 'the replaced text did not make the face dirty' }).catch(() => undefined);
+	return ok && (await faceDirty());
 }
 async function editorText(): Promise<string | null> {
-	return browser.execute((sel) => document.querySelector<HTMLElement>(sel)?.textContent ?? null, PLAIN_EDITOR);
+	return faceText();
 }
 async function messageIpcCount(mark: number): Promise<number> {
 	return (await ipcAfter(mark, ['plugin:dialog|message'])).length;
@@ -1736,7 +1726,8 @@ describe('Requirement #83 human gates, the machine part — the launch Dashboard
 			}
 		});
 		const windowsBefore = await operator('windows');
-		const noops = ['menu_find_in_folder', 'menu_recent_files', 'menu_go_to', 'menu_print', 'menu_zoom_in', 'menu_zoom_out', 'menu_zoom_reset', 'menu_edit', 'menu_find', 'menu_reload_file', 'menu_new_tab'];
+		// 要件74 2-5: `menu_edit` (Edit ▸ Edit) is gone; the 10 events that remain.
+		const noops = ['menu_find_in_folder', 'menu_recent_files', 'menu_go_to', 'menu_print', 'menu_zoom_in', 'menu_zoom_out', 'menu_zoom_reset', 'menu_find', 'menu_reload_file', 'menu_new_tab'];
 		const benign = ['list_missing_paths', 'scan_recently_modified', 'list_history', 'list_bookmarks', 'plugin:event|emit', 'plugin:event|listen', 'plugin:event|unlisten'];
 		let mark = await ipcMark();
 		for (const ev of noops) {
@@ -1763,12 +1754,12 @@ describe('Requirement #83 human gates, the machine part — the launch Dashboard
 		});
 		// Key by key (JSON.stringify saw the keys in another order = the 2026-11-05 run's red).
 		const zoomSame = zoomBefore !== null && zoomAfter !== null && zoomBefore.viewer === zoomAfter.viewer && zoomBefore.explorer === zoomAfter.explorer;
-		judge(11, 'the 11 menu events: the Dashboard stays, no panel / bar / editor, no IPC beyond the Dashboard’s own, the zoom storage unchanged (契約15 (q)(y))', s.dashboard && !s.find_in_folder && !s.recent_files && !s.go_to && !s.find_bar && !s.editor && s.ipc.length === 0 && zoomSame, { ...s, zoomBefore, zoomAfter });
+		judge(11, 'the 10 menu events (menu_edit gone with 要件74 2-5): the Dashboard stays, no panel / bar / editor, no IPC beyond the Dashboard’s own, the zoom storage unchanged (契約15 (q)(y))', s.dashboard && !s.find_in_folder && !s.recent_files && !s.go_to && !s.find_bar && !s.editor && s.ipc.length === 0 && zoomSame, { ...s, zoomBefore, zoomAfter });
 		if (OPERATOR) {
 			mark = await ipcMark();
 			const km = await keysMark();
 			const keys: Array<[number, string[], string]> = [
-				[KEY.e, ['cmd'], 'Command + E (Edit)'],
+				// 要件74 2-5: Command + E has no menu item any more (Edit ▸ Edit removed); not sent.
 				[KEY.f, ['cmd'], 'Command + F (Find)'],
 				[KEY.f, ['cmd', 'shift'], 'Shift + Command + F (Find in Folder…)'],
 				[KEY.g, ['cmd', 'shift'], 'Shift + Command + G (Go to Path…)'],

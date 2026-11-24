@@ -1,0 +1,9 @@
+{
+  "appearance": {
+    "mode": "system",
+    "theme": "default"
+  },
+  "explorer": {
+    "showHidden": false
+  }
+}

@@ -4,6 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+	FACE_CONTENT,
+	MD_FACE,
+	appendToMdFace,
+	deleteMdFaceTail,
+	faceText,
+	mdFaceText,
+	replaceFaceText,
 	assertEventRecorderWorks,
 	assertIpcInterceptionWorks,
 	clearCapturedIpc,
@@ -43,8 +50,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *  gate 1  rename inside the same folder → a clean document closes
  *  gate 2  a raster image (png) in the Trash → the view closes
  *  gate 3  dirty document → Trash → banner; "Put Back" → the removed banner
- *          goes and the external-change banner takes its place (AC-48-追g (d));
- *          Trash again → the removed banner is back
+ *          goes; the edits and the unsaved badge stay, no conflict banner (要件74
+ *          契約13 replaced AC-48-追g (d): the file that came back equals the base
+ *          version, so the 3-way merge has nothing to take in and nothing that
+ *          overlaps — a banner is only for an overlap); Trash again → the removed
+ *          banner is back
  *  gate 4  dirty document → Trash → banner; Command + S writes the file at its
  *          path again → the banner goes; Trash again → the document closes
  *          (the save made it clean, 要件#48 追補g 契約1); put back, reopened and
@@ -67,9 +77,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * the throwaway home). Every item this spec puts there is remembered by the
  * path NSFileManager reports and taken out again in `after()`.
  *
- * What is observed: the DOM (empty state / `h1` / the editor `<pre>` / the two
- * banners `external-removed-banner` and `external-change-banner` with their
- * wording and button titles / the image viewer), the Tauri events
+ * What is observed: the DOM (empty state / `h1` / the editing face = the ProseMirror
+ * face of a Markdown file, 要件74 第2段, read through `mdFaceText` and made dirty by
+ * typing into it with `appendToMdFace` / the unsaved badge / the two
+ * banners `external-removed-banner` and `external-conflict-banner` (要件74 契約13;
+ * the old `external-change-banner` went with the old editing) plus the merged
+ * notice `external-merged-notice`, with their wording and button titles / the
+ * image viewer), the Tauri events
  * `file_removed` / `file_changed` / `binary_file_changed` as the page receives
  * them (a second listener next to the app's own, gate-helpers
  * `installEventRecorder`), the IPC commands `open_document` /
@@ -105,11 +119,26 @@ const closer = path.join(gateDir, 'closer.md');
 const keep = path.join(gateDir, 'keep.md');
 
 const doc = (title: string) => `# ${title}\n\nA line that stays as it is on disk.\n`;
-const EDIT = 'An edit the gate check typed and did not save.\n';
+/**
+ * What the gate types at the end of the last paragraph (要件74 第2段: the Markdown file is a
+ * ProseMirror face from the moment it opens; typing goes into the paragraph, so no newline —
+ * a newline typed into the face would split the block instead of ending a line).
+ */
+const EDIT = ' An edit the gate check typed and did not save.';
+/**
+ * The face's visible text for `doc(title)` with `edits` copies of EDIT appended: the heading
+ * loses its `#`, the blocks are joined by `\n` (gate-helpers `mdFaceText`).
+ */
+const shown = (title: string, edits = 0) => `${title}\nA line that stays as it is on disk.${EDIT.repeat(edits)}`;
+/**
+ * The bytes Command + S writes for `doc(title)` + one EDIT (要件74 契約6: the untouched heading and the
+ * gap are the original bytes; the touched paragraph is written back as its text; the file keeps its
+ * final newline).
+ */
+const savedBytes = (title: string) => `# ${title}\n\nA line that stays as it is on disk.${EDIT}\n`;
 
 /** The banners' wording (src/components/Viewer.svelte, 要件#48 追補g/h). */
 const REMOVED_DIRTY = 'This file was deleted outside the app. Your edits have not been saved.';
-const CHANGED = 'This file was changed outside the app. It differs from your edits.';
 const SAVE_TITLE_DIRTY = 'Save your edits to the file again';
 
 /** The UI is given this long for an event to show (header comment). */
@@ -156,21 +185,41 @@ interface View {
 	editing: boolean;
 	editorText: string | null;
 	removed: BannerView;
+	/** The conflict banner of 要件74 契約13 (`external-conflict-banner`: Keep My Edits / Use the File on Disk). */
 	changed: { present: boolean; text: string | null; buttons: string[] };
+	/** The notice of a merge that did not overlap (契約13, `external-merged-notice`). */
+	merged: { present: boolean; text: string | null };
 	image: { shown: boolean; alt: string | null; error: boolean };
 }
 
 async function view(): Promise<View> {
-	return browser.execute((body) => {
-		const text = (el: Element | null) => el?.textContent?.replace(/\s+/g, ' ').trim() ?? null;
-		const removedEl = document.querySelector('[data-testid="external-removed-banner"]');
-		const changedEl = document.querySelector('[data-testid="external-change-banner"]');
-		const img = document.querySelector<HTMLImageElement>('article.image-viewer img.image');
-		return {
-			emptyState: document.querySelector('.empty-state') !== null,
-			h1: document.querySelector(`${body} h1`)?.textContent ?? null,
-			editing: document.querySelector(`${body} pre.vellis-plaintext[contenteditable="true"]`) !== null,
-			editorText: document.querySelector(`${body} pre.vellis-plaintext`)?.textContent ?? null,
+	return browser.execute(
+		(body, cmContent, pmRoot) => {
+			const text = (el: Element | null) => el?.textContent?.replace(/\s+/g, ' ').trim() ?? null;
+			const removedEl = document.querySelector('[data-testid="external-removed-banner"]');
+			const changedEl = document.querySelector('[data-testid="external-conflict-banner"]');
+			const mergedEl = document.querySelector('[data-testid="external-merged-notice"]');
+			const img = document.querySelector<HTMLImageElement>('article.image-viewer img.image');
+			interface PMNodeLike {
+				content: { size: number };
+				textBetween(from: number, to: number, block?: string, leaf?: string): string;
+			}
+			return {
+				emptyState: document.querySelector('.empty-state') !== null,
+				h1: document.querySelector(`${body} h1`)?.textContent ?? null,
+				// 要件74 第2段: the editor is the view. "editing" = the face is dirty (the unsaved badge, 契約3 (aj));
+				// the text = the face's visible text (CodeMirror lines for a text file, the ProseMirror blocks for
+				// Markdown — the same reading as gate-helpers `faceText` / `mdFaceText`).
+				editing: document.querySelector('article.viewer [data-testid="unsaved-badge"]') !== null,
+				editorText: (() => {
+					const content = document.querySelector(cmContent);
+					if (content) return Array.from(content.querySelectorAll('.cm-line')).map((l) => l.textContent ?? '').join('\n');
+					const pm = document.querySelector(pmRoot) as (HTMLElement & { pmViewDesc?: { node?: PMNodeLike } }) | null;
+					if (!pm) return null;
+					const node = pm.pmViewDesc?.node;
+					if (node && typeof node.textBetween === 'function') return node.textBetween(0, node.content.size, '\n', ' ');
+					return Array.from(pm.children).map((c) => c.textContent ?? '').join('\n');
+				})(),
 			removed: {
 				present: removedEl !== null,
 				text: text(removedEl?.querySelector('.external-change-text') ?? null),
@@ -183,13 +232,18 @@ async function view(): Promise<View> {
 				text: text(changedEl?.querySelector('.external-change-text') ?? null),
 				buttons: Array.from(changedEl?.querySelectorAll('button') ?? []).map((b) => text(b) ?? ''),
 			},
-			image: {
-				shown: img !== null,
-				alt: img?.getAttribute('alt') ?? null,
-				error: document.querySelector('article.image-viewer .image-error') !== null,
-			},
-		};
-	}, BODY);
+			merged: { present: mergedEl !== null, text: text(mergedEl) },
+				image: {
+					shown: img !== null,
+					alt: img?.getAttribute('alt') ?? null,
+					error: document.querySelector('article.image-viewer .image-error') !== null,
+				},
+			};
+		},
+		BODY,
+		FACE_CONTENT,
+		MD_FACE,
+	);
 }
 
 /** Poll `check` until it holds or `timeout` passes; never throws (evidence is reported either way). */
@@ -393,23 +447,21 @@ async function openMarkdown(file: string, title: string): Promise<void> {
 	});
 }
 
-/** Edit > Edit (the menu event), then append EDIT to the source so the document is dirty. */
+/**
+ * 要件74 第2段: a Markdown file is a ProseMirror face from the moment it opens — append EDIT to its last
+ * paragraph so the document is dirty (no Edit ▸ Edit any more). The 2026-11-17 rewrite waited for the
+ * CodeMirror face here, which a Markdown fixture never shows (the CI run 45354850519 failed on exactly that).
+ */
 async function enterEditAndType(): Promise<void> {
-	await emitMenu('menu_edit');
+	await browser.waitUntil(async () => (await mdFaceText()) !== null, {
+		timeout: 5_000,
+		timeoutMsg: `the ProseMirror face did not come up (view: ${JSON.stringify(await view())})`,
+	});
+	expect(await appendToMdFace(EDIT)).toBe(true);
 	await browser.waitUntil(async () => (await view()).editing, {
 		timeout: 5_000,
-		timeoutMsg: 'menu_edit did not enter the editor',
+		timeoutMsg: `the appended text did not make the face dirty (no unsaved badge; face: ${JSON.stringify(await mdFaceText())})`,
 	});
-	await browser.execute(
-		(body, extra) => {
-			const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`)!;
-			// 追補r (Issue #767): the editor holds "source + one `\n`" (the sentinel); type before it.
-			pre.textContent = (pre.textContent ?? '').slice(0, -1) + extra + '\n';
-			pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: extra }));
-		},
-		BODY,
-		EDIT,
-	);
 }
 
 /** Screenshot that must not fail a gate when the display is off (req-69 追補a). */
@@ -423,9 +475,9 @@ async function safeShot(name: string): Promise<string | null> {
 }
 
 /**
- * Leave no document open and no editor, without a dialog: the removed banner's
- * Close (`clearDocument`), else put the buffer back to the fixture text and
- * press Done Editing, else open `closer.md` and delete it (a clean document
+ * Leave no document open and nothing dirty, without a dialog: the removed banner's
+ * Close (`clearDocument`), else take the typed EDITs back out of the face so it is
+ * clean again (the badge goes), else open `closer.md` and delete it (a clean document
  * closes on `file_removed`). `plugin:dialog|message` is blocked meanwhile so an
  * unexpected ask can never leave a native sheet on the window.
  */
@@ -442,24 +494,19 @@ async function closeAnyOpenDocument(): Promise<Record<string, unknown>> {
 			v = await view();
 		}
 		if (v.editing) {
-			// The buffer is the fixture text plus EDIT (enterEditAndType); strip the
-			// edit so the buffer equals the document and Done asks nothing.
-			// 追補r: the editor holds "source + one `\n`" (the sentinel); strip it, strip EDIT, write it back with the sentinel.
-			const source = v.editorText !== null && v.editorText.endsWith('\n') ? v.editorText.slice(0, -1) : v.editorText;
-			const original = source !== null && source.endsWith(EDIT) ? source.slice(0, -EDIT.length) + '\n' : null;
-			await browser.execute(
-				(body, text) => {
-					const pre = document.querySelector<HTMLElement>(`${body} pre.vellis-plaintext[contenteditable="true"]`);
-					if (pre && text !== null) {
-						pre.textContent = text;
-						pre.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-					}
-					document.querySelector<HTMLButtonElement>('[data-testid="edit-done"]')?.click();
-				},
-				BODY,
-				original,
-			);
-			steps.push('revert-and-done');
+			// 要件74 第2段: the face holds the fixture text plus one or more EDITs (enterEditAndType); take them out
+			// again so nothing is dirty (no Done Editing any more — the face is the view). A CodeMirror face (not
+			// expected here: every fixture is Markdown) gets its whole text put back instead.
+			const source = v.editorText ?? '';
+			let edits = 0;
+			while (source.endsWith(EDIT.repeat(edits + 1))) edits++;
+			if ((await faceText()) !== null) {
+				if (edits > 0) await replaceFaceText(source.slice(0, -EDIT.length * edits));
+				steps.push('revert-cm-face');
+			} else {
+				if (edits > 0) await deleteMdFaceTail(EDIT.length * edits);
+				steps.push(`revert-md-face:${edits}`);
+			}
 			await pollUntil(async () => !(await view()).editing, 5_000);
 			v = await view();
 			if (v.emptyState) return { steps };
@@ -614,12 +661,12 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		expect(ev.dialogs).toEqual([]);
 	});
 
-	it('gate 3: dirty document → Trash → banner; Put Back → the banner goes; Trash again → the banner is back', async function () {
+	it('gate 3: dirty document → Trash → banner; Put Back → the banner goes, the edits stay, no conflict banner (要件74 契約13); Trash again → the banner is back', async function () {
 		this.timeout(180_000);
 		await ensureGateDirExpanded();
 		await openMarkdown(restoreMe, 'Restore me');
 		await enterEditAndType();
-		expect((await view()).editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
+		expect((await view()).editorText).toBe(shown('Restore me', 1));
 		await clearLogs();
 
 		// 1. Trash → the removed banner (要件#48 追補g), document and edits kept.
@@ -635,36 +682,45 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		expect(a.view.removed.buttons).toEqual(['Save', 'Close']);
 		expect(a.view.removed.saveTitle).toBe(SAVE_TITLE_DIRTY);
 		expect(a.view.editing).toBe(true);
-		expect(a.view.editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
+		expect(a.view.editorText).toBe(shown('Restore me', 1));
 		expect(a.view.emptyState).toBe(false);
 		expect(a.events.fileRemoved).toBe(1);
 		expect(a.events.fileChanged).toBe(0);
 		expect(a.dialogs).toEqual([]);
 
 		// 2. Put Back → 人間ゲート: 帯が消える. The file is back at its path with the
-		//    original text, which differs from the edits, so AC-48-追g (d) applies:
-		//    the removed banner goes and the external-change banner takes its
-		//    place (印が消え、外部変更の帯が出る). The view at the moment the removed
-		//    banner went (`viewWhenGone`) and the events that arrived are recorded.
+		//    original text. AC-48-追g (d) (the external-change banner takes the removed
+		//    banner's place) was revised by 要件74 契約13: an external change on a dirty
+		//    document is a 3-way merge of base / buffer / disk — what came back *is*
+		//    the base version, so there is nothing to take in and nothing overlaps,
+		//    and a banner is only for an overlap. So: the removed banner goes, no
+		//    conflict banner, the edits and the unsaved badge stay, the disk holds the
+		//    base text (nothing was written). The merged notice is recorded, not
+		//    judged (契約13 words it for a merge that took something in). The view at
+		//    the moment the removed banner went (`viewWhenGone`) and the events that
+		//    arrived are recorded.
 		await clearLogs();
 		const backAt = putBack(t1);
 		const gone = await pollUntil(async () => !(await view()).removed.present, ARRIVAL);
 		const bFirst = await view();
 		await browser.pause(QUIET);
 		const b = await evidence(restoreMe, backAt);
+		const onDiskAfterPutBack = fs.existsSync(restoreMe) ? fs.readFileSync(restoreMe, 'utf8') : null;
 		await safeShot('req22a-gate3-b-put-back');
-		report(REPORT, { gate: '22a-3-b-put-back', gone, viewWhenGone: bFirst, ...b });
+		report(REPORT, { gate: '22a-3-b-put-back', gone, viewWhenGone: bFirst, onDiskIsBase: onDiskAfterPutBack === doc('Restore me'), ...b });
 		expect(gone.ok).toBe(true);
 		expect(b.view.removed.present).toBe(false);
-		// AC-48-追g (d): the external-change banner, with its two choices.
-		expect(b.view.changed.present).toBe(true);
-		expect(b.view.changed.text).toBe(CHANGED);
-		expect(b.view.changed.buttons).toEqual(['Overwrite', 'Reload']);
-		// The edits are still there (要件#48 追補g: nothing is dropped silently).
+		// 契約13: no overlap → no conflict banner (Keep My Edits / Use the File on Disk).
+		expect(b.view.changed.present).toBe(false);
+		expect(b.view.changed.buttons).toEqual([]);
+		// The edits are still there and the document is still dirty (契約13: dirty のまま).
 		expect(b.view.editing).toBe(true);
-		expect(b.view.editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
+		expect(b.view.editorText).toBe(shown('Restore me', 1));
 		expect(b.view.emptyState).toBe(false);
+		expect(b.view.h1).toBe('Restore me');
+		// The disk holds the base version: the put back wrote nothing, the app wrote nothing.
 		expect(b.onDisk).toBe(true);
+		expect(onDiskAfterPutBack).toBe(doc('Restore me'));
 		expect(b.dialogs).toEqual([]);
 
 		// 3. Trash again → the banner is back (the hub's `gone` was reset by the
@@ -686,7 +742,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		// 要件#48 追補h 契約1: never both banners at once.
 		expect(c.view.changed.present).toBe(false);
 		expect(c.view.editing).toBe(true);
-		expect(c.view.editorText).toBe(doc('Restore me') + EDIT + '\n'); // 追補r: + sentinel
+		expect(c.view.editorText).toBe(shown('Restore me', 1));
 		expect(c.events.fileRemoved).toBe(1);
 		expect(c.events.fileChanged).toBe(0);
 		expect(c.dialogs).toEqual([]);
@@ -697,7 +753,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		await ensureGateDirExpanded();
 		await openMarkdown(resaveMe, 'Resave me');
 		await enterEditAndType();
-		expect((await view()).editorText).toBe(doc('Resave me') + EDIT + '\n'); // 追補r: + sentinel
+		expect((await view()).editorText).toBe(shown('Resave me', 1));
 		await clearLogs();
 
 		// 1. Trash → the removed banner.
@@ -732,17 +788,18 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 			.map((c) => ({ ok: c.ok, args: c.args, error: c.ok ? null : c.body }));
 		const onDisk = fs.existsSync(resaveMe) ? fs.readFileSync(resaveMe, 'utf8') : null;
 		await safeShot('req22a-gate4-b-saved');
-		report(REPORT, { gate: '22a-4-b-saved', route: 'menu_save event (File > Save = Command + S)', saved, saveCalls, onDiskIsEdited: onDisk === doc('Resave me') + EDIT, ...b });
+		report(REPORT, { gate: '22a-4-b-saved', route: 'menu_save event (File > Save = Command + S)', saved, saveCalls, onDiskIsEdited: onDisk === savedBytes('Resave me'), ...b });
 		expect(saved.ok).toBe(true);
 		expect(saveCalls.length).toBe(1);
 		expect(saveCalls[0]!.ok).toBe(true);
 		expect((saveCalls[0]!.args as { uri?: string } | null)?.uri).toBe(uri(resaveMe));
-		expect(onDisk).toBe(doc('Resave me') + EDIT);
+		expect(onDisk).toBe(savedBytes('Resave me'));
 		expect(b.view.removed.present).toBe(false);
 		// The save's own echo is not an external change (要件#48 契約⑥).
 		expect(b.view.changed.present).toBe(false);
-		expect(b.view.editing).toBe(true);
-		expect(b.view.editorText).toBe(doc('Resave me') + EDIT + '\n'); // 追補r: + sentinel
+		// 要件74 契約14: the save makes the face clean — the unsaved badge goes (the text stays as typed).
+		expect(b.view.editing).toBe(false);
+		expect(b.view.editorText).toBe(shown('Resave me', 1));
 		expect(b.events.fileRemoved).toBe(0);
 		expect(b.dialogs).toEqual([]);
 
@@ -775,13 +832,13 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		//    document closed in step 3), edit again, Trash → the dirty banner.
 		const backAt = putBack(t2);
 		const putBackContent = fs.readFileSync(resaveMe, 'utf8');
-		report(REPORT, { gate: '22a-4-d-put-back', how: 'put back the saved file from the Trash (fs.renameSync), then reopen', backAt, onDiskIsSavedContent: putBackContent === doc('Resave me') + EDIT });
-		expect(putBackContent).toBe(doc('Resave me') + EDIT);
+		report(REPORT, { gate: '22a-4-d-put-back', how: 'put back the saved file from the Trash (fs.renameSync), then reopen', backAt, onDiskIsSavedContent: putBackContent === savedBytes('Resave me') });
+		expect(putBackContent).toBe(savedBytes('Resave me'));
 		await ensureGateDirExpanded();
 		await waitForExplorerRow(uri(resaveMe), { timeout: ARRIVAL });
 		await openMarkdown(resaveMe, 'Resave me');
 		await enterEditAndType();
-		expect((await view()).editorText).toBe(doc('Resave me') + EDIT + EDIT + '\n'); // 追補r: + sentinel
+		expect((await view()).editorText).toBe(shown('Resave me', 2));
 		// The put back's notification can reach the reopened document's watch
 		// late and be recorded as a `file_changed` after the clear below (Issue
 		// #770). The recorder sees `file_*` events only for an open document, so
@@ -803,7 +860,7 @@ describe('Requirement #22 追補a human gate (rename / Move to Trash / Put Back 
 		expect(d.view.removed.buttons).toEqual(['Save', 'Close']);
 		expect(d.view.changed.present).toBe(false);
 		expect(d.view.editing).toBe(true);
-		expect(d.view.editorText).toBe(doc('Resave me') + EDIT + EDIT + '\n'); // 追補r: + sentinel
+		expect(d.view.editorText).toBe(shown('Resave me', 2));
 		expect(d.view.emptyState).toBe(false);
 		expect(d.events.fileRemoved).toBe(1);
 		expect(d.events.fileChanged).toBe(0);

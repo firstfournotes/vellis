@@ -130,3 +130,29 @@ not to wdio or tauri-webdriver.
   backlog 190): it does not register with 3DxWare or read raw HID, so a
   test app that is killed mid-run cannot leave a stale 3DxWare client
   behind. No local patch is needed before driving a webdriver build.
+
+## Retired specs (要件74 第2段 2-5, 2026-11-17, 仮の承認)
+
+The current editing (Edit ▸ Edit, the `<pre contenteditable>` source editor, Done Editing, the
+HTML edit surface) was removed by requirement 74; the editing face (CodeMirror for text / code,
+ProseMirror for Markdown) is the view from the moment a file opens. The six specs that judged the
+removed editor itself were retired (git rm). What each one looked at is now covered elsewhere:
+
+- `req48n-source-newline-gate` — Return / paste / undo keep their line breaks in the source editor
+  → the CodeMirror face: `req74-gate` gate 11 (real Return, Tab) and gate 8 (real Command + V keeps
+  CRLF / LF), gate 9 (undo).
+- `req48nop-real-input-gate` — IME Return, real Command + Z / V, the one unsaved sheet, the
+  double-click caret in `<pre>` / a paragraph / a fence / the HTML surface → IME: 人間ゲート B.1
+  (`docs/req74-stage1-device.md`); the unsaved sheet: `req48m`, `req80` gate 4, `req83` gate 3b,
+  `req84` gate 8; keys and caret: `req74-gate` gate 11 / 9 / 8 (the face places the caret itself).
+- `req48p-edit-caret-gate` — the caret lands where the user double-clicked, Command + E keeps the
+  selection → no mode switch exists any more; the face keeps the caret: `req74-gate` gate 11 (a
+  real click puts the caret at that character, also at 150 %: gate 8).
+- `req48q-html-caret-gate` — the HTML edit surface's caret → HTML is read-only until requirement
+  79 (契約21); `req84` gate 2 judges that a double-click on the iframe opens no edit surface.
+- `req48qr-real-input-gate` — the HTML surface with real keys, the trailing newline of the source
+  editor → HTML as above; the final newline and CRLF of the face: `req74-gate` gate 11 (CRLF
+  save keeps `\r\n`) and the unit tests of `text-document` (契約15).
+- `req48r-trailing-newline-gate` — the final newline survives the source editor (the sentinel) →
+  the face has no sentinel; `req74-gate` gate 11 / 6 (the saved bytes differ only in the touched
+  line) and `CodeEditor.wiring.test.ts` (契約15: a trailing newline / BOM round-trips byte for byte).

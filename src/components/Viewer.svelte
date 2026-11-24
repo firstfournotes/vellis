@@ -7,10 +7,8 @@
 	import { sha256 } from '$lib/annotation';
 	import { mountMermaid } from '$lib/mermaid-mounter';
 	import { planSelectionCopy } from '$lib/copy-selection';
-	import { bufferFromPre } from '$lib/document-edit';
+	import { canEnterEdit } from '$lib/document-edit';
 	import { detectFileType } from '$lib/file-type';
-	import { saveDocument } from '$lib/save-document';
-	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { openFileFailedMessage } from '$lib/open-document';
 	import { openInNewWindowFailedMessage } from '$lib/open-in-new-window';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
@@ -28,28 +26,27 @@
 		type MatchRange,
 	} from '$lib/find-in-document';
 	import { FIND_SURFACE_BASE_CSS, rewriteSurfaceCss, surfaceBaseCss } from '$lib/find-surface-style';
+	import { MENU_FIND_REPLACE_EVENT } from '../editor/cm-replace';
 	import FindBar from './FindBar.svelte';
+	import EditorDiffView from './EditorDiffView.svelte';
+	import FormatToolbar from './FormatToolbar.svelte';
+	import Icon from './Icon.svelte';
 	import {
-		buildEditSurface,
-		commitBlock,
-		resolveLeafBlock,
-		snapshotBlock,
-		STRUCTURE_CHANGED_MESSAGE,
-		type BlockShape,
-		type EditSurfaceIndex,
-	} from '../html/edit';
+		announceFormatToolbar,
+		MENU_SHOW_FORMAT_TOOLBAR_EVENT,
+		readFormatToolbarShown,
+		watchFocusForFormatToolbar,
+		writeFormatToolbarShown,
+	} from '../editor/format-toolbar';
+	import CodeEditor from './CodeEditor.svelte';
+	import MarkdownEditor from './MarkdownEditor.svelte';
+	import { markdownTooLarge } from '../editor/markdown-limits';
+	import { CONFLICT_MESSAGE, saveFileEditor, type MarkdownEditorHandle } from '../editor/file-editor';
+	import { MENU_RAW_SOURCE_EVENT, watchFocusForRawSource } from '../editor/raw-sync';
+	import { buildEditSurface } from '../html/edit';
 	import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
-	import type { NodeMeta, SourceIndex, SourcePosition } from '../markdown/types';
-	import { isBlockType } from '../markdown/source-index';
+	import type { SourceIndex } from '../markdown/types';
 	import { buildAnchor, type BuiltAnchor } from '../markdown/selection';
-	import {
-		assembleCodeFence,
-		replaceRange,
-		resolveEditTarget,
-		serializeBlock,
-		splitCodeFence,
-	} from '../markdown/edit';
-
 	let {
 		document,
 		html,
@@ -63,6 +60,8 @@
 		findInitialIndex = 0,
 		onFindOpenChange,
 		goToOpen = false,
+		aiTools = true,
+		codeTheme = 'github-light',
 	}: {
 		document: DocumentPayload;
 		html: string;
@@ -108,7 +107,235 @@
 		 * ハンドラも `findOpen` と同じようにこれを見て譲る(両側から挟む)。
 		 */
 		goToOpen?: boolean;
+		/**
+		 * 要件#84 契約5: ツールバーの Add Instruction と Marks(今の AI 連携)を出すか。
+		 * 配布版では +page.svelte が偽を渡す。既定は出る側(契約10)。
+		 */
+		aiTools?: boolean;
+		/** 要件#74 契約5: 面の配色= Shiki の同梱テーマの名前(+page.svelte が今のモードのテーマを渡す)。 */
+		codeTheme?: string;
 	} = $props();
+
+	/** 要件#74: コードのファイルと plain text を CodeMirror の面で出しているか。 */
+	let faceActive = $derived(detectFileType(document.uri) === 'text');
+
+	/** 要件#74 第2段: Markdown か(面か、読み取り専用の描画か)。 */
+	let markdownFile = $derived(detectFileType(document.uri) === 'markdown');
+	/**
+	 * 閾値の判定の記憶(uri と、その uri を開いたときの content が閾値を超えていたか)。反応しない変数にして、
+	 * 同じ uri の間は保存(markSaved)や外部変更の取り込みで content が閾値をまたいでも判定を変えない
+	 * (変えると下の `{#key}` で編集中の面が作り直される=要件#74 /code-review A)。uri が変われば判定し直す。
+	 */
+	let tooBigMemo: { uri: string; big: boolean } | null = null;
+	/** 閾値を超えた Markdown(今の描画で開き、知らせを出す=契約18・判断 8)。判定は uri ごとに 1 回。 */
+	let markdownTooBig = $derived.by(() => {
+		const uri = document.uri;
+		if (tooBigMemo?.uri !== uri) tooBigMemo = { uri, big: untrack(() => markdownTooLarge(document.content)) };
+		return markdownFile && canEnterEdit('markdown', uri) && tooBigMemo.big;
+	});
+	/** Markdown の編集面(ProseMirror)を出しているか。SSH root と閾値超えは今の描画(契約3・4・18)。 */
+	let mdFaceActive = $derived(markdownFile && canEnterEdit('markdown', document.uri) && !markdownTooBig);
+	/** 閾値を超えた Markdown を Raw Source で raw だけの面にしているか(項目 21)。文書が変われば下ろす(判断 10)。 */
+	let bigRaw = $state(false);
+	$effect(() => {
+		void document.uri;
+		bigRaw = false;
+	});
+	/** 閾値超えの今の描画の窓は、View ▸ Raw Source で raw に入れる(面が出ている間は面が自分で受ける)。 */
+	$effect(() => {
+		if (!markdownTooBig || bigRaw) return;
+		let off: (() => void) | null = null;
+		let disposed = false;
+		void listen(MENU_RAW_SOURCE_EVENT, () => {
+			bigRaw = true;
+		})
+			.then((unlisten) => {
+				if (disposed) unlisten();
+				else off = unlisten;
+			})
+			.catch(() => {});
+		return () => {
+			disposed = true;
+			off?.();
+		};
+	});
+	/** Markdown の面(rendered か raw)を出しているか。 */
+	let mdSurface = $derived(mdFaceActive || (markdownTooBig && bigRaw));
+	/** Markdown の面が raw を出しているか(raw の間は `.markdown-body` に zoom を掛けない=項目 16)。 */
+	let mdRaw = $derived(mdSurface && (windowState.fileEditor as MarkdownEditorHandle | null)?.raw === true);
+	/** どちらかの新しい面(札・帯の出し分け)。 */
+	let anyFace = $derived(faceActive || mdSurface);
+	/** CodeMirror の面(コード・plain text・raw)の検索=面が文書全体を数える(契約17)。 */
+	let cmFind = $derived(faceActive || mdRaw);
+
+	// 要件#74 項目 1 (a)(b): Markdown を読み取り専用の描画(SSH・閾値超え)で出している間の印。
+	$effect(() => {
+		windowState.editBlocked = markdownFile && !mdFaceActive;
+		return () => {
+			windowState.editBlocked = false;
+		};
+	});
+
+	/** Markdown の面が変換中か(検索の張り替えを待つ=契約10)。 */
+	let mdComposing = $state(false);
+	/** Markdown の面で今の件数を数えた語(変換中は前の語のまま=件数を張り替えない)。 */
+	let mdAppliedQuery = $state('');
+	let mdRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/** Markdown の面の文書が変わった: 間をおいて検索を張り直す(項目 15)。 */
+	function handleMdDocChange() {
+		if (mdRefreshTimer) clearTimeout(mdRefreshTimer);
+		mdRefreshTimer = setTimeout(() => {
+			mdRefreshTimer = undefined;
+			findRefresh += 1;
+		}, 100);
+	}
+
+	/** 要件#74: 面が数えた一致(語と、CodeMirror の文書の位置の一致)。 */
+	let faceFind = $state<{ query: string; ranges: MatchRange[] }>({ query: '', ranges: [] });
+
+	function handleFaceFindResults(result: { query: string; ranges: MatchRange[]; current?: number }) {
+		const changed = result.query !== faceFind.query;
+		faceFind = { query: result.query, ranges: result.ranges };
+		findRanges = result.ranges;
+		// 第3段 3-3: 置換の後は面が現在を選ぶ(替えた文字の終わり以降の最初の一致)
+		if (result.current !== undefined) findCurrent = result.current;
+		else findCurrent = changed ? 0 : Math.min(findCurrent, Math.max(0, result.ranges.length - 1));
+	}
+
+	// --- 書式のツールバー(要件#74 第4段 4-2・4-5・4-6) -----------------------
+
+	/** 出すか(アプリ全体で 1 つ=localStorage。既定=隠す)。 */
+	let formatToolbarShown = $state(readFormatToolbarShown(typeof localStorage === 'undefined' ? null : localStorage));
+	/** ツールバーを出せる面か(Markdown の編集面=rendered・書ける)。 */
+	let formatToolbarAvailable = $derived(
+		mdFaceActive && !mdRaw && windowState.fileEditor?.kind === 'markdown' && !windowState.fileEditor.readOnly,
+	);
+	/** いま出している面の handle(出せないときは null)。 */
+	let formatToolbarHandle = $derived(
+		formatToolbarAvailable && formatToolbarShown ? (windowState.fileEditor as MarkdownEditorHandle) : null,
+	);
+
+	function toggleFormatToolbar() {
+		if (!formatToolbarAvailable) return;
+		formatToolbarShown = !formatToolbarShown;
+		writeFormatToolbarShown(formatToolbarShown);
+	}
+
+	// View ▸ Show Formatting Toolbar のチェック印=この窓で見えているか(mount・面の切り替え・出し入れで知らせる)
+	$effect(() => {
+		const visible = formatToolbarAvailable && formatToolbarShown;
+		untrack(() => void announceFormatToolbar(visible));
+	});
+
+	// 窓が前面に戻るたびに、この窓の値を知らせ直す(チェック印は前面の窓の報告でしか動かない=要件#74 /code-review C)。
+	// Markdown の面が無い窓(コード・テキスト・画像など)では誰も Raw Source を知らせないので、Viewer が両方を送る。
+	// raw は面(MarkdownEditor の watchFocusForRawSource)と同じ値=`mdRaw`(面が無ければ false)。
+	onMount(() => {
+		const offs: Array<() => void> = [];
+		let disposed = false;
+		const keep = (off: () => void) => {
+			if (disposed) off();
+			else offs.push(off);
+		};
+		void watchFocusForFormatToolbar(() => formatToolbarAvailable && formatToolbarShown).then(keep);
+		void watchFocusForRawSource(() => mdRaw).then(keep);
+		return () => {
+			disposed = true;
+			for (const off of offs.splice(0)) off();
+		};
+	});
+
+	// View ▸ Show Formatting Toolbar(出せない面では何もしない)
+	onMount(() => {
+		let off: (() => void) | null = null;
+		let disposed = false;
+		void listen(MENU_SHOW_FORMAT_TOOLBAR_EVENT, () => toggleFormatToolbar())
+			.then((unlisten) => {
+				if (disposed) unlisten();
+				else off = unlisten;
+			})
+			.catch(() => {});
+		return () => {
+			disposed = true;
+			off?.();
+		};
+	});
+
+	// --- 差分表示(要件#74 第4段 4-1・4-1〜4-4) ------------------------------
+
+	/** 開いている差分(衝突=今 ↔ 届いた内容 / 未保存=基準の版 ↔ 今)。読むだけ。 */
+	let diffView = $state<{ kind: 'conflict' | 'unsaved'; left: string; right: string } | null>(null);
+
+	/** 重なりの帯の Show Differences: 今の文字列 ↔ 届いた内容(保存の照合の衝突ならディスクを読み直した内容)。 */
+	async function showConflictDiff() {
+		const face = windowState.fileEditor;
+		if (!face) return;
+		const theirs = await face.conflictText?.();
+		if (theirs === null || theirs === undefined || windowState.fileEditor !== face) return;
+		diffView = { kind: 'conflict', left: face.text(), right: theirs };
+	}
+
+	/** Unsaved の札: 基準の版 ↔ 今の文字列。 */
+	function showUnsavedDiff() {
+		const face = windowState.fileEditor;
+		if (!face?.baseText) return;
+		diffView = { kind: 'unsaved', left: face.baseText(), right: face.text() };
+	}
+
+	function closeDiff() {
+		diffView = null;
+	}
+
+	// 開いている間に文字列(か基準の版)が変わったら作り直す(handle.version)。衝突が解けた・未保存が無くなったら閉じる。
+	$effect(() => {
+		const face = windowState.fileEditor;
+		const dirtyNow = face?.dirty;
+		const conflictNow = face?.conflict;
+		void face?.version;
+		untrack(() => {
+			const open = diffView;
+			if (!open) return;
+			if (!face || (open.kind === 'conflict' && !conflictNow) || (open.kind === 'unsaved' && !dirtyNow)) {
+				diffView = null;
+				return;
+			}
+			if (open.kind === 'unsaved' && face.baseText) {
+				const left = face.baseText();
+				const right = face.text();
+				if (left !== open.left || right !== open.right) diffView = { kind: 'unsaved', left, right };
+			}
+		});
+	});
+
+	// 別の文書へ移ったら閉じる
+	$effect(() => {
+		void document.uri;
+		untrack(() => {
+			diffView = null;
+		});
+	});
+
+	// --- 置換(要件#74 第3段 3-3・3-11・3-12) ---------------------------------
+
+	/** Find and Replace… で置換の行を出しているか(窓ごと=文書を替えても保つ。バーを閉じたら下ろす)。 */
+	let replaceOpen = $state(false);
+	/** 置換の語。 */
+	let replaceQuery = $state('');
+	/** 置換の入力欄(Find and Replace… でフォーカスを置く)。 */
+	let replaceInputEl: HTMLInputElement | undefined = $state();
+	/** 置換を出せる面か(コード・plain text・raw で、読み取り専用でない=handle が replaceCurrent を持つ)。 */
+	let canReplace = $derived(cmFind && typeof windowState.fileEditor?.replaceCurrent === 'function');
+
+	function handleReplace() {
+		if (!canReplace) return;
+		windowState.fileEditor?.replaceCurrent?.(replaceQuery);
+	}
+
+	function handleReplaceAll() {
+		if (!canReplace) return;
+		windowState.fileEditor?.replaceAll?.(replaceQuery);
+	}
 
 	let copyLabel = $state('Copy Markdown');
 	let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -120,6 +347,21 @@
 	 */
 	let viewerEl: HTMLElement | undefined = $state();
 
+	/**
+	 * 要件#74 第2段 2-7: 別の文書(uri が変わった)を開いたら、スクロール容器を先頭に戻す。面は `{#key document.uri}` で
+	 * 作り直すが `article.viewer` は同じ要素なので、前の文書の scrollTop が持ち越される(v0.6.0 は描画を待つ間に本文が空になって
+	 * 0 に畳まれていた)。同じ uri(Reload File・外部変更の取り込み・中身だけの描き直し)では触らない。動かすのはこの要素の
+	 * scrollTop だけ。DOM を入れ替える前(`$effect.pre`)に戻すので、新しい面は先頭から作られる。
+	 */
+	let scrolledUri: string | null = null;
+	$effect.pre(() => {
+		const uri = document.uri;
+		untrack(() => {
+			if (scrolledUri !== null && scrolledUri !== uri && viewerEl) viewerEl.scrollTop = 0;
+			scrolledUri = uri;
+		});
+	});
+
 	/** ツールバー(sticky・top:0)。検索バーを積む高さを測るために握る。 */
 	let toolbarEl: HTMLElement | undefined = $state();
 
@@ -129,1538 +371,14 @@
 	 */
 	let toolbarHeight = $state(0);
 
-	// --- その場編集(要件#48) ------------------------------------------
-	// 編集に入れるか・dirty か・届いた外部変更をどう扱うかは `WindowState` と
-	// `$lib/document-edit` の持ち場。ここは DOM の配線だけを持つ。
-
-	/** 編集中か。モードを持つのはウインドウ状態なので、ここは映すだけ。 */
-	let editing = $derived(windowState.editMode === 'edit');
-
-	/**
-	 * 要件#49 契約①⑦: ブロック編集で編集モードへ入ったか。
-	 *
-	 * ブロック編集は要件#48 の `editMode='edit'` / dirty / 保存経路をそのまま流用する
-	 * (契約⑦)ので、確定後もモードは `edit` のまま = ⌘S の `saveCurrentEdits` と
-	 * `decideFileChanged` の門が開く。ただし**画面はレンダリング結果のまま**でなければ
-	 * ならないので、ソース編集の `<pre>` を出すかどうかはこの印で分ける。
-	 */
-	let blockEditMode = $state(false);
-
-	/**
-	 * 要件#53 契約①: html 種別か。⌘E の行き先がソース編集ではなく**レンダリング済み
-	 * 編集面**になるのはこの種別だけで、text / markdown は従来どおり(要件#48 契約③)。
-	 */
+	/** 要件#53: html 種別か(閲覧は HtmlViewer の iframe・検索は複製面)。HTML の編集は要件79 まで無い。 */
 	let htmlDocument = $derived(detectFileType(document.uri) === 'html');
 
 	/**
-	 * 要件#53 契約①: 編集面のツールバー「Source」でソース編集モードへ抜けたか。
-	 * 確定済みの編集はバッファに残るので、ここで畳むのは**画面だけ**(`endEdit()` は
-	 * 呼ばない=要件#49 追補a(3) と同じ考え方)。
-	 */
-	let htmlSourceRequested = $state(false);
-
-	/** 要件#53: レンダリング済み編集面を出しているか。 */
-	let htmlEditing = $derived(editing && htmlDocument && !htmlSourceRequested);
-
-	/** ソース編集モード(要件#48)= 編集中で、ブロック編集でも編集面でもない。 */
-	let sourceEditing = $derived(editing && !blockEditMode && !htmlEditing);
-
-	/** 編集中の `<pre contenteditable>`。 */
-	let editorEl: HTMLPreElement | undefined = $state();
-
-	/**
-	 * 編集中に `<pre>` へ流し込む原文。text 種別はレンダリング結果がそのまま原文
-	 * だが、markdown / html は違う — 編集するのは**ソース**なので `document.content`
-	 * を出す(契約②のソース編集モード)。バッファがあればそちらが正(保存前の
-	 * 編集内容を持っているのはバッファの側)。
-	 */
-	let editSource = $derived(windowState.editBuffer ?? document.content);
-
-	/**
-	 * 要件#48 追補r 契約1: ソース編集の `<pre>` の末尾に置く見えない改行(番兵)。
-	 *
-	 * WebKit は `pre-wrap` の contenteditable で文書の末尾の `\n` を「空の最後の行を
-	 * 見せるための仮の改行」として扱い、最後の行の入力で消したり 1 つ多く足したり
-	 * する(Issue #767)。末尾に番兵を置けば原文の最後の改行は途中の行と同じに扱われ、
-	 * 仮の改行の役は番兵が受け持つ。番兵はバッファにもファイルにも入れない。
-	 */
-	const SOURCE_SENTINEL = '\n';
-
-	/**
-	 * 追補r 契約2・3: 入力のあとの `<pre>` から編集バッファを取る。WebKit が番兵を
-	 * 消していたら末尾に付け直す ―― 編集のコマンドではなく DOM で足すので取り消しの
-	 * 履歴に乗らず、新しいテキストノードを最後に置くのでキャレットと選択はその手前に
-	 * 残る。バッファは末尾の番兵を 1 つ除いた `textContent`(取り消しで番兵ごと戻って
-	 * いても、付け直した後に除くので同じ形になる)。
-	 *
-	 * 契約8: 取り消し・やり直し(`inputType` が `historyUndo`・`historyRedo`)のときだけ、
-	 * 先に末尾で重なった番兵を 1 つにする。
-	 */
-	function syncSourceBuffer(pre: HTMLElement, inputType = '') {
-		if (inputType === 'historyUndo' || inputType === 'historyRedo') dropDoubledSentinels(pre);
-		if (!bufferFromPre(pre).endsWith(SOURCE_SENTINEL)) {
-			pre.appendChild(pre.ownerDocument.createTextNode(SOURCE_SENTINEL));
-		}
-		rememberSourceLineBreaks(pre);
-		windowState.updateBuffer(bufferFromPre(pre).slice(0, -SOURCE_SENTINEL.length));
-	}
-
-	/**
-	 * 追補r 契約8: 原文として入った、`\n` だけのテキストノード。
-	 *
-	 * WebKit は Return を `\n` だけのテキストノードで入れる(番兵と同じ形)。最後の空の
-	 * 行で打って WebKit が番兵を消し、こちらが付け直した後に取り消すと、WebKit が戻した
-	 * 番兵と付け直した番兵が末尾に並ぶ。そのとき減らしてよいのは番兵だけで、打った
-	 * 改行のノードを減らすと、Return のやり直しや、前に打った改行がある取り消しで
-	 * 改行が消える(2026-10-29 に WKWebView で確認)。そこで流し込みと入力のたびに、
-	 * 番兵(最後の空でないノード)より前の `\n` のノードをノードそのもので覚える ――
-	 * 取り消し・やり直しは同じノードを戻すので、覚えたものは原文の改行と分かる。
-	 *
-	 * WeakSet にしないのは、WebKit が DOM から外れたノード(取り消しで外れ、取り消しの
-	 * 履歴だけが持っているノード)の JS の包みを GC で捨てるため。やり直しで戻った
-	 * ノードは新しい包みになり、WeakSet では覚えていないことになる(打った改行を番兵と
-	 * 見て消す。2026-10-29 に WKWebView で GC を起こして再現)。ここで強く持てば包みは
-	 * 捨てられない。編集を終えるときに空にする(下の閲覧へ戻る $effect)。
-	 */
-	const sourceLineBreaks = new Set<Node>();
-
-	function isSentinelShaped(node: Node): boolean {
-		return node instanceof Text && node.data === SOURCE_SENTINEL;
-	}
-
-	function isEmptyText(node: Node): boolean {
-		return node instanceof Text && node.data === '';
-	}
-
-	function rememberSourceLineBreaks(pre: HTMLElement) {
-		let sentinel = pre.lastChild;
-		while (sentinel && isEmptyText(sentinel)) sentinel = sentinel.previousSibling;
-		for (const node of pre.childNodes) {
-			if (node !== sentinel && isSentinelShaped(node)) sourceLineBreaks.add(node);
-		}
-	}
-
-	/**
-	 * 契約8: 末尾に並んだ番兵(原文の改行と覚えていない `\n` のノード)を、いちばん前の
-	 * 1 つだけ残して外す。残すのは WebKit が取り消しで戻した側で、外すのはこちらが
-	 * 付け直した後ろの側(WebKit の履歴が触らないノード)。キャレットは前の番兵か原文の
-	 * ノードの上にあるので動かない。
-	 */
-	function dropDoubledSentinels(pre: HTMLElement) {
-		const run: Node[] = [];
-		for (let node = pre.lastChild; node; node = node.previousSibling) {
-			if (isEmptyText(node)) continue;
-			if (!isSentinelShaped(node) || sourceLineBreaks.has(node)) break;
-			run.push(node);
-		}
-		for (const node of run.slice(0, -1)) pre.removeChild(node);
-	}
-
-	/**
-	 * 追補r 契約9: 選択がソース編集の `<pre>` の番兵に掛かっていれば、番兵の手前までの
-	 * 範囲(`textContent` の上の文字数)。掛かっていなければ null(今までどおり)。
-	 */
-	function selectionOverSentinel(sel: Selection): { pre: HTMLElement; start: number; end: number } | null {
-		const pre = editorEl;
-		if (!pre || sel.rangeCount === 0 || sel.isCollapsed) return null;
-		const range = sel.getRangeAt(0);
-		if (!pre.contains(range.startContainer) || !pre.contains(range.endContainer)) return null;
-		const text = pre.textContent ?? '';
-		if (!text.endsWith(SOURCE_SENTINEL)) return null;
-		const end = text.length - SOURCE_SENTINEL.length;
-		if (textOffsetIn(pre, range.endContainer, range.endOffset) <= end) return null;
-		const start = Math.min(textOffsetIn(pre, range.startContainer, range.startOffset), end);
-		return { pre, start, end };
-	}
-
-	/**
-	 * `<pre>` の中身は Svelte のテキスト補間ではなく、ここで直接入れる。
-	 *
-	 * `{@html}` も `{expr}` も、依存が動くたびにテキストノードを作り直す =
-	 * 編集中のキャレットと IME の変換中候補が飛ぶ。そこで「原文と DOM が食い違う
-	 * ときだけ書く」形にしてある: 利用者の入力で動いたときは `oninput` が
-	 * バッファを DOM と同じ値へ揃えるのでここは何もせず、外部変更に追従した
-	 * (契約⑥ の `apply`)ときだけ書き戻しが走る。
-	 *
-	 * 追補r 契約1・5: 中身は「原文 + 番兵」で、比べるのもその形。番兵は原文とは別の
-	 * テキストノードに置く ―― WebKit が番兵を仮の改行として消しても、原文のノードの
-	 * 上のキャレットは巻き込まれない。
-	 */
-	$effect(() => {
-		const el = editorEl;
-		const source = editSource;
-		if (!el || el.textContent === source + SOURCE_SENTINEL) return;
-		const doc = el.ownerDocument;
-		const sentinel = doc.createTextNode(SOURCE_SENTINEL);
-		if (source.length > 0) el.replaceChildren(doc.createTextNode(source), sentinel);
-		else el.replaceChildren(sentinel);
-		// 契約8: 原文が `\n` だけなら、そのノードは番兵ではない。
-		rememberSourceLineBreaks(el);
-	});
-
-	/** 編集へ入った直後だけキャレットを本文へ置く(書き戻しのたびに奪わない)。 */
-	let focusedEditor: HTMLElement | null = null;
-	$effect(() => {
-		const el = editorEl;
-		if (!el) {
-			focusedEditor = null;
-			return;
-		}
-		if (focusedEditor === el) return;
-		focusedEditor = el;
-		const caret = pendingSourceCaret;
-		pendingSourceCaret = null;
-		// 控えが無い(html の文書の「Source」=追補p 契約2(c))は今までどおり先頭。
-		if (!caret) {
-			el.focus();
-			return;
-		}
-		// 追補p 契約1・2・3: 新しい `<pre>` の focus はキャレットを 0 文字目に置き、
-		// スクロールも先頭へ戻す。スクロールは止め、選択は focus の後に置き直す。
-		el.focus({ preventScroll: true });
-		placeSelection(el, caret.start, caret.end);
-		settleSourceScroll(el, caret);
-	});
-
-	// --- 編集に入った直後のキャレット(要件#48 追補p) ---------------------
-	// 閲覧の DOM と編集の `<pre>` は入れ替わるので、どこに置くかは**入る前**に
-	// 原文の上の文字数へ直して控え、`<pre>` が出たところで置く。
-
-	/**
-	 * ソース編集の `<pre>` が出たら置く選択(原文の上の文字数)。null = 控えが無い。
-	 * `scrollTop` があればそのスクロールを保ち(text)、null ならキャレットの行を
-	 * 画面の上の方へ運ぶ(markdown=閲覧とソースは見た目が違うので保つものが無い)。
-	 * `$state` にしないのは、画面に出るものではないため。
-	 */
-	let pendingSourceCaret: { start: number; end: number; scrollTop: number | null } | null = null;
-
-	/**
-	 * 追補p 契約2: Command + E は Viewer の外(`windowState.beginEdit()`)から入るので、
-	 * 閲覧の DOM が `<pre>` に入れ替わる前(`$effect.pre` は DOM の更新より先に走る)に
-	 * 閲覧の選択とスクロールを控える。ダブルクリックは `handleDoubleClick` が先に
-	 * 控えているので上書きしない。
-	 */
-	$effect.pre(() => {
-		if (!sourceEditing) return;
-		untrack(() => {
-			if (pendingSourceCaret === null) pendingSourceCaret = sourceCaretPlan(null, null);
-		});
-	});
-
-	/**
-	 * ソース編集に入るときのキャレットを決める(追補p 契約1(a)(e)・2)。`point` と
-	 * `target` はダブルクリックの座標と要素で、Command + E ならどちらも null。
-	 * html の文書は閲覧が iframe で中身を読めないので追わない(契約2(c))。
-	 */
-	function sourceCaretPlan(
-		point: { x: number; y: number } | null,
-		target: Element | null,
-	): typeof pendingSourceCaret {
-		const body = bodyEl;
-		const scroller = viewerEl;
-		if (!body || !scroller) return null;
-		const kind = detectFileType(document.uri);
-		if (kind === 'text') return textCaretPlan(body, scroller.scrollTop, point);
-		if (kind === 'markdown') return markdownCaretPlan(body, target);
-		return null;
-	}
-
-	/**
-	 * text(契約1(a)・2): 閲覧の `<pre>` の上で決めた位置を、原文(編集の `<pre>`)の
-	 * 同じ文字へ写す。スクロールは入る前のまま保つ。
-	 */
-	function textCaretPlan(
-		body: HTMLElement,
-		scrollTop: number,
-		point: { x: number; y: number } | null,
-	): typeof pendingSourceCaret {
-		const view = body.querySelector<HTMLElement>('pre.vellis-plaintext');
-		const at = view ? viewTextSelection(view, point) : { start: 0, end: 0 };
-		const source = windowState.editBuffer ?? document.content;
-		return {
-			start: sourceOffsetOfView(source, at.start),
-			end: sourceOffsetOfView(source, at.end),
-			scrollTop,
-		};
-	}
-
-	/**
-	 * 閲覧の `<pre>` の上の文字数で、置く選択を決める。ダブルクリックの点 → 閲覧の
-	 * 選択(ダブルクリックなら始まりに潰す・Command + E なら範囲のまま)→ 見えている
-	 * 最初の行の先頭、の順に採る。
-	 */
-	function viewTextSelection(
-		view: HTMLElement,
-		point: { x: number; y: number } | null,
-	): { start: number; end: number } {
-		const at = point ? offsetAtPoint(view, point.x, point.y) : null;
-		if (at !== null) return { start: at, end: at };
-		const range = selectionStartingIn(view);
-		if (range) {
-			const start = textOffsetIn(view, range.startContainer, range.startOffset);
-			const end =
-				point || !view.contains(range.endContainer)
-					? start
-					: textOffsetIn(view, range.endContainer, range.endOffset);
-			return { start, end };
-		}
-		const line = firstVisibleLineStart(view) ?? 0;
-		return { start: line, end: line };
-	}
-
-	/**
-	 * 追補p 契約1(a): 閲覧の `<pre>` の文字数を、原文の同じ文字の文字数へ写す。
-	 * 閲覧は HTML の解析で `\r\n` が LF 1 文字になるので、手前の `\r\n` の数だけ足す
-	 * (単独の CR は閲覧でも 1 文字)。行末(改行の手前)は `\r` の手前に置く。
-	 */
-	function sourceOffsetOfView(source: string, viewOffset: number): number {
-		let offset = 0;
-		for (let seen = 0; seen < viewOffset && offset < source.length; seen++) {
-			offset += source.startsWith('\r\n', offset) ? 2 : 1;
-		}
-		return offset;
-	}
-
-	/**
-	 * markdown(契約1(e)・2): 閲覧の DOM と原文の文字の対応は追わず、索引に載る要素の
-	 * 原文の先頭に置く。ダブルクリックならその要素(または祖先)のいちばん内側、
-	 * Command + E なら選択の始まりを含むいちばん内側のブロック。どちらも無ければ
-	 * 見えている最初のブロック(2(b))。
-	 */
-	function markdownCaretPlan(body: HTMLElement, target: Element | null): typeof pendingSourceCaret {
-		const from = target ?? selectionStartingIn(body)?.startContainer ?? null;
-		const meta = (from && indexedMetaAt(body, from, target === null)) ?? firstVisibleBlockMeta(body);
-		const base = windowState.editBuffer ?? document.content;
-		const start = meta ? Math.min(currentPositionOf(meta).startOffset, base.length) : 0;
-		return { start, end: start, scrollTop: null };
-	}
-
-	/** `node`(またはその祖先)のうち、`body` の中で索引に載るいちばん内側の要素の meta。 */
-	function indexedMetaAt(body: HTMLElement, node: Node, blocksOnly: boolean): NodeMeta | null {
-		let el: Element | null = node instanceof Element ? node : node.parentElement;
-		while (el && el !== body && body.contains(el)) {
-			const meta = indexedMetaOf(el);
-			if (meta && (!blocksOnly || isBlockType(meta.type))) return meta;
-			el = el.parentElement;
-		}
-		return null;
-	}
-
-	function indexedMetaOf(el: Element): NodeMeta | null {
-		const id = el.getAttribute('data-vellis-node-id');
-		return (id === null ? undefined : index?.byId.get(id)) ?? null;
-	}
-
-	/**
-	 * 契約2(b) markdown: 画面に見えている最初のブロック。上へ流れて見えなくなった
-	 * ブロックを飛ばし、最初に見えているブロックの中に、見えているブロックがあれば
-	 * そちらへ降りる(長いリストなら見えている最初の項目)。
-	 */
-	function firstVisibleBlockMeta(body: HTMLElement): NodeMeta | null {
-		const band = visibleBand();
-		if (!band) return null;
-		let found: { el: Element; meta: NodeMeta } | null = null;
-		for (const el of body.querySelectorAll('[data-vellis-node-id]')) {
-			if (found && !found.el.contains(el)) break;
-			const meta = indexedMetaOf(el);
-			if (!meta || !isBlockType(meta.type)) continue;
-			if (el.getBoundingClientRect().bottom <= band.top + 1) continue;
-			found = { el, meta };
-		}
-		return found?.meta ?? null;
-	}
-
-	/**
-	 * 契約2(b) text: 画面に見えている最初の行の先頭。行の上端がツールバーの下端より
-	 * 下にある最初の行を、行の先頭の文字の矩形で二分探索する(折り返しても行の頭で
-	 * 測る)。矩形が取れない環境(JSDOM)では null。
-	 */
-	function firstVisibleLineStart(view: HTMLElement): number | null {
-		const band = visibleBand();
-		if (!band) return null;
-		const text = view.textContent ?? '';
-		const starts = [0];
-		for (let i = text.indexOf('\n'); i !== -1 && i + 1 < text.length; i = text.indexOf('\n', i + 1)) {
-			starts.push(i + 1);
-		}
-		let lo = 0;
-		let hi = starts.length - 1;
-		let best: number | null = null;
-		while (lo <= hi) {
-			const mid = (lo + hi) >> 1;
-			const start = starts[mid]!;
-			const rect = lineRectAt(view, start, text.length);
-			if (!rect) return null;
-			if (rect.top >= band.top - 1) {
-				best = start;
-				hi = mid - 1;
-			} else {
-				lo = mid + 1;
-			}
-		}
-		return best ?? starts[starts.length - 1]!;
-	}
-
-	/**
-	 * スクロール容器の中で、sticky の帯(ツールバー・開いていれば検索バー)に隠れずに
-	 * 見えている範囲(viewport 座標)。
-	 */
-	function visibleBand(): { top: number; bottom: number } | null {
-		const scroller = viewerEl;
-		if (!scroller) return null;
-		const box = scroller.getBoundingClientRect();
-		const findBar = scroller.querySelector<HTMLElement>('.find-bar--sticky');
-		const covered = (toolbarEl?.offsetHeight ?? 0) + (findBar?.offsetHeight ?? 0);
-		return { top: box.top + covered, bottom: box.top + scroller.clientHeight };
-	}
-
-	/**
-	 * 追補p 契約2(b)・3: キャレットを置いたあとのスクロール。text は入る前の
-	 * `scrollTop` に戻す(見えていた行を見えなくしない)。markdown は閲覧とソースで
-	 * 見た目が違うので、キャレットの行を見えている範囲の上の方へ運ぶ。
-	 */
-	function settleSourceScroll(editor: HTMLElement, caret: NonNullable<typeof pendingSourceCaret>) {
-		const scroller = viewerEl;
-		if (!scroller) return;
-		if (caret.scrollTop !== null) {
-			scroller.scrollTop = caret.scrollTop;
-			return;
-		}
-		const band = visibleBand();
-		const rect = lineRectAt(editor, caret.start, (editor.textContent ?? '').length);
-		if (!band || !rect) return;
-		const gap = 8;
-		scroller.scrollTop = Math.max(0, scroller.scrollTop + rect.top - band.top - gap);
-	}
-
-	/**
-	 * 追補p 契約1: 点 (x, y) の文字が `root` の中の何文字目か(`caretRangeFromPoint`)。
-	 * API が無い・null・`root` の外を返したら null。
-	 */
-	function offsetAtPoint(root: Element, x: number, y: number): number | null {
-		const doc = root.ownerDocument;
-		if (typeof doc.caretRangeFromPoint !== 'function') return null;
-		const range = doc.caretRangeFromPoint(x, y);
-		if (!range || !root.contains(range.startContainer)) return null;
-		return textOffsetIn(root, range.startContainer, range.startOffset);
-	}
-
-	/**
-	 * 追補q 契約1・2: HTML の編集面(Shadow DOM)の点の文字数。`caretRangeFromPoint` は
-	 * Shadow の中の点をホスト側へ寄せるので、`caretPositionFromPoint` に編集面の
-	 * ShadowRoot を `shadowRoots` で渡して取る(2026-10-29 に WKWebView で確認)。
-	 * 無い・例外・null・`root` の外なら今までの `offsetAtPoint`(WebKit ではホスト側が
-	 * 返るので null=ブロックの先頭)。
-	 */
-	function offsetAtPointInShadow(root: Element, shadow: ShadowRoot, x: number, y: number): number | null {
-		// TS 5.6 の lib.dom に無いので、使う形だけを局所の型で受ける。
-		const doc = root.ownerDocument as Document & {
-			caretPositionFromPoint?: (
-				x: number,
-				y: number,
-				options?: { shadowRoots?: ShadowRoot[] },
-			) => { offsetNode: Node; offset: number } | null;
-		};
-		let pos: { offsetNode: Node; offset: number } | null = null;
-		if (typeof doc.caretPositionFromPoint === 'function') {
-			try {
-				pos = doc.caretPositionFromPoint(x, y, { shadowRoots: [shadow] });
-			} catch {
-				pos = null;
-			}
-		}
-		if (pos && root.contains(pos.offsetNode)) return textOffsetIn(root, pos.offsetNode, pos.offset);
-		return offsetAtPoint(root, x, y);
-	}
-
-	/** (node, offset) が `root` の `textContent` の上で何文字目か。 */
-	function textOffsetIn(root: Node, node: Node, offset: number): number {
-		const probe = (root.ownerDocument ?? window.document).createRange();
-		probe.selectNodeContents(root);
-		probe.setEnd(node, offset);
-		return probe.toString().length;
-	}
-
-	/** 選択の始まりが `root` の中にあれば、その Range。 */
-	function selectionStartingIn(root: Element): Range | null {
-		const sel = root.ownerDocument.defaultView?.getSelection();
-		const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
-		return range && root.contains(range.startContainer) ? range : null;
-	}
-
-	/**
-	 * `root` の `textContent` の上の文字数を (テキストノード, offset) へ。`preferNext` は
-	 * ノードの境目で次のノードの頭を採る(矩形を測る始点を前の行の末尾にしないため)。
-	 * テキストノードが無ければ `root` の頭。
-	 */
-	function textPoint(root: Node, offset: number, preferNext = false): [Node, number] {
-		const walker = (root.ownerDocument ?? window.document).createTreeWalker(root, NodeFilter.SHOW_TEXT);
-		let seen = 0;
-		let last: Text | null = null;
-		while (walker.nextNode()) {
-			const t = walker.currentNode as Text;
-			last = t;
-			const end = seen + t.data.length;
-			if (preferNext ? offset < end : offset <= end) return [t, Math.max(0, offset - seen)];
-			seen = end;
-		}
-		return last ? [last, last.data.length] : [root, 0];
-	}
-
-	/**
-	 * `el` の中の文字数 [start, end] を選ぶ(潰れていればキャレット)。Shadow DOM の中
-	 * (HTML の編集面)では、取れればそのツリーの選択を使う(`insertSurfaceText` と同じ)。
-	 */
-	function placeSelection(el: HTMLElement, start: number, end: number) {
-		const root = el.getRootNode() as Partial<{ getSelection: () => Selection | null }>;
-		const sel = root.getSelection?.() ?? el.ownerDocument.defaultView?.getSelection() ?? null;
-		if (!sel) return;
-		const [a, aOffset] = textPoint(el, start);
-		if (start === end) {
-			sel.collapse(a, aOffset);
-			return;
-		}
-		const [b, bOffset] = textPoint(el, end);
-		sel.setBaseAndExtent(a, aOffset, b, bOffset);
-	}
-
-	/**
-	 * `root` の中の文字数 `offset` の行の矩形(viewport 座標)。その文字 1 つの Range で
-	 * 測る(潰れた Range は WebKit で矩形が空のことがある)。高さが無ければ潰れた
-	 * Range でも測ってみる。末尾は直前の文字で測る。測れなければ null。
-	 */
-	function lineRectAt(root: Node, offset: number, length: number): DOMRect | null {
-		const from = offset < length ? offset : Math.max(0, length - 1);
-		const to = Math.min(from + 1, length);
-		const range = (root.ownerDocument ?? window.document).createRange();
-		const [a, aOffset] = textPoint(root, from, true);
-		const [b, bOffset] = textPoint(root, to);
-		range.setStart(a, aOffset);
-		range.setEnd(b, bOffset);
-		if (typeof range.getBoundingClientRect !== 'function') return null;
-		const rect = range.getBoundingClientRect();
-		if (rect.height > 0) return rect;
-		if (typeof range.getClientRects !== 'function') return null;
-		range.collapse(true);
-		const caret = range.getClientRects()[0];
-		return caret && caret.height > 0 ? caret : null;
-	}
-
-	// --- ブロック編集(要件#49) ----------------------------------------
-	// 「レンダリング DOM ↔ 原文範囲」の往復は `../markdown/edit` の純関数が持つ。
-	// ここはどの要素を contenteditable にするかと、確定/破棄の契機だけ。
-
-	/**
-	 * 編集中のブロック(契約①)。null = ブロック編集をしていない。
-	 * `html` は編集前の中身で、Esc の破棄で書き戻す。
-	 *
-	 * 要件#52 契約①②: code fence の中身編集も同じ掴みに乗せる ―― 確定/破棄の
-	 * 契機・位置補正・dirty・保存は #49 の経路をそのまま使う(要件#52 契約⑦)。
-	 * 見分けるのは `fence` の有無だけで、あるときは「開始/終了フェンス行を残して
-	 * 中身だけ差し替える」確定に分かれる。
-	 */
-	let blockEdit: {
-		el: HTMLElement;
-		meta: NodeMeta;
-		html: string;
-		/**
-		 * 要件#52: 差し替えで**そのまま書き戻す**原文の開始/終了フェンス行と、
-		 * 開始フェンスの**インデント幅**(追補a(6))。掴んだときの幅を持ち回るのは、
-		 * 素テキスト化で除いた分と確定で付け直す分を必ず一致させるため。
-		 */
-		fence?: { open: string; close: string; indent: number; body: string };
-	} | null = $state(null);
-
-	/**
-	 * 要件#52 契約⑤: IME の変換中か。
-	 *
-	 * 変換中の確定/破棄は契機として発火させない ―― 変換候補を選ぶための Esc や、
-	 * 候補ウインドウへの mousedown で編集が畳まれると、入力途中の文字が原文へ
-	 * 焼き付く。`$state` にしないのは、これが画面に出るものではなく、値が動くたびに
-	 * 契機の張り直し($effect)を起こしたくないため。
-	 */
-	let composing = false;
-
-	/**
-	 * 追補a(2): このブロック編集で**閲覧から**編集モードへ入り、まだ何も確定して
-	 * いないか。Esc の破棄が閲覧へ戻ってよいのはこの場合だけで、確定済みの編集が
-	 * あるときに `endEdit()` を呼ぶとバッファも dirty も巻き戻ってしまう。
-	 */
-	let blockEditFromView = false;
-
-	/**
-	 * 追補a(1): 確定済みブロックの差し替え記録。key=`NodeMeta.id`、値は**初回
-	 * レンダー時の原文**での範囲と、そのブロックがこれまでに増減させた長さ。
-	 *
-	 * `index` の `NodeMeta.position` は初回レンダー基準のままで、確定しても
-	 * `html` / `index` props は作り直されない。一方で差し替えの基準は常に最新の
-	 * `editBuffer` なので、確定のたびにこの記録から現在の位置へ写す。
-	 */
-	const committedEdits = new Map<string, { start: number; end: number; delta: number }>();
-
-	/**
-	 * レンダーが変わったら(別文書・外部変更の適用)位置の基準も取り直す。
-	 *
-	 * 追補a(6): 掴んでいるブロックも手放す ―― 再レンダーで DOM は作り直され、
-	 * `blockEdit.el` は切り離された旧ノードになる。そのまま確定させると、旧
-	 * レンダー基準の位置で**新しい原文**を差し替えて壊す。復元は要らない(その
-	 * DOM はもう画面に無い)ので、掴みだけを捨てる。
-	 */
-	let positionBase: SourceIndex | null = null;
-	$effect(() => {
-		if (positionBase === index) return;
-		positionBase = index;
-		committedEdits.clear();
-		releaseBlockEdit();
-		// 追補d(1): 掴みの記録を捨てる前に画面を戻す。`{@html}` は文字列が同じだと DOM を
-		// 作り直さない(レンダー結果が同じ外部変更の apply)ので、打った文字が残りうる。
-		// 作り直されていれば旧ノードは切り離されていて、戻しは何もしない。
-		restoreGrabbedBlocks();
-	});
-
-	/**
-	 * 追補d(1)(2): この編集の間に掴んだブロックの、**最初に掴んだときの**中身。
-	 * key=`NodeMeta.id`。
-	 *
-	 * `{@html}` は文字列が同じだと DOM を作り直さないので、閲覧へ戻っても打った文字や
-	 * 確定で直した文字が画面に残る ―― 残った文字は再入場で「編集前」として掴まれ、
-	 * 確定で原文へ書かれる(backlog 157)。破棄で原文が `document.content` へ戻っても
-	 * 画面は確定後のまま食い違う(backlog 155)。最初に掴んだときの中身は `html` prop
-	 * (= `document.content` のレンダリング)を載せた DOM そのものなので、閲覧へ戻る
-	 * ときにそれへ書き戻せば画面は原文のレンダリングに揃う。
-	 */
-	const grabbedBlocks = new Map<string, { el: HTMLElement; html: string }>();
-
-	/**
-	 * 掴む直前に、そのブロックの最初の中身を控える(2回目以降の掴みでは上書きしない)。
-	 *
-	 * 入れ子(リスト項目の中のリスト項目・緩いリストの段落)で**内側を先に掴んで**いたら、
-	 * 外側のいまの中身は直した内側を含んでいる。そのまま控えると、閲覧へ戻すときに外側の
-	 * 書き戻しが内側の戻しを上書きする(追補d(1))。そこで複製の上で、既に掴んだ子孫の
-	 * 中身をその子孫の控え(= 掴む前の中身)へ差し替えてから控える。
-	 */
-	function rememberGrabbed(el: HTMLElement, meta: NodeMeta) {
-		if (grabbedBlocks.has(meta.id)) return;
-		let original = el.innerHTML;
-		const inner = [...grabbedBlocks].filter(([, b]) => b.el !== el && el.contains(b.el));
-		if (inner.length > 0) {
-			const clone = el.cloneNode(true) as HTMLElement;
-			for (const [id, b] of inner) {
-				const copy = [...clone.querySelectorAll('[data-vellis-node-id]')].find(
-					(node) => node.getAttribute('data-vellis-node-id') === id,
-				);
-				if (copy) copy.innerHTML = b.html;
-			}
-			original = clone.innerHTML;
-		}
-		grabbedBlocks.set(meta.id, { el, html: original });
-	}
-
-	/**
-	 * 掴んだブロックを最初の中身へ戻す(追補d(1)(2))。切り離された要素(再レンダーで
-	 * 作り直された旧ノード)は画面に無いので触らない。
-	 */
-	function restoreGrabbedBlocks() {
-		for (const { el, html: original } of grabbedBlocks.values()) {
-			if (el.isConnected && el.innerHTML !== original) el.innerHTML = original;
-		}
-		grabbedBlocks.clear();
-	}
-
-	/**
-	 * 追補a(5): 閲覧へ戻ったら位置の記録も捨てる。
-	 *
-	 * 「編集を終える」(破棄)・⌘E トグル・衝突バナーの「読み直す」で `editBuffer` は
-	 * `document.content` へ戻るが、`index` は変わらないので上の `$effect` は鳴らない
-	 * ―― 記録を残すと次の編集で古い差分が乗って原文を壊す。あわせて
-	 * `blockEditMode` も落とす: 落とさないと `sourceEditing` が偽のままで、次の ⌘E
-	 * でソース編集の `<pre>` が出ない(要件#48 契約③のトグルの退行)。
-	 */
-	$effect(() => {
-		if (editing) return;
-		committedEdits.clear();
-		blockEditMode = false;
-		blockEditFromView = false;
-		// 要件#48 追補p: 使われなかったキャレットの控えを次の編集へ持ち越さない。
-		pendingSourceCaret = null;
-		// 要件#48 追補r 契約8: 編集の `<pre>` ごと捨てるので、覚えた改行のノードも放す。
-		sourceLineBreaks.clear();
-		releaseBlockEdit();
-		// 追補d(1)(2): 掴みを捨てるのは画面も掴む前へ戻すことを含む。
-		restoreGrabbedBlocks();
-		// 要件#53: 編集面まわりも同じ区切りで畳む(次の ⌘E は素の編集面から始まる)。
-		htmlSourceRequested = false;
-		htmlStructureNotice = null;
-		releaseHtmlBlock();
-	});
-
-	/** 編集中のブロックを、原文にも DOM にも触らずに手放す。 */
-	function releaseBlockEdit() {
-		const current = blockEdit;
-		if (!current) return;
-		blockEdit = null;
-		current.el.removeAttribute('contenteditable');
-	}
-
-	/**
-	 * 初回レンダー基準の `position` を、確定済みの差し替えを踏まえた**現在の
-	 * `editBuffer` 上の位置**へ写す(追補a(1))。
-	 *
-	 * 記録は互いに重ならないので、「その範囲より前で終わった差し替え」の増減を
-	 * 足すだけでよい。終端には**そのブロック自身の**過去の差し替えも入る
-	 * (`end <= endOffset` が自分自身を含む)ので、同じブロックの再編集も当たる。
-	 */
-	function currentPositionOf(meta: NodeMeta): SourcePosition {
-		const { startOffset, endOffset } = meta.position;
-		let startDelta = 0;
-		let endDelta = 0;
-		for (const edit of committedEdits.values()) {
-			if (edit.end <= startOffset) startDelta += edit.delta;
-			if (edit.end <= endOffset) endDelta += edit.delta;
-		}
-		return {
-			...meta.position,
-			startOffset: startOffset + startDelta,
-			endOffset: endOffset + endDelta,
-		};
-	}
-
-	/** 確定した差し替えの増減を記録へ積む(同じブロックの再編集は足し込む)。 */
-	function recordEdit(meta: NodeMeta, delta: number) {
-		const prev = committedEdits.get(meta.id);
-		committedEdits.set(meta.id, {
-			start: meta.position.startOffset,
-			end: meta.position.endOffset,
-			delta: (prev?.delta ?? 0) + delta,
-		});
-	}
-
-	/**
-	 * 編集開始は明示操作だけ(要件#48 契約③)。ダブルクリックがその1つで、
-	 * 単クリックやキー入力では入らない — 閲覧中の誤タッチで dirty にならないため。
-	 *
-	 * 要件#49 契約①③: どこをダブルクリックしたかで行き先が分かれる。編集可能な
-	 * ブロックならそのブロックだけを contenteditable にし、編集不可領域(生 HTML・
-	 * code fence・mermaid・alert タイトル・id を持たない要素)なら要件#48 の
-	 * ソース編集モードへ誘導する。編集に入れない文書(画像・SSH root 等)では
-	 * `beginEdit` が false を返して何も起きない。
-	 */
-	function handleDoubleClick(e: MouseEvent) {
-		// 要件#53: 編集面のダブルクリックは Shadow の中で閉じている(契約③)。
-		// composed なイベントはここまで上がってくるが、`target` はホストへ
-		// retarget 済みで Markdown の索引にも載っていないので、経路を通さない。
-		if (htmlEditing) return;
-		// 要件#54 契約②: html の**読み取り専用**複製面(⌘F)は編集の入口ではない。
-		// Shadow から composed で上がってくるが、`target` はホストへ retarget され、
-		// Markdown の索引にも載っていないのでソース編集へ誘導されてしまう。
-		if (findSurfaceHost && eventPathContains(e, findSurfaceHost)) return;
-		if (sourceEditing || blockEdit) return;
-		const target = e.target;
-		if (!(target instanceof Element)) return;
-
-		const resolved = resolveEditTarget(target, index);
-		if (resolved.kind === 'source') {
-			// 要件#48 追補p 契約1(a)(e): 閲覧の DOM が `<pre>` に入れ替わる前に、
-			// キャレットの行き先を控える(入れなければ捨てる)。
-			pendingSourceCaret = sourceCaretPlan({ x: e.clientX, y: e.clientY }, target);
-			// 追補a(3): 誘導はモードの切り替えだけ。既に編集中なら `beginEdit()` を
-			// 呼ばない — バッファを `document.content` で初期化し直すと、確定済みの
-			// ブロック編集と dirty が消える。
-			blockEditMode = false;
-			if (!editing && !windowState.beginEdit()) pendingSourceCaret = null;
-			return;
-		}
-		// 追補p 契約1(b)(c): ダブルクリックした文字の位置。ハイライトを外す・素テキストに
-		// 置き換える前に、ブロックの先頭からの文字数で採っておく。
-		const caret = offsetAtPoint(resolved.el, e.clientX, e.clientY);
-		if (resolved.kind === 'code') {
-			beginCodeEdit(resolved.el, resolved.meta, caret);
-			return;
-		}
-		beginBlockEdit(resolved.el, resolved.meta, caret);
-	}
-
-	/**
-	 * そのブロックだけを contenteditable にする(コンテナ全体は不可=契約①)。
-	 *
-	 * 要件#48 追補p 契約1(b): キャレットは `caret`(ブロックの先頭からの文字数)に
-	 * 潰して置く(ダブルクリックで選ばれた単語は選ばない)。null ならブロックの先頭。
-	 */
-	function beginBlockEdit(el: HTMLElement, meta: NodeMeta, caret: number | null) {
-		// 要件#54 契約④: 掴む前にハイライトを外す ―― 控える `innerHTML` に
-		// フォールバックの `<mark>` が混ざると、Esc の破棄でそれごと書き戻る。
-		dropFindHighlights();
-		blockEditMode = true;
-		if (!editing) {
-			if (!windowState.beginEdit()) {
-				blockEditMode = false;
-				return;
-			}
-			blockEditFromView = true;
-		}
-		rememberGrabbed(el, meta);
-		blockEdit = { el, meta, html: el.innerHTML };
-		el.setAttribute('contenteditable', 'true');
-		el.focus({ preventScroll: true });
-		placeSelection(el, caret ?? 0, caret ?? 0);
-	}
-
-	/**
-	 * 要件#52 契約①: code fence の `<pre>` の中身を素テキストにして編集に入る。
-	 *
-	 * 素テキストは **DOM の `textContent` ではなく原文から**採る ―― Shiki が末尾
-	 * 改行や空白をどう扱うかに依存させないため。原文は「いま差し替える対象」= 現在の
-	 * 編集バッファを位置補正した範囲で、`index.sliceOf`(初回レンダー基準)ではない
-	 * ―― 同じ fence を2回目に開いたとき、1回目に確定した中身が出る側が正しい。
-	 *
-	 * フェンス3分割できないときは何もしない(ダブルクリックは空振り)。`resolveEditTarget`
-	 * が既に同じ判定をしているので普段は起きないが、原文が編集で壊れていれば起こりうる
-	 * ―― そこで編集に入ると開始/終了フェンス行を取り違えて原文を壊す。
-	 *
-	 * 要件#48 追補p 契約1(c): `caret` は Shiki の `<span>` を置き換える**前**に数えた、
-	 * 中身の先頭からの文字数。素テキストの同じ文字数に潰して置く。null なら先頭。
-	 */
-	function beginCodeEdit(el: HTMLElement, meta: NodeMeta, caret: number | null) {
-		// 基準は編集中なら編集バッファ・閲覧中なら保存済み content(= `beginEdit()`
-		// がバッファへ複製するもの)。どちらでも同じ値になるので入る前に採ってよい。
-		// 要件#54 契約④: 掴む前にハイライトを外す(上の beginBlockEdit と同じ理由)。
-		dropFindHighlights();
-		const base = windowState.editBuffer ?? document.content;
-		const position = currentPositionOf(meta);
-		// 追補a(6): 開始フェンスのインデント幅。position はフェンス記号から始まるので
-		// スライスからは採れず、列(1 起点)から採る。
-		const indent = position.startColumn - 1;
-		const parts = splitCodeFence(base.slice(position.startOffset, position.endOffset), indent);
-		if (!parts) return;
-
-		blockEditMode = true;
-		if (!editing) {
-			if (!windowState.beginEdit()) {
-				blockEditMode = false;
-				return;
-			}
-			blockEditFromView = true;
-		}
-
-		rememberGrabbed(el, meta);
-		blockEdit = {
-			el,
-			meta,
-			html: el.innerHTML,
-			// 要件#49 追補j(1): 素テキスト化した直後の中身も控える。fence の `html` は Shiki の
-			// `<span>` 入りで、無変更でも `el.innerHTML` とは一致しないため、比較はこちらで行う。
-			fence: { open: parts.open, close: parts.close, indent, body: parts.body },
-		};
-		// Shiki の `<span>` 構造を捨てて素テキストに置き換える(契約①)。フェンス行は
-		// 編集不可なので中身だけ ―― 直したい場合はソース編集モードへ(契約③)。
-		el.textContent = parts.body;
-		el.setAttribute('contenteditable', 'true');
-		el.focus({ preventScroll: true });
-		placeSelection(el, caret ?? 0, caret ?? 0);
-	}
-
-	/**
-	 * 要件#52 契約⑤: キャレット位置へプレーンテキストを差し込む。
-	 *
-	 * Enter の改行・Tab のタブ文字・貼り付けを**自前で**入れるのは、契約⑤が
-	 * 「Tab はタブ文字を挿入」と動作そのものを決めているため ―― 既定動作任せでは
-	 * ブラウザごとに Tab でフォーカスが飛び、貼り付けでは HTML の `<span>` が
-	 * 素テキストへ混ざる。
-	 *
-	 * 選択が編集要素の外にある(取れない)ときは末尾へ足す ―― 入力を落とすよりは
-	 * 末尾に付く方が失うものが少ない。
-	 *
-	 * 要件#48 追補n: ソース編集の `insertSourceText` も、編集コマンドが使えない
-	 * ときはこれで差し込む。
-	 */
-	function insertPlainText(el: HTMLElement, text: string) {
-		const doc = el.ownerDocument;
-		const sel = doc.defaultView?.getSelection();
-		const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
-		if (!sel || !range || !el.contains(range.commonAncestorContainer)) {
-			el.textContent = (el.textContent ?? '') + text;
-			return;
-		}
-		range.deleteContents();
-		const node = doc.createTextNode(text);
-		range.insertNode(node);
-		// 差し込んだ直後へキャレットを送る(連続入力が積み上がる)。
-		range.setStartAfter(node);
-		range.setEndAfter(node);
-		sel.removeAllRanges();
-		sel.addRange(range);
-	}
-
-	/**
-	 * 確定(契約②)。ブロックを逆シリアライズして `NodeMeta.position` の範囲だけを
-	 * 差し替え、要件#48 の編集バッファへ渡す — dirty も保存も向こうの経路(契約⑦)。
-	 *
-	 * 要件#52 契約②: code fence の中身編集なら逆シリアライズは要らない ―― 中身は
-	 * 装飾もリンクも持たない素テキストなので、掴んだときの開始/終了フェンス行を
-	 * そのまま挟んで組み立てるだけでよい。差し替え範囲・位置補正・増減の記録は
-	 * ブロック編集と同じ(契約⑦)。
-	 */
-	function commitBlockEdit() {
-		const current = blockEdit;
-		if (!current) return;
-		// 要件#54 契約④⑦: 逆シリアライズより**前に**必ず外す(AC-54-13)。
-		dropFindHighlights();
-		// 要件#49 追補j(1)(2): 中身が掴んだときのままなら書き戻さない(逆シリアライズも
-		// `updateBuffer` も `recordEdit` もしない)。書き戻しは意味等価でも byte 等価とは
-		// 限らず、触っていない原文が変わる(`![~~x~~](i.png)` → `![x](i.png)`)。行き先は
-		// 破棄と同じ ―― 閲覧から入ってまだ何も確定していなければ閲覧へ戻り、確定済みの
-		// 編集があれば編集モードのまま。比較は強調を外した**あと**(要件#54 契約④)。
-		const unchanged = current.fence
-			? current.el.textContent === current.fence.body
-			: current.el.innerHTML === current.html;
-		if (unchanged) {
-			discardBlockEdit();
-			return;
-		}
-		blockEdit = null;
-		blockEditFromView = false;
-		current.el.removeAttribute('contenteditable');
-
-		// 追補a(1): 基準は常に最新の原文。position もそこへ写してから差し替える。
-		// 追補a(11)「位置の基準」: ただし**行き先を読むスライス**だけは初回レンダー
-		// 基準の原文(`index.sliceOf` = 門 `resolveEditTarget` が見るのと同じもの)を
-		// 渡す。子の `data-source-*` は初回レンダー基準の絶対 offset なので、同じ
-		// ブロックを2回続けて編集すると確定後の原文から切った窓はずれる(AC-49-25)。
-		const base = windowState.editBuffer ?? document.content;
-		const position = currentPositionOf(current.meta);
-		const fence = current.fence;
-		const replacement = fence
-			? assembleCodeFence(fence.open, current.el.textContent ?? '', fence.close, fence.indent)
-			: serializeBlock(
-					current.el,
-					{ ...current.meta, position },
-					base,
-					document.uri,
-					index?.sliceOf(current.meta.id),
-				);
-		if (fence) {
-			// 要件#52 契約⑥: 確定しても再レンダーはしない(Shiki の色は戻らない)。
-			// 表示だけは末尾改行の規約を通した中身へ揃えて、画面と原文を一致させる。
-			// 追補a(6): 表示へ戻すのは**素テキスト**なので、付け直したインデントは
-			// また除く(除かないと次の編集で二重に下がる)。
-			current.el.textContent = splitCodeFence(replacement, fence.indent)?.body ?? '';
-		}
-		windowState.updateBuffer(replaceRange(base, position, replacement));
-		recordEdit(current.meta, replacement.length - (position.endOffset - position.startOffset));
-	}
-
-	/**
-	 * 破棄(契約②)。編集前の中身へ戻し、バッファには何も書かない。
-	 *
-	 * 追補a(2): 破棄するのは**そのブロックの編集だけ**。閲覧から入ってまだ何も
-	 * 確定していないときだけ閲覧へ戻り、確定済みの編集があるなら編集モードのまま
-	 * 残す(`endEdit()` はバッファと dirty ごと巻き戻すので呼ばない)。
-	 */
-	function discardBlockEdit() {
-		const current = blockEdit;
-		if (!current) return;
-		dropFindHighlights();
-		blockEdit = null;
-		current.el.removeAttribute('contenteditable');
-		current.el.innerHTML = current.html;
-		if (!blockEditFromView) return;
-		blockEditFromView = false;
-		blockEditMode = false;
-		windowState.endEdit();
-	}
-
-	/**
-	 * ブロック編集中の確定/破棄の契機を張る(契約②)。
-	 *
-	 * 確定はブロック**外**の mousedown。click ではなく mousedown を見るのは、
-	 * 押した先が別のブロックでもリンクでも、その操作が始まる前に差し戻しを
-	 * 済ませておくため。blur / focusout は contenteditable の生死に引きずられる
-	 * ので使わない。
-	 *
-	 * 要件#52 契約⑤: IME の変換中はどちらの契機も発火させない。あわせて、code fence
-	 * の中身編集のときだけ編集要素そのものにも Enter / Tab / 貼り付けを張る
-	 * (コードなので Enter は確定ではなく改行=契約②)。
-	 */
-	$effect(() => {
-		const current = blockEdit;
-		const el = current?.el;
-		if (!current || !el) return;
-		const doc = el.ownerDocument;
-		const codeEdit = current.fence !== undefined;
-
-		const onPointerDown = (e: MouseEvent) => {
-			if (composing) return;
-			const target = e.target;
-			if (target instanceof Node && el.contains(target)) return;
-			commitBlockEdit();
-		};
-		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key !== 'Escape' || e.isComposing || composing) return;
-			// 要件#54 契約⑤・要件#60 契約⑦: バー(検索 / Go to)が開いていればそちらが
-			// 先に食う(バーは編集より手前の一時 UI)。閉じたあとの Esc は従来どおり破棄。
-			if (escBelongsToBar) return;
-			e.preventDefault();
-			discardBlockEdit();
-		};
-		const onCompositionStart = () => {
-			composing = true;
-		};
-		const onCompositionEnd = () => {
-			composing = false;
-		};
-
-		/**
-		 * 要件#52 契約②⑤: Enter は改行・Tab はタブ文字。どちらも既定動作を止めて
-		 * 自前で入れる ―― Tab の既定はフォーカス移動で、契約⑤の「フォーカスを
-		 * 移さない」と食い違う。Shift+Tab は文字を入れないが、既定も止める
-		 * (逆向きのフォーカス移動で編集中の fence からキャレットが外れないよう)。
-		 */
-		const onEditorKeyDown = (e: KeyboardEvent) => {
-			if (e.isComposing || composing) return;
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				insertPlainText(el, '\n');
-				return;
-			}
-			if (e.key === 'Tab') {
-				e.preventDefault();
-				if (e.shiftKey) return;
-				insertPlainText(el, '\t');
-			}
-		};
-		/** 要件#52 契約⑤: 貼り付けはプレーンテキストだけ(HTML の span を混ぜない)。 */
-		const onPaste = (e: ClipboardEvent) => {
-			e.preventDefault();
-			const text = e.clipboardData?.getData('text/plain') ?? '';
-			if (text.length > 0) insertPlainText(el, text);
-		};
-
-		doc.addEventListener('mousedown', onPointerDown, true);
-		doc.addEventListener('keydown', onKeyDown, true);
-		el.addEventListener('compositionstart', onCompositionStart);
-		el.addEventListener('compositionend', onCompositionEnd);
-		if (codeEdit) {
-			el.addEventListener('keydown', onEditorKeyDown);
-			el.addEventListener('paste', onPaste);
-		}
-		return () => {
-			doc.removeEventListener('mousedown', onPointerDown, true);
-			doc.removeEventListener('keydown', onKeyDown, true);
-			el.removeEventListener('compositionstart', onCompositionStart);
-			el.removeEventListener('compositionend', onCompositionEnd);
-			el.removeEventListener('keydown', onEditorKeyDown);
-			el.removeEventListener('paste', onPaste);
-			composing = false;
-		};
-	});
-
-	// --- レンダリング済み編集面(要件#53) ------------------------------
-	// 「編集面の HTML と索引 ↔ 原文範囲」の往復は `../html/edit` の純関数が持つ。
-	// ここは編集面を Shadow DOM に出すことと、どの要素を contenteditable にするか、
-	// 確定/破棄の契機だけ。閲覧の iframe(HtmlViewer)には触れない(契約①)。
-
-	/** 編集面のホスト。`attachShadow({mode:'open'})` で文書の CSS を閉じ込める(契約②)。 */
-	let htmlSurfaceHost: HTMLDivElement | undefined = $state();
-
-	/**
-	 * Shadow 内の編集面ルート。葉ブロックの解決はこの中で閉じる(契約③)。
-	 *
-	 * 要件#54: 編集中の html で検索の対象になるのもこの木なので `$state` にしてある
-	 * (編集面が生まれ変わったら再検索が要る=要件#54 契約⑤)。
-	 */
-	let htmlSurfaceRoot: HTMLElement | null = $state(null);
-
-	/**
-	 * hid → 原文範囲の索引(契約②)。確定のたびに位置補正済みのものへ差し替える
-	 * ―― 確定で編集面は再構築しないので(契約④)、索引だけが原文の今を知っている。
-	 * `$state` にしないのは、これが画面に出るものではないため。
-	 */
-	let htmlSurfaceIndex: EditSurfaceIndex | null = null;
-
-	/**
-	 * いまの編集面が組み立てられた原文。null = 編集面を出していない。
-	 *
-	 * 索引はこの原文の上の offset なので、編集バッファがこれと食い違ったら
-	 * 索引はもう使えない ―― 確定の書き戻しが別の場所へ当たって原文を壊す。
-	 * 自分の確定では両方を同じ値へ進めるので食い違わず、食い違うのは**外から**
-	 * 差し替わったとき(要件#48 契約⑥の `apply` / 衝突バナーの「読み直す」)だけ。
-	 */
-	let htmlSurfaceSource: string | null = null;
-
-	/**
-	 * 編集中のブロック(契約③)。`before` は編集開始時の形(確定時に比べる)、
-	 * `html` は編集前の中身で、Esc の破棄と契約④の拒否で書き戻す。
-	 */
-	let htmlBlock: { el: HTMLElement; before: BlockShape; html: string } | null = $state(null);
-
-	/** 要件#48/#49/#52 と同じ: IME の変換中は確定・破棄の契機を発火させない(契約⑥)。 */
-	let htmlComposing = false;
-
-	/** 契約④の拒否通知。null = 出さない。 */
-	let htmlStructureNotice = $state<string | null>(null);
-
-	/** 編集面のルート要素の class(文書スタイルを写す先=要件#54 追補b と同じ手当て)。 */
-	const HTML_EDIT_ROOT_CLASS = 'vellis-html-edit-root';
-
-	/**
-	 * 編集面の中だけに効かせる素の見た目。文書の CSS は Shadow に閉じているので、
-	 * 編集中のブロックを示す枠とリンクの見た目はここで足す(アプリの UI へは漏れない)。
-	 * 色はトークン(custom property は shadow root にも継承される)か UA のリンク色
-	 * (`-webkit-link`)で書き、直書きしない(要件#56 契約 2・第2段 (b))。
-	 */
-	const HTML_SURFACE_CSS = [
-		':host{display:block}',
-		'[contenteditable="true"]{outline:2px solid var(--color-focus-ring);outline-offset:2px;border-radius:2px}',
-		'[data-vellis-href],[data-vellis-xlink-href]{color:-webkit-link;',
-		'text-decoration:underline}',
-	].join('');
-
-	/**
-	 * 編集面を組み立てて Shadow DOM へ出す(契約②)。
-	 *
-	 * 呼ぶのはホスト要素が生まれたときだけ ―― 確定のたびに作り直すと、掴んでいる
-	 * ブロックも画面の位置も飛ぶ(契約④「確定で編集面を再構築しない」)。そのため
-	 * 呼び出し側は `untrack` で包み、原文(編集バッファ)の変化では鳴らさない。
-	 */
-	function mountHtmlSurface(host: HTMLDivElement) {
-		const owner = host.ownerDocument;
-		const source = windowState.editBuffer ?? document.content;
-		const surface = buildEditSurface(source, document.uri);
-		htmlSurfaceIndex = surface.index;
-		htmlSurfaceSource = source;
-
-		const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
-		shadow.replaceChildren();
-
-		const own = owner.createElement('style');
-		own.textContent = HTML_SURFACE_CSS;
-		shadow.append(own);
-		// 要件#54 追補b と同じ手当て(編集面にも同じ差がある)。まず iframe の UA
-		// 既定を再現して継承を断ち、そのあとに文書のスタイルを入れる。
-		const base = owner.createElement('style');
-		base.textContent = surfaceBaseCss('.' + HTML_EDIT_ROOT_CLASS);
-		shadow.append(base);
-		// 文書の head 側のスタイル(style 要素の中身)を編集面へ移して効かせる
-		// (契約②)。ここに生のタグを書かないのは、svelte-check の抽出器が
-		// コンポーネントの style ブロックの開始と取り違えるため。Shadow の中に
-		// `<body>` は無いので、`body{…}` 等は編集面のルートへ写してから入れる。
-		for (const css of surface.styles) {
-			const style = owner.createElement('style');
-			style.textContent = rewriteSurfaceCss(css, '.' + HTML_EDIT_ROOT_CLASS);
-			shadow.append(style);
-		}
-
-		const root = owner.createElement('div');
-		root.className = HTML_EDIT_ROOT_CLASS;
-		// 文書の `<html>` / `<body>` の class も足す(`html.dark body{…}` を畳んだ
-		// 規則が当たるように=要件#54 追補e)。ルートは保存される原文に入らない。
-		root.classList.add(...surface.rootClasses);
-		// sanitize 済みの HTML(script / on* / iframe は落ちている=契約②)。
-		root.innerHTML = surface.html;
-		shadow.append(root);
-		htmlSurfaceRoot = root;
-	}
-
-	$effect(() => {
-		const host = htmlSurfaceHost;
-		if (!host) {
-			htmlSurfaceRoot = null;
-			htmlSurfaceIndex = null;
-			return;
-		}
-		untrack(() => mountHtmlSurface(host));
-		return () => {
-			// 「Source」への切り替え・閲覧へ戻るで編集面ごと消えるとき。編集中の
-			// ブロックは破棄(確定済みの編集はバッファに残る=契約①)。
-			releaseHtmlBlock();
-			htmlSurfaceRoot = null;
-			htmlSurfaceIndex = null;
-			htmlSurfaceSource = null;
-		};
-	});
-
-	/**
-	 * 編集バッファが**外から**差し替わったら編集面を作り直す(契約⑧)。
-	 *
-	 * 要件#48 契約⑥の `apply`(編集中・未変更のまま届いた外部変更)と衝突バナーの
-	 * 「読み直す」は、画面に断りなくバッファを別の原文へ替える。索引は古い原文の
-	 * offset のままなので、そこで確定すると見当違いの範囲を書き潰す ―― 新しい原文で
-	 * 組み直して、索引と画面をそろえる。自分の確定では両方が同じ値へ進むので鳴らない
-	 * (契約④「確定で編集面を再構築しない」)。
-	 */
-	$effect(() => {
-		const buffer = windowState.editBuffer;
-		const host = htmlSurfaceHost;
-		if (!host || htmlSurfaceSource === null || buffer === null || buffer === htmlSurfaceSource) {
-			return;
-		}
-		untrack(() => {
-			releaseHtmlBlock();
-			htmlStructureNotice = null;
-			mountHtmlSurface(host);
-		});
-	});
-
-	/**
-	 * 編集面のキャレット位置へプレーンテキストを差し込む(契約⑥)。
-	 *
-	 * ソース編集の `insertPlainText` と分けてあるのは **Shadow DOM の選択** のため:
-	 * `document.getSelection()` は Shadow の中を指す Range を返さない(ブラウザに
-	 * よってはホストへ retarget され、JSDOM では `addRange` 自体が効かない)。
-	 * Chrome 系の `ShadowRoot.getSelection()` を先に試し、どちらも取れなければ
-	 * 末尾へ足す ―― ここで `textContent` に代入すると要素ごと潰れて、確定が契約④の
-	 * 「構造が変わった」で拒否されてしまう。テキストノードを1つ足すだけにすれば、
-	 * 確定時の `normalize()` が隣のテキストと束ねて元の形へ戻る。
-	 */
-	function insertSurfaceText(el: HTMLElement, text: string) {
-		const owner = el.ownerDocument;
-		const root = el.getRootNode() as Partial<{ getSelection: () => Selection | null }>;
-		const sel = root.getSelection?.() ?? owner.defaultView?.getSelection() ?? null;
-		const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
-		if (!sel || !range || !el.contains(range.commonAncestorContainer)) {
-			el.append(owner.createTextNode(text));
-			return;
-		}
-		range.deleteContents();
-		const node = owner.createTextNode(text);
-		range.insertNode(node);
-		range.setStartAfter(node);
-		range.setEndAfter(node);
-		sel.removeAllRanges();
-		sel.addRange(range);
-	}
-
-	/** 編集中のブロックを、原文にも DOM にも触らずに手放す。 */
-	function releaseHtmlBlock() {
-		const current = htmlBlock;
-		if (!current) return;
-		htmlBlock = null;
-		current.el.removeAttribute('contenteditable');
-	}
-
-	/**
-	 * そのブロックだけを contenteditable にする(契約③)。
-	 *
-	 * 要件#48 追補p 契約1(d): キャレットは `caret`(ブロックの先頭からの文字数)に
-	 * 潰して置く。null(位置が取れない)ならブロックの先頭。
-	 */
-	function beginHtmlBlockEdit(el: HTMLElement, caret: number | null) {
-		if (htmlBlock?.el === el) return;
-		// 別のブロックへ移るときは先のブロックを確定してから(契約③)。普段は
-		// ダブルクリックに先立つ mousedown が済ませているが、経路を1つに閉じる。
-		if (htmlBlock) commitHtmlBlock();
-		htmlStructureNotice = null;
-		// 要件#54 契約④: 形を控える前に外す ―― `<mark>` が混ざったまま控えると
-		// 確定時の突き合わせが「構造が変わった」で拒否になる(要件#53 契約④)。
-		dropFindHighlights();
-		htmlBlock = { el, before: snapshotBlock(el), html: el.innerHTML };
-		el.setAttribute('contenteditable', 'true');
-		el.focus({ preventScroll: true });
-		placeSelection(el, caret ?? 0, caret ?? 0);
-	}
-
-	/**
-	 * 確定(契約④)。値が変わったテキストノードだけを原文の当該範囲へ書き戻し、
-	 * 要件#48 の編集バッファへ渡す ―― dirty も保存も向こうの経路(契約⑧)。
-	 *
-	 * 形が変わっていたら拒否して編集前の DOM へ戻し、通知を出す。原文は触らないので
-	 * dirty にもならない。
-	 */
-	function commitHtmlBlock() {
-		const current = htmlBlock;
-		if (!current) return;
-		// 要件#54 契約④⑦: 書き戻しより前に必ず外す(索引 data-vellis-hid を壊さない)。
-		dropFindHighlights();
-		htmlBlock = null;
-		current.el.removeAttribute('contenteditable');
-
-		const index = htmlSurfaceIndex;
-		if (!index) return;
-		const base = windowState.editBuffer ?? document.content;
-		const result = commitBlock({ source: base, index, block: current.el, before: current.before });
-		if (!result.ok) {
-			current.el.innerHTML = current.html;
-			htmlStructureNotice = STRUCTURE_CHANGED_MESSAGE;
-			return;
-		}
-		// 確定後の索引は位置補正済み(契約④)。同じブロックの2回目・別ブロックの
-		// 後の編集でも正しい範囲が差し替わる。
-		htmlSurfaceIndex = result.index;
-		htmlSurfaceSource = result.source;
-		htmlStructureNotice = null;
-		if (result.source !== base) windowState.updateBuffer(result.source);
-	}
-
-	/** 破棄(契約④⑥)。編集前の DOM へ戻し、バッファには何も書かない。 */
-	function discardHtmlBlock() {
-		const current = htmlBlock;
-		if (!current) return;
-		dropFindHighlights();
-		htmlBlock = null;
-		current.el.removeAttribute('contenteditable');
-		current.el.innerHTML = current.html;
-		htmlStructureNotice = null;
-	}
-
-	/**
-	 * 契約③の「そのブロックの中か」。Shadow DOM を跨ぐと `event.target` はホストへ
-	 * retarget されるので、`contains` では中の要素を外だと誤る ―― 実際に通った道
-	 * (`composedPath`)で見る。
-	 */
-	function eventPathContains(e: Event, el: Element): boolean {
-		const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
-		if (path.length > 0) return path.includes(el);
-		const target = e.target;
-		return target instanceof Node && el.contains(target);
-	}
-
-	/**
-	 * 編集面の契機(契約③④⑥)。
-	 *
-	 * ダブルクリックは **Shadow のルート** に張る ―― そこに張ればイベントの
-	 * `target` は Shadow の中の本当の要素のままで届く。確定の契機(ブロック外の
-	 * mousedown)とキーは文書レベルに張り、`composedPath` で中か外かを見る。
-	 */
-	$effect(() => {
-		if (!htmlEditing) return;
-		const host = htmlSurfaceHost;
-		const shadow = host?.shadowRoot;
-		if (!host || !shadow) return;
-		const owner = host.ownerDocument;
-
-		const onDoubleClick = (e: Event) => {
-			const root = htmlSurfaceRoot;
-			const target = e.target;
-			if (!root || !(target instanceof Element)) return;
-			const block = resolveLeafBlock(target, root);
-			// 編集不可(hid が無い・コンテナ)ならダブルクリックは空振り(契約⑤)。
-			if (!block) return;
-			// 要件#48 追補p 契約1(d)・追補q: 掴む前(ハイライトを外す前)に、点の文字数を採る。
-			const caret = e instanceof MouseEvent ? offsetAtPointInShadow(block, shadow, e.clientX, e.clientY) : null;
-			beginHtmlBlockEdit(block, caret);
-		};
-
-		const onPointerDown = (e: MouseEvent) => {
-			if (htmlComposing) return;
-			const current = htmlBlock;
-			if (!current || eventPathContains(e, current.el)) return;
-			commitHtmlBlock();
-		};
-
-		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.isComposing || htmlComposing) return;
-			// 要件#54 契約⑤・要件#60 契約⑦: バーが開いているときの Esc はバーが先に食う。
-			if (e.key === 'Escape' && escBelongsToBar) return;
-			const current = htmlBlock;
-			if (!current) {
-				// ブロックを掴んでいないときの Esc は要件#48 の出口(閲覧へ戻る関門)。
-				if (e.key !== 'Escape') return;
-				e.preventDefault();
-				void confirmDiscardEdits();
-				return;
-			}
-			const el = current.el;
-			const isPre = el.tagName.toLowerCase() === 'pre';
-			if (e.key === 'Escape') {
-				e.preventDefault();
-				discardHtmlBlock();
-				return;
-			}
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				// `<pre>` では改行が意味を持つので `\n` を入れる。それ以外のテキスト
-				// ノードで改行は空白でしかなく、`<br>` を入れると構造の変化になって
-				// 確定が拒否される ―― だから Shift+Enter は何もしない(契約⑥)。
-				if (isPre) insertSurfaceText(el, '\n');
-				else if (!e.shiftKey) commitHtmlBlock();
-				return;
-			}
-			if (e.key === 'Tab') {
-				// フォーカスは移さない(契約⑥)。`<pre>` だけタブ文字を入れる。
-				e.preventDefault();
-				if (isPre && !e.shiftKey) insertSurfaceText(el, '\t');
-			}
-		};
-
-		shadow.addEventListener('dblclick', onDoubleClick);
-		owner.addEventListener('mousedown', onPointerDown, true);
-		owner.addEventListener('keydown', onKeyDown, true);
-		return () => {
-			shadow.removeEventListener('dblclick', onDoubleClick);
-			owner.removeEventListener('mousedown', onPointerDown, true);
-			owner.removeEventListener('keydown', onKeyDown, true);
-		};
-	});
-
-	/**
-	 * 編集中のブロックそのものに張る契機(契約⑥)。IME の変換中の印と、
-	 * 貼り付けのプレーンテキスト化 ―― HTML を貼って要素が混ざると契約④で拒否に
-	 * なるので、入口で止める。
-	 */
-	$effect(() => {
-		const current = htmlBlock;
-		if (!current) return;
-		const el = current.el;
-
-		const onCompositionStart = () => {
-			htmlComposing = true;
-		};
-		const onCompositionEnd = () => {
-			htmlComposing = false;
-		};
-		const onPaste = (e: ClipboardEvent) => {
-			e.preventDefault();
-			const text = e.clipboardData?.getData('text/plain') ?? '';
-			if (text.length > 0) insertSurfaceText(el, text);
-		};
-
-		el.addEventListener('compositionstart', onCompositionStart);
-		el.addEventListener('compositionend', onCompositionEnd);
-		el.addEventListener('paste', onPaste);
-		return () => {
-			el.removeEventListener('compositionstart', onCompositionStart);
-			el.removeEventListener('compositionend', onCompositionEnd);
-			el.removeEventListener('paste', onPaste);
-			htmlComposing = false;
-		};
-	});
-
-	/**
-	 * ツールバーの「Source」(契約①)。ソース編集モードへ切り替えるだけで、
-	 * `endEdit()` は呼ばない ―― 確定済みの編集(バッファと dirty)を失わせない。
-	 */
-	function handleEditSource() {
-		releaseHtmlBlock();
-		htmlStructureNotice = null;
-		htmlSourceRequested = true;
-	}
-
-	function handleEditInput(e: Event) {
-		syncSourceBuffer(e.currentTarget as HTMLElement, e instanceof InputEvent ? e.inputType : '');
-	}
-
-	/**
-	 * 追補r 契約9: 番兵に掛かったカット。番兵を除いた文字をクリップボードへ書き、選択を
-	 * 番兵の手前までに縮めてから消す。消すのは WebKit の `delete`(取り消しの履歴に乗り、
-	 * `input` で `syncSourceBuffer` が走る)で、使えなければ DOM で消す。番兵に掛からない
-	 * カットは既定のまま(WebKit が消して `input` を送る)。
-	 */
-	function handleEditCut(e: ClipboardEvent) {
-		const sel = window.getSelection();
-		const over = sel ? selectionOverSentinel(sel) : null;
-		if (!sel || !over) return;
-		e.preventDefault();
-		e.clipboardData?.setData('text/plain', (over.pre.textContent ?? '').slice(over.start, over.end));
-		placeSelection(over.pre, over.start, over.end);
-		const doc = over.pre.ownerDocument;
-		const deleted = typeof doc.execCommand === 'function' && doc.execCommand('delete');
-		if (!deleted && over.start < over.end) sel.getRangeAt(0).deleteContents();
-		syncSourceBuffer(over.pre);
-	}
-
-	/**
-	 * 要件#48 追補n 契約1〜4: ソース編集の `<pre>` のキャレット位置へ素テキストを
-	 * 入れ、編集バッファを `textContent` に揃える(契約3。追補r: 番兵を除いて)。
-	 *
-	 * Return も貼り付けも既定任せにしないのは、WebKit が改行を `<div>` にして
-	 * `bufferFromPre`(`textContent`)から落とすため(Issue #765)。入れるのは WebKit
-	 * の編集コマンドで、取り消しの履歴(Command + Z)に乗る(契約4): 改行は
-	 * `insertLineBreak`(`<br>` ではなく `\n` の文字が入る)、行の中身は `insertText`。
-	 * `\n` を含む値を `insertText` に渡すと `<div>` になるので、行で割って交互に呼ぶ。
-	 * コマンドが無いか false を返す環境(JSDOM など)では、残りを要件#52 の
-	 * `insertPlainText` で直接差し込む。
-	 */
-	function insertSourceText(el: HTMLElement, text: string) {
-		const doc = el.ownerDocument;
-		const sel = doc.defaultView?.getSelection();
-		const inside =
-			!!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).commonAncestorContainer);
-		const pieces = text.split(/(\n)/).filter((p) => p.length > 0);
-		let done = 0;
-		if (inside && typeof doc.execCommand === 'function') {
-			for (; done < pieces.length; done++) {
-				const piece = pieces[done]!;
-				const ok =
-					piece === '\n'
-						? doc.execCommand('insertLineBreak')
-						: doc.execCommand('insertText', false, piece);
-				if (!ok) break;
-			}
-		}
-		const rest = pieces.slice(done).join('');
-		if (rest.length > 0) {
-			// 追補r 契約5: 選択が `<pre>` の外なら、`insertPlainText` の「末尾へ足す」は
-			// 番兵の後ろになるので、原文の末尾(番兵の手前)にキャレットを置いてから入れる。
-			if (!inside && sel) {
-				const end = Math.max(0, (el.textContent ?? '').length - SOURCE_SENTINEL.length);
-				placeSelection(el, end, end);
-			}
-			insertPlainText(el, rest);
-		}
-		syncSourceBuffer(el);
-	}
-
-	/**
-	 * 追補n 契約2: 貼り付けは既定(WebKit は HTML を入れる)を止め、text/plain だけを
-	 * 改行(CRLF・CR・LF)を `\n` にそろえて入れる。text/plain が無いか空なら何も
-	 * 入れない(既定は止めたまま)。
-	 */
-	function handleEditPaste(e: ClipboardEvent) {
-		e.preventDefault();
-		const text = (e.clipboardData?.getData('text/plain') ?? '').replace(/\r\n?/g, '\n');
-		if (text.length > 0) insertSourceText(e.currentTarget as HTMLElement, text);
-	}
-
-	/**
-	 * Esc で閲覧へ戻る(契約③)。Return 以外の文字入力は素通しする。
-	 *
-	 * 追補c: 閲覧へ戻る=編集バッファを捨てる操作なので、⌘E トグルと同じ関門を
-	 * 通す。`confirmDiscardEdits` は非 dirty なら何も聞かずに畳み、dirty なら
-	 * 保存 / 破棄 / キャンセルを聞いて、保存なら成功後・破棄なら即・キャンセル
-	 * なら何もせず編集中のまま — こちらで戻り値を見て分岐するものは無い。
-	 *
-	 * 追補n 契約1: Return は既定(WebKit は `<div>` を足す)を止めて `\n` を 1 つ
-	 * 入れる(Shift・Option 付きも同じ)。IME の変換中(`isComposing`・変換を確定する
-	 * Return の `keyCode` 229)と Command / Control 付きは素通しする。
-	 */
-	function handleEditKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter') {
-			if (e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey) return;
-			e.preventDefault();
-			insertSourceText(e.currentTarget as HTMLElement, '\n');
-			return;
-		}
-		if (e.key !== 'Escape') return;
-		// 要件#54 契約⑤・要件#60 契約⑦: バーが開いていればそちらが先に食う。
-		if (escBelongsToBar) return;
-		e.preventDefault();
-		void confirmDiscardEdits();
-	}
-
-	/** ツールバーの「編集を終える」(契約③)。出口は Esc と同じ関門を通る。 */
-	function handleEditDone() {
-		void confirmDiscardEdits();
-	}
-
-	/** 衝突表示の「上書き保存」(契約⑥)。編集中の内容で外部版を上書きする。 */
-	async function overwriteExternal() {
-		try {
-			await saveDocument(document.uri, windowState.editBuffer ?? document.content);
-		} catch (err) {
-			alert(`Could not save: ${err}`);
-		}
-	}
-
-	/**
-	 * 削除の帯の「保存」(要件#48 追補g)。編集中の内容を同じパスに書き直す。
-	 * 経路は Command + S と同じ `saveDocument`(成功すれば `markSaved` が印を消す)。
+	 * 削除の帯の「保存」(要件#48 追補g・要件#74 契約13)。面の保存の経路(削除の印が立っているので照合しない)。
 	 */
 	async function saveRemovedFile() {
-		try {
-			await saveDocument(document.uri, windowState.editBuffer ?? document.content);
-		} catch (err) {
-			alert(`Could not save: ${err}`);
-		}
+		if (windowState.fileEditor) await saveFileEditor(windowState.fileEditor);
 	}
 
 	// --- 文書内検索(要件#54) ------------------------------------------
@@ -1725,6 +443,7 @@
 	 */
 	let findSearchable = $derived.by(() => {
 		if (htmlDocument) return true;
+		if (faceActive || mdSurface) return true;
 		const kind = detectFileType(document.uri);
 		if (kind !== 'markdown' && kind !== 'text') return false;
 		return html.length > 0;
@@ -1733,20 +452,24 @@
 	/**
 	 * 契約②: いま「表示されているテキスト」を持つ木。
 	 *
-	 * - 編集中の html = 要件#53 の編集面(編集面のテキストが対象)
-	 * - 閲覧中の html = 要件#53 の `buildEditSurface` で作る**読み取り専用**の複製面
+	 * - html = 要件#53 の `buildEditSurface` で作る**読み取り専用**の複製面
 	 * - それ以外 = 本文コンテナ(レンダリング済み Markdown / `<pre>` / ソース編集の
 	 *   `<pre>` のいずれもここに居る)
 	 */
 	let findTarget = $derived.by(() => {
 		if (!findOpen) return null;
-		if (htmlEditing) return htmlSurfaceRoot;
 		if (htmlDocument) return findSurfaceRoot;
 		return bodyEl ?? null;
 	});
 
 	/** 件数表示(契約④)。 */
-	let findCount = $derived(formatCount(findCurrent, findRanges.length, findQuery));
+	let findCount = $derived(
+		cmFind
+			? formatCount(findCurrent, faceFind.ranges.length, faceFind.query)
+			: mdFaceActive
+				? formatCount(findCurrent, findRanges.length, mdAppliedQuery)
+				: formatCount(findCurrent, findRanges.length, findQuery),
+	);
 
 	/**
 	 * 追補c(1): 検索バーを貼り付ける高さ=ツールバーの実寸を測る。
@@ -1760,8 +483,6 @@
 		const header = toolbarEl;
 		if (!header) return;
 		// ツールバーのボタンが増減する(=高さが変わりうる)契機。
-		void editing;
-		void htmlEditing;
 		void document.uri;
 		const measure = () => {
 			toolbarHeight = header.offsetHeight;
@@ -1799,7 +520,7 @@
 	 */
 	$effect(() => {
 		const host = findSurfaceHost;
-		const source = windowState.editBuffer ?? document.content;
+		const source = document.content;
 		const uri = document.uri;
 		if (!host) {
 			findSurfaceRoot = null;
@@ -1859,19 +580,22 @@
 		void index;
 		void document.uri;
 		void document.content;
-		void windowState.editBuffer;
-		void editing;
-		void blockEditMode;
-		void htmlEditing;
 		void findRefresh;
+		void mdRaw;
+		// 要件#74: CodeMirror の面(コード・raw)は自分で数える(文書全体=見えている範囲の外も)。結果は handleFaceFindResults。
+		if (cmFind) return;
+		// 要件#74 第2段: Markdown の面は見えている文字(容器の textContent)を数える。変換中は張り替えない(契約10)。
+		if (mdFaceActive && mdComposing) return;
 
 		if (!container) {
 			findRanges = [];
 			findCurrent = 0;
+			mdAppliedQuery = '';
 			return;
 		}
 		findRanges = findMatches(container.textContent ?? '', query);
 		findCurrent = 0;
+		mdAppliedQuery = query;
 	});
 
 	/**
@@ -1884,7 +608,8 @@
 	$effect(() => {
 		const pending = pendingFindIndex;
 		const ranges = findRanges;
-		if (pending === null || !findTarget) return;
+		if (pending === null) return;
+		if (cmFind ? faceFind.query !== findQuery : !findTarget) return;
 		pendingFindIndex = null;
 		if (pending <= 0 || ranges.length === 0) return;
 		findCurrent = Math.min(pending, ranges.length - 1);
@@ -1901,12 +626,15 @@
 		const container = findTarget;
 		const ranges = findRanges;
 		const current = findCurrent;
-		if (!container) return;
+		if (!container || cmFind) return;
+		// 要件#74 第2段: Markdown の面は CSS Custom Highlight API でだけ塗る(フォールバックの <mark> は ProseMirror の
+		// DOM を書き換えてしまう)。変換中は張り直さない。
+		if (mdFaceActive && (mdComposing || !detectHighlightApi())) return;
 		// キャレットが対象の中の編集面にあるあいだは触らない。フォールバックの
 		// `<mark>` を挿すとキャレットが飛ぶ ―― 打つたびにそれが起きると編集に
 		// ならない。件数は上の effect が出し続けるので「探せない」わけではなく、
 		// 出ないのは色だけ。確定・破棄で編集が畳まれたら、その契機で張り直す。
-		if (caretInsideEditable(container)) return;
+		if (!mdFaceActive && caretInsideEditable(container)) return;
 		const api = detectHighlightApi();
 		clearHighlights(container, api);
 		if (ranges.length === 0) return;
@@ -1960,9 +688,34 @@
 		});
 	}
 
-	/** 契約⑤: 閉じる。ハイライトは上の effect の cleanup が外す。語は残す。 */
+	/**
+	 * 第3段 3-12: Edit ▸ Find and Replace…。置換を出せる面なら検索バーに置換の行を出し、置換の入力欄へ(語が空なら検索の
+	 * 入力欄へ)。出せない面(Markdown の rendered・読み取り専用・画像など)では Find… と同じ。
+	 */
+	function openFindReplace() {
+		if (!canReplace) {
+			openFind();
+			return;
+		}
+		if (!findSearchable) return;
+		replaceOpen = true;
+		findOpen = true;
+		onFindOpenChange?.(true);
+		void tick().then(() => {
+			if (findQuery.length > 0 && replaceInputEl) {
+				replaceInputEl.focus();
+				replaceInputEl.select();
+			} else {
+				findInputEl?.focus();
+				findInputEl?.select();
+			}
+		});
+	}
+
+	/** 契約⑤: 閉じる。ハイライトは上の effect の cleanup が外す。語は残す。置換の行も一緒に閉じる。 */
 	function closeFind() {
 		if (!findOpen) return;
+		replaceOpen = false;
 		findOpen = false;
 		findComposing = false;
 		onFindOpenChange?.(false);
@@ -1982,8 +735,18 @@
 	 */
 	onMount(() => {
 		let off: (() => void) | null = null;
+		let offReplace: (() => void) | null = null;
 		let disposed = false;
 		try {
+			void listen(MENU_FIND_REPLACE_EVENT, () => {
+				pendingFindIndex = null;
+				openFindReplace();
+			})
+				.then((unlisten) => {
+					if (disposed) unlisten();
+					else offReplace = unlisten;
+				})
+				.catch(() => {});
 			void listen(MENU_FIND_EVENT, () => {
 				// Command + F は番目を持たない(先頭=従来どおり)。
 				pendingFindIndex = null;
@@ -2000,6 +763,7 @@
 		return () => {
 			disposed = true;
 			off?.();
+			offReplace?.();
 			// この窓から Viewer が消えるとき(別種別のビューアへ移った等)は、
 			// 検索バーも一緒に消える。+page.svelte の側に開いたままの印を残さない。
 			if (findOpen) onFindOpenChange?.(false);
@@ -2061,24 +825,6 @@
 		};
 	});
 
-	/**
-	 * 契約④⑦: 編集の確定・破棄・開始の前にハイライトを外す。
-	 *
-	 * フォールバックの `<mark>` を付けたまま確定すると、逆シリアライズがそれを
-	 * 拾って原文へ焼き付く(要件#53 の経路では「構造が変わった」で拒否にもなる)。
-	 * 外したあとは上の effect が契機どおり張り直すので、ここは外すだけでよい。
-	 */
-	function dropFindHighlights() {
-		const container = findTarget;
-		if (!container) return;
-		clearHighlights(container, detectHighlightApi());
-		// 畳んだ編集の結果(確定なら新しい表示テキスト・破棄なら元の DOM)の上で
-		// 探し直す。いまはまだ編集の途中なので、片付いてから頼む(契約⑤)。
-		void tick().then(() => {
-			findRefresh += 1;
-		});
-	}
-
 	// After every html prop change, look for `.vellis-mermaid` placeholders
 	// in the rendered body and have the mounter replace them with SVG.
 	// Mermaid is dynamic-imported on first need; documents without mermaid
@@ -2092,7 +838,10 @@
 	});
 
 	async function copyAllAsMarkdown() {
-		await navigator.clipboard.writeText(document.content);
+		// 要件#74: 新しい面ではバッファ(今の文字列)全体。
+		await navigator.clipboard.writeText(
+			anyFace && windowState.fileEditor ? windowState.fileEditor.text() : document.content,
+		);
 		copyLabel = 'Copied';
 		if (copyTimer) clearTimeout(copyTimer);
 		copyTimer = setTimeout(() => {
@@ -2120,6 +869,8 @@
 	}
 
 	function handleCopy(e: ClipboardEvent) {
+		// 要件#74 契約17: 新しい面のコピーは面が持つ(コード=選んだ文字列そのもの・Markdown=見えている文字)。
+		if (anyFace) return;
 		// Requirement #32: copy exactly the visible text of the selection.
 		// The Markdown-source resolution that used to run here (requirement
 		// #13 / copy-original-markdown.md §B-3) is gone from the copy path —
@@ -2128,11 +879,7 @@
 		// consulted at all any more; it stays for mark creation (buildAnchor).
 		const sel = window.getSelection();
 		if (!sel) return;
-		// 要件#48 追補r 契約9: ソース編集の番兵はクリップボードに入れない。
-		const over = selectionOverSentinel(sel);
-		const text = over
-			? (over.pre.textContent ?? '').slice(over.start, over.end)
-			: planSelectionCopy(sel);
+		const text = planSelectionCopy(sel);
 		if (text === null) return; // browser default (collapsed selection etc.)
 		e.preventDefault();
 		e.clipboardData?.setData('text/plain', text);
@@ -2178,10 +925,8 @@
 	}
 
 	async function handleClick(e: MouseEvent) {
-		// 編集中はリンク航行を止める(要件#48 契約②)。ソース編集の `<pre>` に
-		// リンクは無いが、preventDefault が残っているとキャレットの置き直しを
-		// 邪魔しうるので、経路そのものを通さない。
-		if (editing) return;
+		// 要件#74 第2段: Markdown の面の航行は面が持つ(未保存の確認を通す=判断 7)。
+		if (mdFaceActive) return;
 		const target = (e.target as HTMLElement).closest('a');
 		if (!target) return;
 		const href = target.getAttribute('href');
@@ -2247,55 +992,61 @@
 		>
 			{copyLabel}
 		</button>
-		<button
-			type="button"
-			class="toolbar-button"
-			title="Add an AI instruction for the selection (ai-collab)"
-			onclick={addInstructionFromSelection}
-		>
-			Add Instruction
-		</button>
-		<button
-			type="button"
-			class="toolbar-button"
-			class:active={marksOpen}
-			title="Show or hide the Marks sidebar"
-			onclick={onToggleMarks}
-			aria-pressed={marksOpen}
-		>
-			Marks
-		</button>
-		{#if htmlEditing}
-			<!--
-				要件#53 契約①: html の ⌘E はレンダリング済み編集面へ入る。タグ・属性・
-				装飾を直したいときの行き先がソース編集モードで、その入口がこのボタン。
-			-->
+		{#if aiTools}
+			<!-- 要件#84 契約5: 今の AI 連携の 2 つ(配布版では出さない)。 -->
 			<button
 				type="button"
 				class="toolbar-button"
-				data-testid="edit-source"
-				title="Edit the HTML source instead of the rendered text"
-				onclick={handleEditSource}
+				title="Add an AI instruction for the selection (ai-collab)"
+				onclick={addInstructionFromSelection}
 			>
-				Source
+				Add Instruction
 			</button>
-		{/if}
-		{#if editing}
-			<!--
-				要件#48 契約③: 閲覧へ戻る明示操作。Esc と対になるもう1つの出口で、
-				キーボードを知らなくても抜けられるようにツールバーへ出す。
-			-->
 			<button
 				type="button"
 				class="toolbar-button"
-				data-testid="edit-done"
-				title="Finish editing and go back to viewing (Esc)"
-				onclick={handleEditDone}
+				class:active={marksOpen}
+				title="Show or hide the Marks sidebar"
+				onclick={onToggleMarks}
+				aria-pressed={marksOpen}
 			>
-				Done Editing
+				Marks
 			</button>
 		{/if}
-	</header>
+		{#if anyFace && windowState.fileEditor?.dirty}
+			<!-- 要件#74 (aj): 開いた時点から編集できる面の未保存の印。 -->
+			<!-- 第4段 4-1: 押すと未保存の変更の差分(基準の版 ↔ 今)。 -->
+			<button
+				type="button"
+				class="unsaved-badge"
+				data-testid="unsaved-badge"
+				aria-label="Show unsaved changes"
+				title="This file has unsaved changes. Click to see them."
+				onclick={showUnsavedDiff}>Unsaved</button
+			>
+		{/if}
+		{#if formatToolbarAvailable}
+			<!-- 第4段 4-2: 書式のツールバーの出し入れ(モックの「A」)。状態はアプリ全体で 1 つ。 -->
+			<button
+				type="button"
+				class="toolbar-button format-toolbar-toggle"
+				class:active={formatToolbarShown}
+				data-testid="format-toolbar-toggle"
+				aria-label="Show Formatting Toolbar"
+				aria-pressed={formatToolbarShown}
+				title="Show or hide the formatting toolbar"
+				onclick={toggleFormatToolbar}
+			>
+				<Icon name="format" size={14} />
+			</button>
+		{/if}
+		{#if formatToolbarHandle}
+			<!-- 第4段 4-2: 2 段目(ヘッダーと一緒に貼り付く・検索バーの位置は 2 段の高さで測る)。 -->
+			<div class="format-toolbar-row">
+				<FormatToolbar handle={formatToolbarHandle} />
+			</div>
+		{/if}
+			</header>
 	{#if findOpen}
 		<!--
 			要件#54 契約①: 閲覧面の上部に出す検索バー。ツールバーの直下に敷く1行で、
@@ -2310,35 +1061,85 @@
 			onNext={() => stepFind(1)}
 			onClose={closeFind}
 			onComposingChange={(value) => (findComposing = value)}
+			replaceOpen={replaceOpen && canReplace}
+			{replaceQuery}
+			bind:replaceInputEl
+			onReplaceQueryChange={(value) => (replaceQuery = value)}
+			onReplace={handleReplace}
+			onReplaceAll={handleReplaceAll}
 		/>
 	{/if}
-	{#if windowState.externalChange !== null}
+	{#if anyFace && windowState.fileEditor?.conflict && !windowState.externalRemoved}
 		<!--
-			要件#48 契約⑥: 編集中に届いた外部変更。再レンダーはせず(編集中の内容を
-			勝手に捨てない)、どちらを残すかを利用者に選ばせる。
+			要件#74 契約13: 編集中に重なる外部変更が届いた(か、保存の直前にディスクが変わっていた)。
+			文書は変えずに、どちらを残すかを選ばせる。今の外部変更の帯と同じ場所・同じ class。
+			要件#48 追補h 契約1: ファイルが削除された間は削除の帯だけを出す(同時に出さない)。
 		-->
-		<div class="external-change" data-testid="external-change-banner" role="alert">
-			<span class="external-change-text">
-				This file was changed outside the app. It differs from your edits.
-			</span>
+		<div class="external-change" data-testid="external-conflict-banner" role="alert">
+			<span class="external-change-text">{CONFLICT_MESSAGE}</span>
 			<button
 				type="button"
 				class="toolbar-button"
-				data-testid="external-overwrite"
-				title="Overwrite the external change with your edits"
-				onclick={overwriteExternal}
+				data-testid="external-conflict-keep"
+				title="Keep your edits (the next save overwrites the file on disk)"
+				onclick={() => windowState.fileEditor?.keepMyEdits()}
 			>
-				Overwrite
+				Keep My Edits
 			</button>
 			<button
 				type="button"
 				class="toolbar-button"
-				data-testid="external-reload"
-				title="Reload the external change (your edits are discarded)"
-				onclick={() => windowState.acceptExternalChange()}
+				data-testid="external-conflict-disk"
+				title="Reload the file on disk (your edits are discarded)"
+				onclick={() => windowState.fileEditor?.useFileOnDisk()}
 			>
-				Reload
+				Use the File on Disk
 			</button>
+			<!-- 第4段 4-1: 衝突の差分(今 ↔ 届いた内容)。読むだけ。 -->
+			<button
+				type="button"
+				class="toolbar-button"
+				data-testid="external-conflict-diff"
+				title="Show the differences between your edits and the file on disk"
+				onclick={() => void showConflictDiff()}
+			>
+				Show Differences
+			</button>
+		</div>
+	{/if}
+	{#if anyFace && windowState.fileEditor?.notice}
+		<!-- 要件#74 契約13: 重ならずに取り込んだ外部変更の知らせ(数秒で消える)。 -->
+		<div class="merged-notice" data-testid="external-merged-notice" role="status">
+			{windowState.fileEditor.notice}
+		</div>
+	{/if}
+	{#if diffView && anyFace}
+		<!-- 第4段 4-1: 差分表示(ペインの文書の場所に重ねる 1 枚・読むだけ)。 -->
+		<EditorDiffView
+			title={diffView.kind === 'conflict' ? 'Conflicting Changes' : 'Unsaved Changes'}
+			leftName={diffView.kind === 'conflict' ? 'Your Edits' : 'On Disk'}
+			rightName={diffView.kind === 'conflict' ? 'On Disk' : 'Your Edits'}
+			left={diffView.left}
+			right={diffView.right}
+			onClose={closeDiff}
+			onKeep={diffView.kind === 'conflict'
+				? () => {
+						windowState.fileEditor?.keepMyEdits();
+						closeDiff();
+					}
+				: undefined}
+			onUseDisk={diffView.kind === 'conflict'
+				? () => {
+						windowState.fileEditor?.useFileOnDisk();
+						closeDiff();
+					}
+				: undefined}
+		/>
+	{/if}
+	{#if markdownTooBig && !bigRaw}
+		<!-- 要件#74 契約18・判断 8: 閾値を超えた Markdown は今の描画(読み取り専用)で開く。 -->
+		<div class="merged-notice" data-testid="markdown-too-large-notice" role="status">
+			This file is too large to edit in Vellis. Use View ▸ Raw Source to edit it.
 		</div>
 	{/if}
 	{#if windowState.externalRemoved}
@@ -2375,15 +1176,6 @@
 			</button>
 		</div>
 	{/if}
-	{#if htmlStructureNotice !== null}
-		<!--
-			要件#53 契約④: 構造が変わった編集は確定せず、編集前の DOM へ戻したことを
-			伝える。原文は触っていない(dirty にもならない)ので、行き先だけを示す。
-		-->
-		<div class="structure-notice" data-testid="htmledit-structure-notice" role="status">
-			{htmlStructureNotice}
-		</div>
-	{/if}
 	<!--
 		要件#36: ズームは本文コンテナだけに掛ける。`zoom` は `transform: scale` と
 		違ってレイアウトごと拡大するので、本文中の画像・表・コードブロック・
@@ -2392,30 +1184,55 @@
 		外にあるので UI の大きさは変わらない。等倍のときは宣言そのものを出さない
 		— ズームを入れる前と同じ DOM に戻す(srcdoc 側の `zoomStyleTag` と同じ)。
 
-		要件#48 契約③: ダブルクリックが編集開始の明示操作。単クリック(リンク航行)
-		とコピーは従来どおりで、キー入力では入らない。
-
-		要件#49 契約①: 同じダブルクリックでも、レンダリング済み Markdown では
-		押した先のブロック1つだけが編集可になる(このコンテナは contenteditable に
-		しない)。編集不可領域を押したときだけソース編集モードへ落ちる(契約③)。
+		要件#74 契約3: 編集の入口は無い(コード・plain text・Markdown は開いた時点から面が編集面)。
 	-->
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 	<div
 		class="markdown-body"
-		style:zoom={zoom === DEFAULT_ZOOM ? null : `${zoom}%`}
+		style:zoom={zoom === DEFAULT_ZOOM || faceActive || mdRaw ? null : `${zoom}%`}
 		bind:this={bodyEl}
 		onclick={handleClick}
-		ondblclick={handleDoubleClick}
 		oncopy={handleCopy}
 	>
-		{#if htmlEditing}
+		{#if faceActive}
 			<!--
-				要件#53 契約①②: html の編集面。中身は Shadow DOM(`mode: 'open'`)へ
-				出すので、文書の CSS は効きつつアプリの UI へは漏れない。閲覧の iframe
-				(HtmlViewer)はこの間 +page.svelte の `editMode === 'view'` 分岐から
-				外れて消える ―― 編集面は iframe の外にあり、iframe とは通信しない。
+				要件#74 契約5: コードのファイルと plain text は開いた時点から CodeMirror の面が表示であり
+				編集面(Shiki の `<pre>` は印刷の直前だけ面の中に作る)。文書ごとに作り直す。
 			-->
-			<div class="html-edit-surface" data-testid="html-edit-surface" bind:this={htmlSurfaceHost}></div>
+			{#key document.uri}
+				<CodeEditor
+					uri={document.uri}
+					content={document.content}
+					readOnly={!canEnterEdit('text', document.uri)}
+					{codeTheme}
+					{zoom}
+					findQuery={findOpen ? findQuery : ''}
+					{findCurrent}
+					onFindResults={handleFaceFindResults}
+				/>
+			{/key}
+		{:else if mdSurface}
+			<!--
+				要件#74 第2段: Markdown は開いた時点から ProseMirror の面がレンダリング結果であり編集面。
+				`.markdown-body` の中なので今の CSS と CSS zoom を受ける。文書ごとに作り直す。閾値を超えた文書は
+				Raw Source で入ったときだけ raw だけの面(項目 21)。
+			-->
+			{#key `${document.uri}\n${markdownTooBig}`}
+				<MarkdownEditor
+					uri={document.uri}
+					content={document.content}
+					rawOnly={markdownTooBig}
+					{zoom}
+					{codeTheme}
+					findQuery={findOpen && mdRaw ? findQuery : ''}
+					{findCurrent}
+					onFindResults={handleFaceFindResults}
+					onExitRaw={() => (bigRaw = false)}
+					onComposingChange={(value) => (mdComposing = value)}
+					onDocChange={handleMdDocChange}
+					scrollIntoViewer={scrollElementIntoViewer}
+				/>
+			{/key}
 		{:else if findOpen && htmlDocument}
 			<!--
 				要件#54 契約②⑦: html の閲覧は sandbox された iframe の中にあり、アプリ
@@ -2425,24 +1242,6 @@
 				iframe・sandbox・CSP・`buildSrcdoc` には一切触れない。
 			-->
 			<div class="html-find-surface" data-testid="html-find-surface" bind:this={findSurfaceHost}></div>
-		{:else if sourceEditing}
-			<!--
-				要件#48 契約②: 編集中はレンダリング結果を出さない。text 種別は
-				`renderPlainText` と同じ `<pre class="vellis-plaintext">` を自前で置き、
-				markdown / html は同じ `<pre>` に**ソース**を出す(ソース編集モード)。
-				中身を入れるのは上の $effect — 補間で書くと再描画のたびにキャレットが
-				飛ぶため、Svelte にはこのノードの中を触らせない。
-			-->
-			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-			<pre
-				class="vellis-plaintext"
-				contenteditable="true"
-				spellcheck="false"
-				bind:this={editorEl}
-				oninput={handleEditInput}
-				onkeydown={handleEditKeydown}
-				onpaste={handleEditPaste}
-				oncut={handleEditCut}></pre>
 		{:else}
 			<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 			{@html html}
@@ -2469,6 +1268,7 @@
 		top: 0;
 		z-index: 10;
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: 6px;
 		box-sizing: border-box;
@@ -2536,20 +1336,24 @@
 	 * 要件#53 契約④: 構造変化で確定を拒否したときの通知。外部変更の帯と同じ場所・
 	 * 同じ高さに敷いて、本文の上に重ねない(編集中の文字を隠さない)。
 	 */
-	.structure-notice {
+	.merged-notice {
 		padding: 6px 12px;
-		background-color: var(--color-danger-soft);
-		border-bottom: 1px solid var(--color-danger);
+		background-color: var(--color-bg-raised);
+		border-bottom: 1px solid var(--color-border);
 		font-size: var(--text-sm);
-		color: var(--color-text-primary);
+		color: var(--color-text-secondary);
 	}
 
-	/*
-	 * 要件#53 契約②: 編集面のホスト。中身は Shadow DOM にあるので、ここに書ける
-	 * のは外側の箱だけ(文書の CSS は向こう側で閉じている)。
-	 */
-	.html-edit-surface {
-		display: block;
+	.unsaved-badge {
+		margin-left: auto;
+		font: inherit;
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+		/* 第4段 4-1: 押せる札(見た目は札のまま) */
+		padding: 0;
+		border: none;
+		background: none;
+		cursor: pointer;
 	}
 
 	/*
@@ -2596,25 +1400,18 @@
 		color: var(--color-find-current-text);
 	}
 
-	/*
-	 * 要件#48 契約②: 編集中の `<pre>`。見た目は閲覧中のプレーンテキスト
-	 * (styles/markdown.css の .vellis-plaintext)のままにして、編集に入った
-	 * 瞬間に本文が動かないようにする。ここで足すのは編集中であることの手掛かり
-	 * (キャレットの帯)だけ。
-	 */
-	.vellis-plaintext[contenteditable='true'] {
-		outline: none;
-		box-shadow: inset 3px 0 0 var(--color-focus-ring);
+	/* 第4段 4-2: 「A」は右端(Unsaved の札があればその右) */
+	.format-toolbar-toggle {
+		margin-left: auto;
 	}
 
-	/*
-	 * 要件#49 契約①: 編集中のブロック。どこが編集単位になっているかを示すだけの
-	 * 枠で、レイアウトは動かさない(outline は場所を取らない)。セレクタは本文の
-	 * 中に生えた要素に当てるので :global が要る。
-	 */
-	.markdown-body :global([contenteditable='true']) {
-		outline: 2px solid var(--color-focus-ring);
-		outline-offset: 2px;
-		border-radius: 2px;
+	.unsaved-badge ~ .format-toolbar-toggle {
+		margin-left: 0;
+	}
+
+	/* 第4段 4-2: 書式のツールバーはヘッダーの 2 段目(幅いっぱい) */
+	.format-toolbar-row {
+		flex-basis: 100%;
+		margin: 4px -8px -4px -12px;
 	}
 </style>

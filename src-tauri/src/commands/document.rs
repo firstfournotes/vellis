@@ -3,15 +3,16 @@
 //! watches without reading (要件#22); the write is the whole of the app's
 //! authority to modify a file (要件#48).
 
-use tauri::{Emitter, Manager, Window};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri::{Manager, Window};
 
+use crate::annotation::snapshot::snapshot_store_dir;
 use crate::annotation::SnapshotManager;
+use crate::features;
 use crate::fs::local::{ensure_within_root, LocalProvider};
 use crate::fs::uri::Uri;
 use crate::recent_files;
 use crate::session::document::{DocumentPayload, DocumentSession};
-use crate::settings::{is_settings_file, read_settings, SETTINGS_CHANGED_EVENT};
+use crate::settings::{announce_changed, is_settings_file};
 use crate::watch::hub::WindowId;
 
 use super::AppState;
@@ -56,7 +57,9 @@ pub async fn open_binary_document(
 ///    (`fs::local::ensure_within_root`) so it can be judged on its own.
 /// 3. **Snapshot** — a copy under `<root>/.vellis/snapshots/` *before* the
 ///    write, which is what makes the edit undoable through the existing
-///    revert (契約⑤). A failure here aborts the save: the safety net is the
+///    revert (契約⑤). Without the current AI integration (`ai_marks`) the
+///    copy goes under the app's data directory instead, so the folder you
+///    opened gets no `.vellis/` (requirements.md #74 (ag)). A failure here aborts the save: the safety net is the
 ///    reason FR-02 (viewer-only) could be withdrawn at all, so a save without
 ///    one is not a save this command is willing to perform.
 /// 4. **Write** — `LocalProvider::write_text_within_root`, tmp+rename,
@@ -74,10 +77,20 @@ pub async fn open_binary_document(
 /// 契約7・8), it is read back, every window is told to re-list its tree
 /// (`settings_changed`), and what is wrong with it — if anything — is shown
 /// once, in English.
+///
+/// The editor is a regular feature (requirements.md #74 契約21): there is no
+/// flag gate in front of the command any more.
+///
+/// With `expected_hash` (requirements.md #74 契約14) the file on disk is
+/// compared with the version the editor started from right after the root
+/// check and before the snapshot: when it changed, nothing is written or
+/// copied and the error starts with [`SAVE_CONFLICT_PREFIX`]. Without it the
+/// save writes as before (the current editing's `saveDocument(uri, content)`).
 #[tauri::command]
 pub async fn save_document(
     uri: String,
     content: String,
+    expected_hash: Option<String>,
     window: Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -106,32 +119,51 @@ pub async fn save_document(
 
     let resolved = ensure_within_root(&root_uri.path, &parsed_uri.path).map_err(|e| e.to_string())?;
 
-    // Snapshot the pre-edit file under `<root>/.vellis/snapshots/`, reusing the
-    // store cache and the root-relative path form the annotation commands
-    // already speak (`SnapshotManager::take_snapshot` wants root-relative
-    // names). No mark ids: this snapshot belongs to a manual save, not to a
-    // round of AI instructions.
-    let store = super::annotation::store_for(state.inner(), &root_uri.raw)?;
-    let canonical_root = store.vellis_dir().parent().ok_or_else(|| {
-        format!(
-            "annotation store has no parent root: {}",
-            store.vellis_dir().display()
-        )
-    })?;
-    let relative = resolved
-        .strip_prefix(canonical_root)
-        .map_err(|_| {
+    // Optimistic lock (requirements.md #74 契約14): before anything is copied
+    // or written, the file must still be the version the editor started from.
+    if expected_hash.is_some() {
+        let disk = tokio::fs::read_to_string(&resolved)
+            .await
+            .map_err(|e| format!("{SAVE_CONFLICT_PREFIX}: {e}"))?;
+        check_expected_hash(&disk, expected_hash.as_deref())?;
+    }
+
+    // Snapshot the pre-edit file before writing. With the current AI
+    // integration (`ai_marks`) it goes under `<root>/.vellis/snapshots/` as
+    // before, reusing the store cache and the root-relative path form the
+    // annotation commands already speak. Without it (the release build) the
+    // folder you opened gets nothing new (requirements.md #74 (ag)・AC-74-44):
+    // the snapshot goes under the app's data directory, one store per root,
+    // and `store_for` (which makes `<root>/.vellis/`) is not called. No mark
+    // ids: this snapshot belongs to a manual save, not to a round of AI
+    // instructions.
+    let now = chrono::Utc::now();
+    if features::is_enabled(features::AI_MARKS) {
+        let store = super::annotation::store_for(state.inner(), &root_uri.raw)?;
+        let canonical_root = store.vellis_dir().parent().ok_or_else(|| {
             format!(
-                "{} is outside the project root {}",
-                resolved.display(),
-                canonical_root.display()
+                "annotation store has no parent root: {}",
+                store.vellis_dir().display()
             )
-        })?
-        .to_string_lossy()
-        .into_owned();
-    SnapshotManager::new(store.vellis_dir())
-        .take_snapshot(&[relative], &[], chrono::Utc::now())
-        .map_err(|e| format!("could not snapshot before saving: {}", e))?;
+        })?;
+        let relative = relative_to_root(&resolved, canonical_root)?;
+        SnapshotManager::new(store.vellis_dir())
+            .take_snapshot(&[relative], &[], now)
+            .map_err(|e| format!("could not snapshot before saving: {}", e))?;
+    } else {
+        let app_data = window
+            .app_handle()
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("could not snapshot before saving: no app data folder: {}", e))?;
+        let canonical_root = std::fs::canonicalize(&root_uri.path)
+            .map_err(|e| format!("could not snapshot before saving: {}", e))?;
+        let relative = relative_to_root(&resolved, &canonical_root)?;
+        let store_dir = snapshot_store_dir(&app_data, &canonical_root);
+        SnapshotManager::at(&store_dir, canonical_root.clone())
+            .take_snapshot(&[relative], &[], now)
+            .map_err(|e| format!("could not snapshot before saving: {}", e))?;
+    }
 
     // Write to the path the root check resolved, not the one the window
     // opened (追補d(3)): for a symlink that is its target, so the check and
@@ -153,27 +185,75 @@ pub async fn save_document(
     Ok(())
 }
 
+/// `resolved` as a path relative to `canonical_root` (the form
+/// `SnapshotManager::take_snapshot` wants).
+fn relative_to_root(resolved: &std::path::Path, canonical_root: &std::path::Path) -> Result<String, String> {
+    resolved
+        .strip_prefix(canonical_root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|_| {
+            format!(
+                "{} is outside the project root {}",
+                resolved.display(),
+                canonical_root.display()
+            )
+        })
+}
+
+/// The start of the error `save_document` returns when the file on disk is no
+/// longer the version the editor started from (requirements.md #74 契約14).
+/// The frontend's `SAVE_CONFLICT_PREFIX` (`src/editor/file-editor.ts`) is the
+/// same text.
+pub const SAVE_CONFLICT_PREFIX: &str = "The file was changed on disk";
+
+/// The same short hash as the frontend's `contentHash` (`src/lib/document-edit.ts`):
+/// FNV-1a and djb2, 32 bits each, over the UTF-16 code units, joined with the
+/// UTF-16 length as `{len}-{fnv}-{djb}` in lowercase base 36.
+pub fn content_hash(content: &str) -> String {
+    let mut fnv: u32 = 0x811c_9dc5;
+    let mut djb: u32 = 5381;
+    let mut len: u64 = 0;
+    for unit in content.encode_utf16() {
+        let code = u32::from(unit);
+        fnv = (fnv ^ code).wrapping_mul(0x0100_0193);
+        djb = djb.wrapping_mul(33).wrapping_add(code);
+        len += 1;
+    }
+    format!("{}-{}-{}", base36(len), base36(u64::from(fnv)), base36(u64::from(djb)))
+}
+
+fn base36(mut n: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base-36 digits are ASCII")
+}
+
+/// The optimistic lock of `save_document` as a pure function: `None` writes
+/// as before; `Some(hash)` passes only when it is the hash of `disk`.
+pub fn check_expected_hash(disk: &str, expected: Option<&str>) -> Result<(), String> {
+    match expected {
+        None => Ok(()),
+        Some(hash) if hash == content_hash(disk) => Ok(()),
+        Some(_) => Err(format!(
+            "{SAVE_CONFLICT_PREFIX} since it was opened. Nothing was written."
+        )),
+    }
+}
+
 /// After a save of `settings.json` (requirements.md #65 契約7・8): validate the
-/// file, tell every window to re-list its tree, and show the warnings once —
-/// from here, not from each window, so N windows do not mean N dialogs. A
-/// broken file is never rewritten; the tree and the search run on the defaults
-/// for the broken part until the user fixes it.
+/// file, tell every window to re-list its tree, and show the warnings once.
+/// The work is `settings::announce_changed`, shared with the theme watcher,
+/// which announces a save made in another app (requirements.md #84 契約8).
 fn announce_settings_saved(window: &Window, path: &std::path::Path) {
-    let loaded = read_settings(path);
-    let app = window.app_handle();
-    if let Err(e) = app.emit(SETTINGS_CHANGED_EVENT, ()) {
-        tracing::warn!("settings_changed emit failed: {e}");
-    }
-    if !loaded.warnings.is_empty() {
-        for warning in &loaded.warnings {
-            tracing::warn!("{warning}");
-        }
-        app.dialog()
-            .message(loaded.warnings.join("\n\n"))
-            .title("Vellis Settings")
-            .kind(MessageDialogKind::Warning)
-            .show(|_| {});
-    }
+    announce_changed(window.app_handle(), path);
 }
 
 async fn open_in_window(

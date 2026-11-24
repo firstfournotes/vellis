@@ -308,7 +308,9 @@ fn squash(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-const EXPECTED_VIEW: [&str; 13] = [
+// 要件側更新(2026-11-17 仮・要件#74 第2段 2-3・(ao)・棚卸し 3): Toggle Full Width の直後に `raw_source_item`(View ▸ Raw Source)。13 → 14。
+// 要件側更新(2026-11-17 要件#74 第4段 4-2・4-5・棚卸し 3): Raw Source の直後に `show_format_toolbar_item`(View ▸ Show Formatting Toolbar)。14 → 15。
+const EXPECTED_VIEW: [&str; 15] = [
     "show_tab_bar_item",
     "show_all_tabs_item",
     "view_tab_sep",
@@ -316,6 +318,8 @@ const EXPECTED_VIEW: [&str; 13] = [
     "view_reload_sep",
     "appearance_menu",
     "toggle_full_width_item",
+    "raw_source_item",
+    "show_format_toolbar_item",
     "view_chrome_sep",
     "zoom_in_item",
     "zoom_out_item",
@@ -376,6 +380,10 @@ fn reload_file_accelerator_parses_as_command_r() {
 
 /// 3. View = Show Tab Bar / Show All Tabs / ─ / **Reload File / ─** / Appearance ▸ / Toggle Full Width / ─ /
 ///    Zoom In / Zoom Out / Actual Size / ─ / Toggle Developer Tools(13 項目・束縛名まで一致)。
+///
+/// 要件側更新(2026-11-17 仮・要件#74 第2段 2-3・契約23・(ao)・棚卸し 3=req-74.md で事前承認): View ▸ Raw Source
+/// (`raw_source_item`・CheckMenuItem)を Toggle Full Width の直後に足した(acceptance_req74_menu.rs が同じ列を固定する)。
+/// 項目数は 13 → 14。それ以外の相対順はそのまま。
 #[test]
 fn view_menu_holds_reload_file_and_its_separator_right_after_the_tab_items() {
     let code = menu_rs_code();
@@ -383,7 +391,7 @@ fn view_menu_holds_reload_file_and_its_separator_right_after_the_tab_items() {
     let idents = submenu_item_idents(view);
     assert_eq!(
         idents, EXPECTED_VIEW,
-        "the View menu must hold exactly these 13 entries in this order (requirement #80 契約 2, (r)): found {idents:?}"
+        "the View menu must hold exactly these 15 entries in this order (requirement #80 契約 2, (r); #74 2-3 adds Raw Source; #74 4-2 adds Show Formatting Toolbar): found {idents:?}"
     );
     let separators = separator_bindings(&code);
     for sep in ["view_tab_sep", "view_reload_sep", "view_chrome_sep", "view_sep"] {

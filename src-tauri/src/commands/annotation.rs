@@ -23,6 +23,7 @@ use crate::annotation::{
     MarkPatch, MarkStatus, SnapshotManager,
 };
 use crate::commands::AppState;
+use crate::features;
 use crate::fs::uri::Uri;
 
 #[derive(Debug, Deserialize)]
@@ -100,12 +101,26 @@ pub struct DiffResponse {
 const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
 const MAX_SELECTED_MARKDOWN_BYTES: usize = 64 * 1024;
 
+/// Whether `.vellis/` may be opened (requirements.md #84 契約5・7・#74 項目 28):
+/// only while the current AI integration is shown. The pre-save snapshots of
+/// the editing go to the app's data directory when it is hidden
+/// (`save_document`), so with it hidden nothing in the opened folder is read,
+/// written or created.
+pub fn vellis_dir_allowed(ai: bool) -> bool {
+    ai
+}
+
 pub(crate) fn store_for(state: &AppState, root_uri: &str) -> Result<Arc<AnnotationStore>, String> {
     // Opening the store creates `<root>/.vellis/`, and every mark, snapshot
     // and inbox goes through it — `vellis --self-check` writes none of them
     // (requirements.md #72 契約8).
     if !crate::self_check::active_plan().vellis_dir_writes {
         return Err(".vellis/ is not used during --self-check".to_string());
+    }
+    // Neither of the two features that keep things in `.vellis/` is in this
+    // build (requirements.md #84 契約5・7): refuse before the store creates it.
+    if !vellis_dir_allowed(features::is_enabled(features::AI_MARKS)) {
+        return Err(".vellis/ is not used in this version of Vellis".to_string());
     }
     let uri = Uri::parse(root_uri).map_err(|e| format!("invalid root_uri: {}", e))?;
     if uri.scheme != "file" {
@@ -157,6 +172,7 @@ pub async fn add_mark(
     anchor: AnchorInput,
     instruction: String,
 ) -> Result<Mark, String> {
+    features::require(features::AI_MARKS, "Marks")?;
     if instruction.len() > MAX_INSTRUCTION_BYTES {
         return Err(format!(
             "instruction exceeds {} bytes",
@@ -183,6 +199,7 @@ pub async fn list_marks(
     root_uri: String,
     filter: Option<MarkFilter>,
 ) -> Result<Vec<Mark>, String> {
+    features::require(features::AI_MARKS, "Marks")?;
     let store = store_for(state.inner(), &root_uri)?;
     let mut marks = store.load_marks().map_err(map_err)?;
     if let Some(f) = filter {
@@ -201,6 +218,7 @@ pub async fn update_mark(
     id: MarkId,
     patch: MarkPatchInput,
 ) -> Result<Mark, String> {
+    features::require(features::AI_MARKS, "Marks")?;
     if let Some(ref instr) = patch.instruction {
         if instr.len() > MAX_INSTRUCTION_BYTES {
             return Err(format!(
@@ -227,6 +245,7 @@ pub async fn remove_mark(
     root_uri: String,
     id: MarkId,
 ) -> Result<(), String> {
+    features::require(features::AI_MARKS, "Marks")?;
     let store = store_for(state.inner(), &root_uri)?;
     store.remove_mark(&id).map_err(map_err)
 }
@@ -242,6 +261,7 @@ pub async fn rebind_marks_for_file(
     uri: String,
     content: String,
 ) -> Result<RebindResponse, String> {
+    features::require(features::AI_MARKS, "Marks")?;
     let store = store_for(state.inner(), &root_uri)?;
     let root = store.vellis_dir().parent().unwrap_or(Path::new("/")).to_path_buf();
     let file = relative_file_path(&root, &uri)?;
@@ -266,6 +286,7 @@ pub async fn generate_inbox(
     root_uri: String,
     filter: Option<MarkFilter>,
 ) -> Result<GenerateInboxResponse, String> {
+    features::require(features::AI_MARKS, "The agent inbox")?;
     let store = store_for(state.inner(), &root_uri)?;
     let mut marks = store.load_marks().map_err(map_err)?;
     let f = filter.unwrap_or_else(|| MarkFilter {
@@ -323,6 +344,7 @@ pub async fn list_snapshots(
     state: State<'_, AppState>,
     root_uri: String,
 ) -> Result<Vec<Manifest>, String> {
+    features::require(features::AI_MARKS, "Snapshots")?;
     let store = store_for(state.inner(), &root_uri)?;
     let mgr = SnapshotManager::new(store.vellis_dir());
     mgr.list().map_err(map_err)
@@ -341,6 +363,7 @@ pub async fn diff_against_snapshot(
     uri: String,
     snapshot_id: Option<String>,
 ) -> Result<DiffResponse, String> {
+    features::require(features::AI_MARKS, "Snapshots")?;
     let store = store_for(state.inner(), &root_uri)?;
     let root = store
         .vellis_dir()
@@ -389,6 +412,7 @@ pub async fn revert_to_snapshot(
     snapshot_id: String,
     files: Vec<String>,
 ) -> Result<(), String> {
+    features::require(features::AI_MARKS, "Snapshots")?;
     let store = store_for(state.inner(), &root_uri)?;
     let mgr = SnapshotManager::new(store.vellis_dir());
     mgr.revert(&snapshot_id, &files).map_err(map_err)

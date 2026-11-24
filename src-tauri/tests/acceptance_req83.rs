@@ -539,14 +539,16 @@ fn other_menus_do_not_hold_dashboard_and_the_bar_stays_six() {
         assert!(!call.contains("DASHBOARD_ITEM_ID"), "the {label:?} submenu must not mention DASHBOARD_ITEM_ID");
     }
 
-    // メニューバー= `Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &go_menu, &window_menu])`。
+    // メニューバー= `Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &format_menu, &view_menu, &go_menu, &window_menu])`。
+    // 要件側更新(2026-11-17 仮・要件#74 第2段 2-3・契約8・棚卸し 3=req-74.md で事前承認): Format を Edit と View の間に
+    // (acceptance_req74_menu.rs が同じ列を固定する)。テスト名の「six」は Dashboard が増やさないの意味で読み替える。
     let bar_start = code.find("Menu::with_items(").expect("menu.rs must build the menu bar with Menu::with_items(");
     let bar = balanced_call(&code, bar_start);
     let bar_idents = submenu_item_idents(bar);
     assert_eq!(
         bar_idents,
-        ["app_menu", "file_menu", "edit_menu", "view_menu", "go_menu", "window_menu"],
-        "the menu bar stays Vellis / File / Edit / View / Go / Window (契約 18)"
+        ["app_menu", "file_menu", "edit_menu", "format_menu", "view_menu", "go_menu", "window_menu"],
+        "the menu bar stays Vellis / File / Edit / Format / View / Go / Window (契約 18・要件#74 契約8)"
     );
 }
 

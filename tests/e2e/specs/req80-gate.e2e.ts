@@ -3,6 +3,10 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+	waitForFace,
+	replaceFaceText,
+	faceText,
+	faceDirty,
 	assertIpcInterceptionWorks,
 	clickExplorerRow,
 	emitMenu,
@@ -1483,32 +1487,17 @@ describe('Requirement #80 human gates, the machine part — local root (gates 1�
 	});
 
 	// ------------------------------------------------------------------ gate 4
-	/** plain.txt's view (`pre.vellis-plaintext`, as req48nop) and its editor (the same `<pre>` made editable). */
-	const PLAIN_VIEW = `${BODY} pre.vellis-plaintext`;
-	const PLAIN_EDITOR = `${PLAIN_VIEW}[contenteditable="true"]`;
+	/** 要件74 2-5: plain.txt opens as a CodeMirror face (the editor is the view); an edit = replace the face's text. */
 	async function makeDirty(text: string): Promise<boolean> {
-		// `openDoc` waits for a selector the previous document satisfies too
-		// (article.viewer): wait for the plain-text view itself (the 2026-11-05
-		// run sent menu_edit while notes.md was still shown — a Markdown editor
-		// has no contenteditable until a block is clicked).
 		await closePanels();
 		await clickExplorerRow(uri('plain.txt'));
-		await browser.waitUntil(async () => (await exists(PLAIN_VIEW)) && (await textOf(PLAIN_VIEW)).includes('first line'), { timeout: 15_000, timeoutMsg: 'plain.txt did not open in the plain-text view' });
-		if (!(await exists(PLAIN_EDITOR))) {
-			await emitMenu('menu_edit');
-			await waitFor(PLAIN_EDITOR, 'the editor', 5_000);
-		}
-		return browser.execute((sel, t) => {
-			const el = document.querySelector<HTMLElement>(sel);
-			if (!el) return false;
-			el.focus();
-			el.textContent = t;
-			el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: t }));
-			return true;
-		}, PLAIN_EDITOR, text);
+		await waitForFace('first line');
+		const ok = await replaceFaceText(text);
+		await browser.waitUntil(async () => await faceDirty(), { timeout: 5_000, timeoutMsg: 'the replaced text did not make the face dirty' }).catch(() => undefined);
+		return ok && (await faceDirty());
 	}
 	async function editorText(): Promise<string | null> {
-		return browser.execute((sel) => document.querySelector<HTMLElement>(sel)?.textContent ?? null, PLAIN_EDITOR);
+		return faceText();
 	}
 	async function messageIpcCount(mark: number): Promise<number> {
 		return (await ipcAfter(mark, ['plugin:dialog|message'])).length;
@@ -1538,7 +1527,7 @@ describe('Requirement #80 human gates, the machine part — local root (gates 1�
 		await waitViewerText('first line edited');
 		// What the save wrote (the trailing newline is the editor's business — 要件#48 追補r); the next step must leave it as is.
 		const savedDisk = fs.readFileSync(file('plain.txt'), 'utf8');
-		judge(4, 'Save (Return): the file is written first (the edit is on the disk), then read (open_document once), the view shows the saved text, the editor is closed', (d?.dialogs ?? 0) === 1 && savedDisk.startsWith('first line edited\nsecond line') && o.opens.length === 1 && o.opens[0]!.ok === true && o.lists.length >= 1 && !(await exists('[contenteditable="true"]')), { dialog: d, ...o, disk: savedDisk });
+		judge(4, 'Save (Return): the file is written first (the edit is on the disk), then read (open_document once), the face shows the saved text and is not dirty', (d?.dialogs ?? 0) === 1 && savedDisk.startsWith('first line edited\nsecond line') && o.opens.length === 1 && o.opens[0]!.ok === true && o.lists.length >= 1 && !(await faceDirty()), { dialog: d, ...o, disk: savedDisk });
 		// Don't Save.
 		judge(4, 'the editor took a second edit', await makeDirty(PLAIN_AGAIN), {});
 		mark = await ipcMark();
@@ -1546,7 +1535,7 @@ describe('Requirement #80 human gates, the machine part — local root (gates 1�
 		d = await operator('dialog', { wait_s: 10, expect: UNSAVED_TITLE, answer: 'cmd-d' });
 		const o2 = await reloadOutcome(mark);
 		await browser.pause(500);
-		judge(4, 'Don’t Save (Command + D): the edit is dropped, the disk is unchanged, the file is read (open_document once), the view shows the disk’s text', (d?.dialogs ?? 0) === 1 && fs.readFileSync(file('plain.txt'), 'utf8') === savedDisk && o2.opens.length === 1 && (await viewerText()).includes('first line edited') && !(await viewerText()).includes('first line again') && !(await exists('[contenteditable="true"]')), { dialog: d, ...o2, view: (await viewerText()).slice(0, 80), disk: fs.readFileSync(file('plain.txt'), 'utf8') });
+		judge(4, 'Don’t Save (Command + D): the edit is dropped, the disk is unchanged, the file is read (open_document once), the view shows the disk’s text', (d?.dialogs ?? 0) === 1 && fs.readFileSync(file('plain.txt'), 'utf8') === savedDisk && o2.opens.length === 1 && (await viewerText()).includes('first line edited') && !(await viewerText()).includes('first line again') && !(await faceDirty()), { dialog: d, ...o2, view: (await viewerText()).slice(0, 80), disk: fs.readFileSync(file('plain.txt'), 'utf8') });
 		writeAtomic(file('plain.txt'), PLAIN_ORIGINAL);
 		expect(fails).toEqual([]);
 	});

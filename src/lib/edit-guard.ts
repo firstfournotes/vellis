@@ -1,7 +1,7 @@
 /**
  * 編集を失う操作の前に置く関門(要件#48 契約④)。
  *
- * dirty(編集バッファ≠保存済み content)のまま閉窓・別ファイル・root 変更に
+ * dirty(面の文字列≠保存済みの版)のまま閉窓・別ファイル・root 変更に
  * 進むと、保存していない編集が黙って消える。その手前で「保存 / 破棄 /
  * キャンセル」を聞くのがここ。
  *
@@ -14,7 +14,7 @@
  * 既定になる。見え方は人間ゲート(acceptance/acceptance.md)。
  */
 import { message } from '@tauri-apps/plugin-dialog';
-import { saveDocument } from '$lib/save-document';
+import { saveFileEditor } from '../editor/file-editor';
 import { windowState } from '../stores/window-state.svelte';
 
 export const UNSAVED_TITLE = 'Unsaved Changes';
@@ -56,22 +56,17 @@ export async function askUnsavedChoice(dirty: boolean): Promise<UnsavedChoice> {
  *
  * `save` を選ばれたら**保存が成功してから** true を返す — 保存に失敗したまま
  * 進むと、聞いた意味が無くなる(失敗したら操作ごと取りやめて編集を残す)。
- * `discard` は編集モードを畳んでから進む(次の文書へ dirty を持ち越さない)。
+ * `discard` は面に触らずに進む(面は呼び手が文書ごと閉じる・切り替える・読み直す)。
  */
 export async function confirmDiscardEdits(): Promise<boolean> {
-	const doc = windowState.currentDocument;
-	const buffer = windowState.editBuffer;
+	const face = windowState.fileEditor;
 	const choice = await askUnsavedChoice(windowState.dirty);
 	if (choice === 'cancel') return false;
-	if (choice === 'save') {
-		if (!doc || buffer === null) return true;
-		try {
-			await saveDocument(doc.uri, buffer);
-		} catch (err) {
-			alert(`Could not save: ${err}`);
-			return false;
-		}
+	if (choice === 'save' && face) {
+		// 要件#74 契約16: 面は saveFileEditor の経路(保存の照合つき)で保存する。保存できなかった
+		// (照合の衝突・失敗。知らせは saveFileEditor が出す)なら操作ごと取りやめる。
+		await saveFileEditor(face);
+		if (face.dirty || windowState.externalRemoved) return false;
 	}
-	windowState.endEdit();
 	return true;
 }

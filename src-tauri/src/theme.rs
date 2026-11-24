@@ -1170,12 +1170,35 @@ fn spawn_watcher(app: AppHandle<Wry>, mut last: Snapshot) -> mpsc::Sender<()> {
     sender
 }
 
+/// Whether the watcher announces a change of `settings.json` the way a save
+/// inside Vellis does (requirements.md #84 契約8・(g)): only while the current
+/// editing is hidden — `settings.json` is then edited in another app — and
+/// only when its text changed (`None` = no file; a removed file counts). With
+/// the editing shown, `save_document` announces, and announcing here too
+/// would mean two of each.
+pub fn settings_announce_needed(
+    prev: Option<&str>,
+    next: Option<&str>,
+    edit_enabled: bool,
+) -> bool {
+    !edit_enabled && prev != next
+}
+
 /// Resolve again after a change: broadcast the theme when it differs from
 /// the one in effect, warn when the files read changed and are broken, and
-/// rebuild the Appearance list when the theme files changed.
+/// rebuild the Appearance list when the theme files changed. A changed
+/// `settings.json` is also announced to every window when no save inside
+/// Vellis can do it ([`settings_announce_needed`]).
 fn reconcile(app: &AppHandle<Wry>, last: Snapshot) -> Snapshot {
     let (theme, inputs) = load();
     let list = installed_themes();
+    // The editor always exists (requirements.md #74 契約21): a save inside
+    // Vellis announces itself, so the watcher announces only what it saw.
+    if settings_announce_needed(last.inputs.settings.as_deref(), inputs.settings.as_deref(), true) {
+        if let Some(path) = settings::default_settings_path() {
+            settings::announce_changed(app, &path);
+        }
+    }
     let mut warnings = Vec::new();
     if inputs != last.inputs {
         warnings.extend(theme.warnings.iter().cloned());

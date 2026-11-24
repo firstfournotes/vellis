@@ -77,29 +77,43 @@ const TOKEN_NAMES: readonly string[] = [
 
 /**
  * AC-56-3 第2段の対象= 契約 4 の 22 個のコンポーネント(2026-11-02 実測)+ 契約 5・判断 (i) で足す `Icon.svelte`
- * (sprite は `+page.svelte` の先頭に置くので `src/components/` には増えない)。名前の集合で固定する。
+ * (sprite は `+page.svelte` の先頭に置くので `src/components/` には増えない)+ 要件#74 第1段の `CodeEditor.svelte`
+ * (2026-11-16 由谷承認の要件側更新。色リテラル 0 件の対象になる)+ 第2段 2-2 の `MarkdownEditor.svelte`(2026-11-17・仮の
+ * 作業木の仮の承認=由谷に確かめる)+ 第2段 2-3 の `RawSourceEditor.svelte`(同じく仮の承認)= 26 個。名前の集合で固定する。
  */
 const STAGE2_COMPONENT_FILES = [
 	'AudioViewer.svelte',
+	// 要件#74 第1段(2026-11-16 由谷承認の要件側更新): コードと plain text の面(CodeMirror 6)。トークンだけで描く(契約 2)。
+	'CodeEditor.svelte',
 	'ContextMenu.svelte',
 	// 要件#83 契約 1【(s) 決定】(2026-11-05 承認 1 の要件側更新): RootPicker.svelte を Dashboard.svelte に置き換え(23 個のまま)。
 	'Dashboard.svelte',
 	'DiffView.svelte',
+	// 要件#74 第4段 4-1(2026-11-17 由谷承認の要件側更新): 衝突 / 未保存の差分の 1 枚。色は既存のトークン(--color-success-soft / --color-danger-soft)。
+	'EditorDiffView.svelte',
 	'EmptyState.svelte',
 	'Explorer.svelte',
 	'ExplorerItem.svelte',
 	'FindBar.svelte',
 	'FindInFolder.svelte',
+	// 要件#74 第4段 4-2(2026-11-17 由谷の許可=新しい部品の名前を集合に足すだけ): 書式のツールバー。トークンだけで描く(契約 2)。
+	'FormatToolbar.svelte',
 	'GoToBar.svelte',
 	'HtmlViewer.svelte',
 	'Icon.svelte',
 	'ImageViewer.svelte',
 	'InstructionDialog.svelte',
 	'MarkList.svelte',
+	// 要件#74 第2段 2-2(2026-11-17・仮の承認): Markdown の編集面(ProseMirror)。トークンだけで描く(契約 2)。
+	'MarkdownEditor.svelte',
+	// 要件#74 第2段 2-3(2026-11-17・仮の承認): raw(原文)の面(CodeMirror)。CodeEditor と同じくトークンだけで描く(契約 2)。
+	'RawSourceEditor.svelte',
 	'ModelViewer.svelte',
 	'PdfViewer.svelte',
 	'ProvenancePanel.svelte',
 	'RecentFiles.svelte',
+	// 要件#74 第4段 4-3(2026-11-17 由谷の許可=新しい部品の名前を集合に足すだけ): 浮遊バー。トークンだけで描く(契約 2)。
+	'SelectionBar.svelte',
 	'StatusBar.svelte',
 	'UpdateBanner.svelte',
 	'VideoViewer.svelte',
@@ -433,7 +447,7 @@ async function loadBuildThemeCss(): Promise<(theme: unknown) => string> {
 // ---------------------------------------------------------------------------
 
 describe('AC-56-3 ハードコード色ゼロ(契約 2・第2段= src/components/*.svelte の <style> 全部)', () => {
-	test('対象は契約 4 の 22 個のコンポーネント+契約 5・判断 (i) の Icon.svelte = 23 個(名前の集合で固定。増減があれば要件側で確認)', () => {
+	test('対象は契約 4 の 22 個のコンポーネント+契約 5・判断 (i) の Icon.svelte+要件#74 の CodeEditor.svelte・MarkdownEditor.svelte・RawSourceEditor.svelte = 26 個(名前の集合で固定。増減があれば要件側で確認)', () => {
 		expect(componentFiles()).toEqual([...STAGE2_COMPONENT_FILES].sort());
 	});
 

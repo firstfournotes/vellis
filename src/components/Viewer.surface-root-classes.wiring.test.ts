@@ -167,15 +167,6 @@ async function findRoot(container: HTMLElement): Promise<HTMLElement> {
 	return root as HTMLElement;
 }
 
-/** ⌘E(beginEdit)で編集面を出し、そのルート要素を返す。 */
-async function editRoot(container: HTMLElement): Promise<HTMLElement> {
-	expect(windowState.beginEdit(), 'html 文書で beginEdit が true を返すこと').toBe(true);
-	await settle();
-	const shadow = shadowOf(container, 'html-edit-surface');
-	const root = shadow.querySelector('.vellis-html-edit-root');
-	expect(root, '編集面のルート(.vellis-html-edit-root)があること').toBeTruthy();
-	return root as HTMLElement;
-}
 
 /** CSS テキストの空白を正規化する(unit 側の norm と同じ規則)。 */
 function norm(css: string): string {
@@ -199,8 +190,10 @@ function darkRuleSelector(root: HTMLElement): string {
 	return (m as RegExpExecArray)[1].trim();
 }
 
+// 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 4「分類」=承認済み (r)(as)): HTML の編集面(⌘E → html-edit-surface)は撤去したので
+// 編集面のルートの 3 件(d)-3・4・6 と editRoot を消し、複製面(検索の面=buildEditSurface の側)の 3 件を残す。
 beforeEach(() => {
-	windowState.endEdit();
+	windowState.fileEditor = null;
 	windowState.clearDocument();
 	menuHandlers.clear();
 });
@@ -243,35 +236,3 @@ describe('AC-54-追e (d) — 複製面のルートに文書の <html> / <body> �
 	});
 });
 
-// ---------------------------------------------------------------------------
-// AC-54-追e (d) — 編集面のルート(起案時判断 (c))
-// ---------------------------------------------------------------------------
-
-describe('AC-54-追e (d) — 編集面のルートにも同じ語が入る(起案時判断 (c))', () => {
-	it('(d)-3 .vellis-html-edit-root の classList に dark / x / y が入り、既存の class も残る', async () => {
-		const { container } = mountHtml(DARK_SRC);
-		const root = await editRoot(container);
-
-		expect(root.classList.contains('vellis-html-edit-root'), '既存の class が残ること').toBe(true);
-		for (const word of ['dark', 'x', 'y']) {
-			expect(root.classList.contains(word), `rootClasses の語 "${word}" が入ること: ` + root.className).toBe(true);
-		}
-	});
-
-	it('(d)-4 畳まれた html.dark body{…} の規則が編集面のルートに当たる(matches)', async () => {
-		const { container } = mountHtml(DARK_SRC);
-		const root = await editRoot(container);
-
-		const selector = darkRuleSelector(root);
-		expect(
-			root.matches(selector),
-			`ルート(class="${root.className}")が書き換え後のセレクタ "${selector}" に当たること`,
-		).toBe(true);
-	});
-
-	it('(d)-6 class の無い文書では編集面のルートの class は従来の 1 語だけ', async () => {
-		const { container } = mountHtml(PLAIN_SRC);
-		const root = await editRoot(container);
-		expect(root.className.trim()).toBe('vellis-html-edit-root');
-	});
-});

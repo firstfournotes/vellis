@@ -90,14 +90,10 @@ import { describe, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import {
-	buildEditSurface,
-	commitBlock,
-	resolveLeafBlock,
-	snapshotBlock,
-	STRUCTURE_CHANGED_MESSAGE,
-	type EditSurface,
-} from './edit';
+// 要件74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 4「一部を残す」=承認済み (r)(as)): 要件53 の HTML のテキストノード編集
+// (commitBlock / resolveLeafBlock / snapshotBlock)は撤去(要件79 で置き換え)。残すのは buildEditSurface(要件54 の検索の複製面)と
+// sanitize と閲覧側の不変(AC-53-1・2 の hid・11・13)。
+import { buildEditSurface, type EditSurface } from './edit';
 import { buildSrcdoc, SANDBOX_ATTRIBUTE } from '$lib/html-viewer';
 import { vellisSchema } from '../markdown/sanitize-schema';
 
@@ -139,12 +135,6 @@ function rangesOf(surface: EditSurface, el: Element) {
 	return [...(ranges as { childIndex: number; start: number; end: number }[])].sort(
 		(a, b) => a.childIndex - b.childIndex,
 	);
-}
-
-/** commit が ok であることを確かめて中身を返す。 */
-function expectOk(result: ReturnType<typeof commitBlock>) {
-	if (!result.ok) throw new Error('確定が拒否された: ' + result.reason);
-	return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,11 +222,6 @@ describe('AC-53-2 — sanitize で子が変わった要素は編集不可(契約
 		expect(surface.html).toContain('id="s"');
 	});
 
-	test('hid の無いブロックはダブルクリックしても編集に入らない(resolveLeafBlock が null)', () => {
-		const { root } = mountSurface(SANITIZED_SRC);
-		expect(resolveLeafBlock(q(root, '#s'), root)).toBe(null);
-	});
-
 	test('<p>a<b>x</b>b</p> には hid が付き、2つのテキストノードが正しい範囲を持つ', () => {
 		const { surface, root } = mountSurface(SANITIZED_SRC);
 		const b = q(root, '#b');
@@ -271,38 +256,6 @@ const LEAF_SRC = [
 	'',
 ].join('\n');
 
-describe('AC-53-3 — 葉ブロックの解決(契約③)', () => {
-	test('インライン要素(b)の上なら、それを含む葉ブロック(p)へ繰り上げる', () => {
-		const { root } = mountSurface(LEAF_SRC);
-		expect(resolveLeafBlock(q(root, '#b1'), root)).toBe(q(root, '#p1'));
-	});
-
-	test('入れ子では内側の p が編集単位・ブロックを子に持つ div は不可', () => {
-		const { root } = mountSurface(LEAF_SRC);
-		expect(resolveLeafBlock(q(root, '#p2'), root)).toBe(q(root, '#p2'));
-		expect(resolveLeafBlock(q(root, '#wrap'), root)).toBe(null);
-	});
-
-	test('li・td・pre・h2 も編集単位になる', () => {
-		const { root } = mountSurface(LEAF_SRC);
-		for (const id of ['#li1', '#td1', '#pre1', '#h2x']) {
-			expect(resolveLeafBlock(q(root, id), root), id + ' が自分自身に解決されること').toBe(
-				q(root, id),
-			);
-		}
-	});
-
-	test('葉ブロックが無ければテキストノードの親要素(span 等のインライン)も可', () => {
-		const { root } = mountSurface(LEAF_SRC);
-		expect(resolveLeafBlock(q(root, '#sp1'), root)).toBe(q(root, '#sp1'));
-	});
-
-	test('編集面のルートは編集単位にならない', () => {
-		const { root } = mountSurface(LEAF_SRC);
-		expect(resolveLeafBlock(root, root)).toBe(null);
-	});
-});
-
 // ---------------------------------------------------------------------------
 // AC-53-4〜7 — 確定と差し替え(契約④⑦)
 // ---------------------------------------------------------------------------
@@ -320,119 +273,6 @@ const BLOCK_SRC = [
 	'',
 ].join('\n');
 
-/** #a を掴んで snapshot まで済ませた状態を作る。 */
-function grabBlockA(source: string = BLOCK_SRC) {
-	const { surface, root } = mountSurface(source);
-	const a = q(root, '#a');
-	const before = snapshotBlock(a);
-	return { surface, root, a, before };
-}
-
-describe('AC-53-4 — テキストノードだけの差し替え(契約④⑦)', () => {
-	test('Hello → Hi の確定で、その範囲以外(doctype・コメント・属性・<b>・&amp;)は byte 等価', () => {
-		const { surface, a, before } = grabBlockA();
-		textNodeAt(a, 0).nodeValue = 'Hi ';
-
-		const result = expectOk(
-			commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before }),
-		);
-
-		expect(result.source).toBe(BLOCK_SRC.replace('Hello <b>', 'Hi <b>'));
-	});
-
-	test('何も変えずに確定しても原文は byte 等価のまま', () => {
-		const { surface, a, before } = grabBlockA();
-
-		const result = expectOk(
-			commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before }),
-		);
-
-		expect(result.source).toBe(BLOCK_SRC);
-	});
-});
-
-describe('AC-53-5 — 最小エスケープ(契約④)', () => {
-	test('< & > は &lt; &amp; &gt; で書き戻る', () => {
-		const { surface, a, before } = grabBlockA();
-		textNodeAt(a, 0).nodeValue = 'new < & > value';
-
-		const result = expectOk(
-			commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before }),
-		);
-
-		expect(result.source).toBe(BLOCK_SRC.replace('Hello ', 'new &lt; &amp; &gt; value'));
-	});
-
-	test('U+00A0 と非 ASCII はそのまま(&nbsp; には戻さない)', () => {
-		const { surface, a, before } = grabBlockA();
-		textNodeAt(a, 0).nodeValue = 'x\u00A0日本語 ';
-
-		const result = expectOk(
-			commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before }),
-		);
-
-		expect(result.source).toBe(BLOCK_SRC.replace('Hello ', 'x\u00A0日本語 '));
-		expect(result.source).not.toContain('&nbsp;');
-	});
-});
-
-describe('AC-53-6 — 複数ノード・後ろから(契約④)', () => {
-	test('1ブロック内の2つのテキストノードを同時に変えても両方が正しい範囲に入る', () => {
-		const { surface, a, before } = grabBlockA();
-		// 前を長く・後ろを別の長さに変える=前の増分で後ろの範囲がずれない書き戻し順の判定。
-		textNodeAt(a, 0).nodeValue = 'Hi there ';
-		textNodeAt(a, 2).nodeValue = ' + universe';
-
-		const result = expectOk(
-			commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before }),
-		);
-
-		expect(result.source).toBe(
-			BLOCK_SRC.replace('Hello <b>bold</b> &amp; world', 'Hi there <b>bold</b> + universe'),
-		);
-	});
-});
-
-describe('AC-53-7 — 構造変化の拒否(契約④・純関数面)', () => {
-	test('要素(<b>)を消した確定は拒否される', () => {
-		const { surface, a, before } = grabBlockA();
-		a.removeChild(q(a, 'b'));
-
-		const result = commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before });
-
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.reason).toBe('structure-changed');
-	});
-
-	test('新しい要素(<span>)を入れた確定は拒否される', () => {
-		const { surface, a, before } = grabBlockA();
-		const span = document.createElement('span');
-		span.textContent = 'sneaked';
-		a.appendChild(span);
-
-		const result = commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before });
-
-		expect(result.ok).toBe(false);
-	});
-
-	test('<br> を入れた確定は拒否される', () => {
-		const { surface, a, before } = grabBlockA();
-		a.insertBefore(document.createElement('br'), a.childNodes[2]);
-
-		const result = commitBlock({ source: BLOCK_SRC, index: surface.index, block: a, before });
-
-		expect(result.ok).toBe(false);
-	});
-
-	test('拒否通知の文言(用語集=値固定。妥当性は人間ゲート④)', () => {
-		expect(STRUCTURE_CHANGED_MESSAGE).toBe('Structure changed — use Source to edit tags');
-	});
-});
-
-// ---------------------------------------------------------------------------
-// AC-53-8 — 連続編集の位置補正(契約④)
-// ---------------------------------------------------------------------------
-
 const TWO_SRC = [
 	'<body>',
 	'<p id="first">alpha</p>',
@@ -441,40 +281,6 @@ const TWO_SRC = [
 	'',
 ].join('\n');
 
-describe('AC-53-8 — 連続編集の位置補正(契約④)', () => {
-	test('前のブロックで長さを変えたあと、後ろのブロック・同じブロックの2回目も正しい範囲が差し替わる', () => {
-		const { surface, root } = mountSurface(TWO_SRC);
-
-		// 1回目: 前のブロックを伸ばす。
-		const first = q(root, '#first');
-		const before1 = snapshotBlock(first);
-		textNodeAt(first, 0).nodeValue = 'alpha stretched longer';
-		const r1 = expectOk(
-			commitBlock({ source: TWO_SRC, index: surface.index, block: first, before: before1 }),
-		);
-		const src1 = TWO_SRC.replace('alpha', 'alpha stretched longer');
-		expect(r1.source).toBe(src1);
-
-		// 2回目: 後ろのブロック。位置補正済みの索引で正しい範囲へ入ること。
-		const second = q(root, '#second');
-		const before2 = snapshotBlock(second);
-		textNodeAt(second, 0).nodeValue = 'OMEGA!';
-		const r2 = expectOk(
-			commitBlock({ source: r1.source, index: r1.index, block: second, before: before2 }),
-		);
-		const src2 = src1.replace('omega', 'OMEGA!');
-		expect(r2.source).toBe(src2);
-
-		// 3回目: 同じブロック(#first)の2回目=縮める編集も正しい範囲へ入ること。
-		const before3 = snapshotBlock(first);
-		textNodeAt(first, 0).nodeValue = 'a';
-		const r3 = expectOk(
-			commitBlock({ source: r2.source, index: r2.index, block: first, before: before3 }),
-		);
-		expect(r3.source).toBe(src2.replace('alpha stretched longer', 'a'));
-	});
-});
-
 // ---------------------------------------------------------------------------
 // AC-53-14 — CRLF と改行
 // ---------------------------------------------------------------------------
@@ -482,44 +288,6 @@ describe('AC-53-8 — 連続編集の位置補正(契約④)', () => {
 const CRLF_SRC =
 	'<html>\r\n<head><title>t</title></head>\r\n<body>\r\n<p id="a">line</p>\r\n' +
 	'<pre id="pre1">one\r\ntwo</pre>\r\n</body>\r\n</html>\r\n';
-
-describe('AC-53-14 — CRLF と改行', () => {
-	test('CRLF 文書の未編集部分は CRLF のまま byte 等価', () => {
-		const { surface, root } = mountSurface(CRLF_SRC);
-		const a = q(root, '#a');
-		const before = snapshotBlock(a);
-		textNodeAt(a, 0).nodeValue = 'edited';
-
-		const result = expectOk(
-			commitBlock({ source: CRLF_SRC, index: surface.index, block: a, before }),
-		);
-
-		expect(result.source).toBe(CRLF_SRC.replace('line', 'edited'));
-		expect(result.source).toContain('one\r\ntwo');
-	});
-
-	test('索引の範囲は CRLF 込みの原文の綴りを指す(DOM 側は LF に正規化されている)', () => {
-		const { surface, root } = mountSurface(CRLF_SRC);
-		const pre = q(root, '#pre1');
-		const ranges = rangesOf(surface, pre);
-		expect(ranges).toHaveLength(1);
-		expect(CRLF_SRC.slice(ranges[0].start, ranges[0].end)).toBe('one\r\ntwo');
-		expect(textNodeAt(pre, ranges[0].childIndex).nodeValue).toBe('one\ntwo');
-	});
-
-	test('値が変わったノードの改行は LF で書き戻る(要件#52 backlog 172 と同型・申し送り)', () => {
-		const { surface, root } = mountSurface(CRLF_SRC);
-		const pre = q(root, '#pre1');
-		const before = snapshotBlock(pre);
-		textNodeAt(pre, 0).nodeValue = 'one\ntwo\nthree';
-
-		const result = expectOk(
-			commitBlock({ source: CRLF_SRC, index: surface.index, block: pre, before }),
-		);
-
-		expect(result.source).toBe(CRLF_SRC.replace('one\r\ntwo', 'one\ntwo\nthree'));
-	});
-});
 
 // ---------------------------------------------------------------------------
 // AC-53-11 — 閲覧側の不変(契約①⑧・値固定の部分)
@@ -577,11 +345,7 @@ describe('AC-53-11 — 閲覧側の不変(契約①⑧)', () => {
 
 	// 要件#49 追補h(3)(2026-10-05)で追補h 確定後の内容に更新
 	// 要件#49 追補i(3)(2026-10-07)で追補i 確定後の内容に更新
-	test('src/markdown/edit.ts は無改変(SHA-256 固定)', () => {
-		expect(sha256(readRepoFile('src/markdown/edit.ts'))).toBe(
-			'f8a5e377ffb0d7a65da0ca65965195e3a81cbc266e09178005aa7ead7b360a8b',
-		);
-	});
+	// 要件74 第2段 2-5(2026-11-17 仮): src/markdown/edit.ts は撤去されたので SHA-256 の固定を外した(AC-74-25)。
 
 	test('tauri.conf.json の CSP は不変(値固定)', () => {
 		const conf = JSON.parse(readRepoFile('src-tauri/tauri.conf.json')) as {
@@ -614,14 +378,34 @@ describe('AC-53-13 — 依存の固定(契約⑧)', () => {
 			dependencies: Record<string, string>;
 		};
 		expect(Object.keys(pkg.dependencies).sort()).toEqual([
+			// 要件74 第1段(2026-11-16・契約20 (am) 決定)= CodeMirror 6 の部品 6 つ(要件側更新=req-74.md 棚卸し 1)。
+			'@codemirror/commands',
+			'@codemirror/language',
+			'@codemirror/language-data',
+			'@codemirror/state',
+			'@codemirror/view',
+			'@lezer/highlight',
 			'@shikijs/rehype',
 			'@tauri-apps/api',
 			'@tauri-apps/plugin-dialog',
 			'@tauri-apps/plugin-opener',
-			'hast-util-to-mdast',
+			// 要件74 第2段 2-5(2026-11-17 仮・契約20・棚卸し 1=承認済み (r)(as)): 撤去で hast-util-to-mdast を外した
 			'mdast-util-to-markdown',
 			'mdast-util-to-string',
 			'mermaid',
+			// 要件74 第2段 2-1(2026-11-17・仮の前提=判断 3 で prosemirror-schema-list を含む・契約20 (D))= ProseMirror の部品 9 つ(要件側更新=req-74.md 棚卸し 1)。
+			'prosemirror-commands',
+			'prosemirror-dropcursor',
+			'prosemirror-gapcursor',
+			'prosemirror-history',
+			'prosemirror-inputrules',
+			'prosemirror-keymap',
+			'prosemirror-model',
+			'prosemirror-schema-list',
+			'prosemirror-state',
+			'prosemirror-tables',
+			'prosemirror-transform',
+			'prosemirror-view',
 			'rehype-parse', // ← 本要件の唯一の追加(c56a544 で追加済み)
 			'rehype-raw',
 			'rehype-sanitize',

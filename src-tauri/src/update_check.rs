@@ -169,10 +169,15 @@ pub fn should_check_on(trigger: CheckTrigger, last_check_unix: Option<i64>, now_
 /// Dev builds never call out.  The check is on by default with no opt-out
 /// (`docs/update-notification.md` §6-Q6), so this channel guard is what
 /// keeps development and test runs off the network.
+///
+/// A preview (開発版, requirements.md #87 契約4) does not check either: its
+/// releases live in the private development repository, which the app
+/// cannot read without a key.  New previews come in through
+/// `scripts/install-dev.sh`.
 pub fn channel_allows_check(channel: Channel) -> bool {
     match channel {
         Channel::Release => true,
-        Channel::Dev => false,
+        Channel::Preview | Channel::Dev => false,
     }
 }
 
@@ -252,6 +257,27 @@ pub fn manual_check_dialog(outcome: &ManualCheckOutcome, current: &str) -> Manua
             body: "Check your internet connection and try again.".to_string(),
             buttons: vec!["OK".to_string()],
         },
+    }
+}
+
+/// The dialog the menu's Check for Updates… shows on a preview build
+/// (requirements.md #87 契約4) instead of asking GitHub: this is a
+/// development build, and newer ones are installed with
+/// `scripts/install-dev.sh`.  `build_name` is the baked
+/// `VELLIS_BUILD_NAME`; when it is empty the body leaves it out.
+pub fn preview_check_dialog(build_name: &str) -> ManualCheckDialog {
+    let this = if build_name.is_empty() {
+        "This".to_string()
+    } else {
+        format!("Vellis {build_name}")
+    };
+    ManualCheckDialog {
+        title: "This is a development build".to_string(),
+        body: format!(
+            "{this} is a development build, so it does not check for updates. \
+             Install a newer development build with scripts/install-dev.sh."
+        ),
+        buttons: vec!["OK".to_string()],
     }
 }
 
@@ -474,10 +500,13 @@ pub fn listen_banner_ready<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// one task covers the whole app, and only a process launch counts as a
 /// launch.
 ///
-/// Does nothing on the dev channel.
+/// Does nothing on the dev and preview channels.
 pub fn spawn_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     if !channel_allows_check(crate::features::current_channel()) {
-        tracing::info!("update check: skipped (dev channel)");
+        tracing::info!(
+            "update check: skipped ({} channel)",
+            crate::features::current_channel().as_str()
+        );
         return;
     }
     tauri::async_runtime::spawn(async move {

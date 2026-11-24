@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::cli_install::InstallCliResult;
 use crate::print::{PrintAvailability, PrintItemState};
 use crate::update_check::ManualCheckOutcome;
-use tauri::menu::{AboutMetadataBuilder, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, Wry};
+use tauri::menu::{AboutMetadataBuilder, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Emitter, Listener, Manager, Runtime, WebviewWindow, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
@@ -49,26 +49,6 @@ pub const SAVE_ITEM_ID: &str = "save";
 /// there. Nothing is saved automatically — this event is the only trigger.
 pub const MENU_SAVE_EVENT: &str = "menu_save";
 
-/// Stable identifier for the Edit menu's "Edit" item (requirements.md #48 追補b).
-pub const EDIT_ITEM_ID: &str = "edit";
-
-/// Event emitted to the focused window when "Edit" is clicked
-/// (requirements.md #48 契約③・追補b).
-///
-/// Toggles the focused window between viewing and editing. Same division of
-/// labour as Save: the menu cannot know whether the window is showing an
-/// editable document or is already in edit mode, so it only reports the
-/// gesture and the window decides (`src/lib/document-edit.ts`).
-///
-/// This is the *only* way into edit mode for HTML documents: while viewing,
-/// they are rendered inside `HtmlViewer`'s sandboxed iframe, where the
-/// double-click that starts editing in the Markdown / text viewer never
-/// reaches the app.
-pub const MENU_EDIT_EVENT: &str = "menu_edit";
-
-/// Accelerator for the Edit item (requirements.md #48 追補b).
-pub const EDIT_ACCELERATOR: &str = "CmdOrCtrl+E";
-
 /// Stable identifier for the Edit menu's "Find…" item (requirements.md #54 契約①).
 pub const FIND_ITEM_ID: &str = "find";
 
@@ -89,6 +69,19 @@ pub const MENU_FIND_EVENT: &str = "menu_find";
 /// tauri drops an unparseable accelerator silently, so the test and the menu
 /// read the same literal.
 pub const FIND_ACCELERATOR: &str = "CmdOrCtrl+F";
+
+/// Stable identifier for the Edit menu's "Find and Replace…" item
+/// (requirements.md #74 第3段 3-3・3-12): right after Find…. Like Find…, the
+/// window decides: the code, plain-text and raw surfaces open the find bar
+/// with its replace row, the others just the find bar.
+pub const FIND_REPLACE_ITEM_ID: &str = "find-replace";
+
+/// Event emitted to the focused window when Find and Replace… is clicked.
+/// Same spelling as `MENU_FIND_REPLACE_EVENT` in `src/editor/cm-replace.ts`.
+pub const MENU_FIND_REPLACE_EVENT: &str = "menu_find_replace";
+
+/// Accelerator for Find and Replace…: Option + Command + F.
+pub const FIND_REPLACE_ACCELERATOR: &str = "CmdOrCtrl+Alt+F";
 
 /// Stable identifier for the Edit menu's "Find in Folder…" item
 /// (requirements.md #55 契約①).
@@ -367,6 +360,145 @@ pub const TOGGLE_FULL_WIDTH_ITEM_ID: &str = "toggle-full-width";
 /// choice in localStorage (`src/lib/ui-chrome.ts`, same-named constant).
 pub const MENU_TOGGLE_FULL_WIDTH_EVENT: &str = "menu_toggle_full_width";
 
+// --- Format (requirements.md #74 契約8・第2段の作り(案)の項目 10) ------------
+// Every Format item id starts with `format-`; on_menu_event forwards all of
+// them through one arm to the focused window as `menu_format` (payload = id),
+// where `src/editor/commands.ts` (same ids) applies the command to the
+// Markdown editing surface. The items are always enabled: a window without a
+// Markdown surface simply does nothing (like Save and the zoom items).
+
+/// Prefix shared by every Format item id.
+pub const FORMAT_ITEM_ID_PREFIX: &str = "format-";
+
+/// Event emitted to the focused window for a Format item (payload = the id).
+/// Same spelling as `MENU_FORMAT_EVENT` in `src/editor/commands.ts`.
+pub const MENU_FORMAT_EVENT: &str = "menu_format";
+
+/// The Format ▸ Alert submenu.
+pub const FORMAT_ALERT_MENU_ID: &str = "format-alert-menu";
+/// The Format ▸ Insert submenu.
+pub const FORMAT_INSERT_MENU_ID: &str = "format-insert-menu";
+/// The Format ▸ Table submenu (requirements.md #74 第3段 3-2・3-6・3-8): rows and
+/// columns of the table under the cursor, right after Insert ▸.
+pub const FORMAT_TABLE_MENU_ID: &str = "format-table-menu";
+/// Format ▸ Table ▸ Insert Row Above (in the header row: a body row right below it=3-7).
+pub const FORMAT_TABLE_ROW_ABOVE_ITEM_ID: &str = "format-table-row-above";
+/// Format ▸ Table ▸ Insert Row Below.
+pub const FORMAT_TABLE_ROW_BELOW_ITEM_ID: &str = "format-table-row-below";
+/// Format ▸ Table ▸ Insert Column Left.
+pub const FORMAT_TABLE_COLUMN_LEFT_ITEM_ID: &str = "format-table-column-left";
+/// Format ▸ Table ▸ Insert Column Right.
+pub const FORMAT_TABLE_COLUMN_RIGHT_ITEM_ID: &str = "format-table-column-right";
+/// Format ▸ Table ▸ Delete Row (in the header row: the body row right below it=3-7).
+pub const FORMAT_TABLE_DELETE_ROW_ITEM_ID: &str = "format-table-delete-row";
+/// Format ▸ Table ▸ Delete Column (the last column takes the table with it).
+pub const FORMAT_TABLE_DELETE_COLUMN_ITEM_ID: &str = "format-table-delete-column";
+/// Format ▸ Table ▸ Delete Table.
+pub const FORMAT_TABLE_DELETE_ITEM_ID: &str = "format-table-delete";
+/// Format ▸ Bold.
+pub const FORMAT_BOLD_ITEM_ID: &str = "format-bold";
+pub const FORMAT_BOLD_ACCELERATOR: &str = "CmdOrCtrl+B";
+/// Format ▸ Italic.
+pub const FORMAT_ITALIC_ITEM_ID: &str = "format-italic";
+pub const FORMAT_ITALIC_ACCELERATOR: &str = "CmdOrCtrl+I";
+/// Format ▸ Strikethrough.
+pub const FORMAT_STRIKETHROUGH_ITEM_ID: &str = "format-strikethrough";
+pub const FORMAT_STRIKETHROUGH_ACCELERATOR: &str = "CmdOrCtrl+Shift+X";
+/// Format ▸ Inline Code.
+pub const FORMAT_INLINE_CODE_ITEM_ID: &str = "format-inline-code";
+pub const FORMAT_INLINE_CODE_ACCELERATOR: &str = "CmdOrCtrl+Shift+C";
+/// Format ▸ Link….
+pub const FORMAT_LINK_ITEM_ID: &str = "format-link";
+pub const FORMAT_LINK_ACCELERATOR: &str = "CmdOrCtrl+K";
+/// Format ▸ Body Text.
+pub const FORMAT_BODY_TEXT_ITEM_ID: &str = "format-body-text";
+pub const FORMAT_BODY_TEXT_ACCELERATOR: &str = "CmdOrCtrl+Alt+0";
+/// Format ▸ Heading 1.
+pub const FORMAT_HEADING_1_ITEM_ID: &str = "format-heading-1";
+pub const FORMAT_HEADING_1_ACCELERATOR: &str = "CmdOrCtrl+Alt+1";
+/// Format ▸ Heading 2.
+pub const FORMAT_HEADING_2_ITEM_ID: &str = "format-heading-2";
+pub const FORMAT_HEADING_2_ACCELERATOR: &str = "CmdOrCtrl+Alt+2";
+/// Format ▸ Heading 3.
+pub const FORMAT_HEADING_3_ITEM_ID: &str = "format-heading-3";
+pub const FORMAT_HEADING_3_ACCELERATOR: &str = "CmdOrCtrl+Alt+3";
+/// Format ▸ Heading 4.
+pub const FORMAT_HEADING_4_ITEM_ID: &str = "format-heading-4";
+pub const FORMAT_HEADING_4_ACCELERATOR: &str = "CmdOrCtrl+Alt+4";
+/// Format ▸ Heading 5.
+pub const FORMAT_HEADING_5_ITEM_ID: &str = "format-heading-5";
+pub const FORMAT_HEADING_5_ACCELERATOR: &str = "CmdOrCtrl+Alt+5";
+/// Format ▸ Heading 6.
+pub const FORMAT_HEADING_6_ITEM_ID: &str = "format-heading-6";
+pub const FORMAT_HEADING_6_ACCELERATOR: &str = "CmdOrCtrl+Alt+6";
+/// Format ▸ Bulleted List.
+pub const FORMAT_BULLETED_LIST_ITEM_ID: &str = "format-bulleted-list";
+pub const FORMAT_BULLETED_LIST_ACCELERATOR: &str = "CmdOrCtrl+Shift+8";
+/// Format ▸ Numbered List.
+pub const FORMAT_NUMBERED_LIST_ITEM_ID: &str = "format-numbered-list";
+pub const FORMAT_NUMBERED_LIST_ACCELERATOR: &str = "CmdOrCtrl+Shift+7";
+/// Format ▸ Task List.
+pub const FORMAT_TASK_LIST_ITEM_ID: &str = "format-task-list";
+pub const FORMAT_TASK_LIST_ACCELERATOR: &str = "CmdOrCtrl+Shift+L";
+/// Format ▸ Quote.
+pub const FORMAT_QUOTE_ITEM_ID: &str = "format-quote";
+pub const FORMAT_QUOTE_ACCELERATOR: &str = "CmdOrCtrl+Shift+Period";
+/// Format ▸ Code Block.
+pub const FORMAT_CODE_BLOCK_ITEM_ID: &str = "format-code-block";
+pub const FORMAT_CODE_BLOCK_ACCELERATOR: &str = "CmdOrCtrl+Alt+C";
+/// Format ▸ Note.
+pub const FORMAT_ALERT_NOTE_ITEM_ID: &str = "format-alert-note";
+/// Format ▸ Tip.
+pub const FORMAT_ALERT_TIP_ITEM_ID: &str = "format-alert-tip";
+/// Format ▸ Important.
+pub const FORMAT_ALERT_IMPORTANT_ITEM_ID: &str = "format-alert-important";
+/// Format ▸ Warning.
+pub const FORMAT_ALERT_WARNING_ITEM_ID: &str = "format-alert-warning";
+/// Format ▸ Caution.
+pub const FORMAT_ALERT_CAUTION_ITEM_ID: &str = "format-alert-caution";
+/// Format ▸ Increase Indent.
+pub const FORMAT_INDENT_ITEM_ID: &str = "format-indent";
+pub const FORMAT_INDENT_ACCELERATOR: &str = "CmdOrCtrl+]";
+/// Format ▸ Decrease Indent.
+pub const FORMAT_OUTDENT_ITEM_ID: &str = "format-outdent";
+pub const FORMAT_OUTDENT_ACCELERATOR: &str = "CmdOrCtrl+[";
+/// Format ▸ Table.
+pub const FORMAT_INSERT_TABLE_ITEM_ID: &str = "format-insert-table";
+/// Format ▸ Horizontal Rule.
+pub const FORMAT_INSERT_RULE_ITEM_ID: &str = "format-insert-rule";
+/// Format ▸ Footnote.
+pub const FORMAT_INSERT_FOOTNOTE_ITEM_ID: &str = "format-insert-footnote";
+/// Format ▸ Image….
+pub const FORMAT_INSERT_IMAGE_ITEM_ID: &str = "format-insert-image";
+/// Format ▸ Clear Formatting.
+pub const FORMAT_CLEAR_ITEM_ID: &str = "format-clear";
+
+/// View ▸ Raw Source (requirements.md #74 契約23・(z)(ao)): a check item right
+/// after Toggle Full Width that switches the Markdown editing surface between
+/// the rendered view and the raw source (CodeMirror). The check follows the
+/// front window (`raw_source_state` from the frontend, 判断 9).
+pub const RAW_SOURCE_ITEM_ID: &str = "raw-source";
+pub const RAW_SOURCE_ACCELERATOR: &str = "CmdOrCtrl+Alt+U";
+/// Event emitted to the focused window for View ▸ Raw Source (no payload).
+pub const MENU_RAW_SOURCE_EVENT: &str = "menu_raw_source";
+/// Event the frontend sends with `{ label, raw }` whenever the raw state of a
+/// window may have changed (its surface appeared or went away, it toggled, it
+/// came to the front).
+pub const RAW_SOURCE_STATE_EVENT: &str = "raw_source_state";
+
+/// View ▸ Show Formatting Toolbar (requirements.md #74 第4段 4-2・4-5): a check
+/// item right after Raw Source, unchecked at build (the toolbar is hidden by
+/// default) and without an accelerator. The window decides whether it can show
+/// the toolbar (the Markdown surface only); the check follows the front
+/// window's report (`format_toolbar_state`), like Raw Source.
+pub const SHOW_FORMAT_TOOLBAR_ITEM_ID: &str = "show-format-toolbar";
+/// Event emitted to the focused window for View ▸ Show Formatting Toolbar (no payload).
+/// Same spelling as `MENU_SHOW_FORMAT_TOOLBAR_EVENT` in `src/editor/format-toolbar.ts`.
+pub const MENU_SHOW_FORMAT_TOOLBAR_EVENT: &str = "menu_show_format_toolbar";
+/// Event the frontend sends with `{ label, shown }` whenever the toolbar state of
+/// a window may have changed. Same spelling as `FORMAT_TOOLBAR_STATE_EVENT` there.
+pub const FORMAT_TOOLBAR_STATE_EVENT: &str = "format_toolbar_state";
+
 /// Stable identifier for the Window submenu, so it can be found again after
 /// the menu is installed (see [`attach_windows_menu_to_nsapp`]).
 pub const WINDOW_MENU_ID: &str = "window-menu";
@@ -376,11 +508,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // macOS の muda About ダイアログは `<version> (<short_version>)` の順で
     // 連結して表示する (NSApp 標準の `Version X (Y)` 慣習と field の対応は逆)。
     // 主表示の semver を `version` に、build 識別子を `short_version` に入れる。
-    // `comments` にはビルド日時のみ載せる。
+    // `comments` にはビルド日時のみ載せる (macOS の About には出ない)。
+    // 開発版 (要件87 契約2) は版の名前 `dev-<開発名> #<n>(日時)` を、About の
+    // 下の行 (`copyright` の欄) に出す。release / dev は名前が空なので出さない。
+    let build_name = env!("VELLIS_BUILD_NAME");
     let about_metadata = AboutMetadataBuilder::new()
         .name(Some("Vellis"))
         .version(Some(env!("CARGO_PKG_VERSION").to_string()))
         .short_version(Some(env!("VELLIS_BUILD_NUMBER").to_string()))
+        .copyright((!build_name.is_empty()).then(|| build_name.to_string()))
         .comments(Some(format!("Built: {}", env!("VELLIS_BUILD_TIME"))))
         // 公開リポジトリを指す。開発は private の product-vellis で行うが、
         // 公開ユーザーがここを開くと 404 になるため (backlog #41)。
@@ -532,20 +668,18 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let copy = PredefinedMenuItem::copy(app, None)?;
     let paste = PredefinedMenuItem::paste(app, None)?;
     let select_all = PredefinedMenuItem::select_all(app, None)?;
-    // Entering / leaving edit mode (requirements.md #48 契約③・追補b). Placed
-    // after the standard block rather than above Undo so the macOS ordering
-    // every app shares stays where users expect it. Enabled unconditionally,
-    // like Save and the zoom items: a window showing an image (or an SSH
-    // document, which stays read-only) simply ignores the event.
+    // The separator after the standard block, in front of Find…. (Edit ▸ Edit
+    // went with the current editing: a document is editable as soon as it is
+    // open — requirements.md #74 契約3・(ad).)
     let edit_mode_sep = PredefinedMenuItem::separator(app)?;
-    let edit_mode_item =
-        MenuItem::with_id(app, EDIT_ITEM_ID, "Edit", true, Some(EDIT_ACCELERATOR))?;
     // 文書内検索 (requirements.md #54 契約①). Sits next to Edit, after the
     // standard block, so the macOS ordering every app shares stays where users
     // expect it. Enabled unconditionally, like Edit and Save: only the window
     // knows whether what it displays has any text to search, so a PDF or an
     // image window simply ignores the event.
     let find_item = MenuItem::with_id(app, FIND_ITEM_ID, "Find…", true, Some(FIND_ACCELERATOR))?;
+    // Find and Replace… (requirements.md #74 第3段 3-12): right after Find….
+    let find_replace_item = MenuItem::with_id(app, FIND_REPLACE_ITEM_ID, "Find and Replace…", true, Some(FIND_REPLACE_ACCELERATOR))?;
     // フォルダ横断検索 (requirements.md #55 契約①). Directly after Find…, the
     // in-document search it builds on. Enabled unconditionally: a window with no
     // root open (the history picker) simply ignores the event.
@@ -569,9 +703,92 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &paste,
             &select_all,
             &edit_mode_sep,
-            &edit_mode_item,
             &find_item,
+            &find_replace_item,
             &find_in_folder_item,
+        ],
+    )?;
+    // Format (requirements.md #74 契約8・判断 4): between Edit and View, the way
+    // macOS text apps place it. Always built (契約21: the editor is a regular feature).
+    let format_bold_item = MenuItem::with_id(app, FORMAT_BOLD_ITEM_ID, "Bold", true, Some(FORMAT_BOLD_ACCELERATOR))?;
+    let format_italic_item = MenuItem::with_id(app, FORMAT_ITALIC_ITEM_ID, "Italic", true, Some(FORMAT_ITALIC_ACCELERATOR))?;
+    let format_strikethrough_item = MenuItem::with_id(app, FORMAT_STRIKETHROUGH_ITEM_ID, "Strikethrough", true, Some(FORMAT_STRIKETHROUGH_ACCELERATOR))?;
+    let format_inline_code_item = MenuItem::with_id(app, FORMAT_INLINE_CODE_ITEM_ID, "Inline Code", true, Some(FORMAT_INLINE_CODE_ACCELERATOR))?;
+    let format_link_item = MenuItem::with_id(app, FORMAT_LINK_ITEM_ID, "Link…", true, Some(FORMAT_LINK_ACCELERATOR))?;
+    let format_body_text_item = MenuItem::with_id(app, FORMAT_BODY_TEXT_ITEM_ID, "Body Text", true, Some(FORMAT_BODY_TEXT_ACCELERATOR))?;
+    let format_heading_1_item = MenuItem::with_id(app, FORMAT_HEADING_1_ITEM_ID, "Heading 1", true, Some(FORMAT_HEADING_1_ACCELERATOR))?;
+    let format_heading_2_item = MenuItem::with_id(app, FORMAT_HEADING_2_ITEM_ID, "Heading 2", true, Some(FORMAT_HEADING_2_ACCELERATOR))?;
+    let format_heading_3_item = MenuItem::with_id(app, FORMAT_HEADING_3_ITEM_ID, "Heading 3", true, Some(FORMAT_HEADING_3_ACCELERATOR))?;
+    let format_heading_4_item = MenuItem::with_id(app, FORMAT_HEADING_4_ITEM_ID, "Heading 4", true, Some(FORMAT_HEADING_4_ACCELERATOR))?;
+    let format_heading_5_item = MenuItem::with_id(app, FORMAT_HEADING_5_ITEM_ID, "Heading 5", true, Some(FORMAT_HEADING_5_ACCELERATOR))?;
+    let format_heading_6_item = MenuItem::with_id(app, FORMAT_HEADING_6_ITEM_ID, "Heading 6", true, Some(FORMAT_HEADING_6_ACCELERATOR))?;
+    let format_bulleted_list_item = MenuItem::with_id(app, FORMAT_BULLETED_LIST_ITEM_ID, "Bulleted List", true, Some(FORMAT_BULLETED_LIST_ACCELERATOR))?;
+    let format_numbered_list_item = MenuItem::with_id(app, FORMAT_NUMBERED_LIST_ITEM_ID, "Numbered List", true, Some(FORMAT_NUMBERED_LIST_ACCELERATOR))?;
+    let format_task_list_item = MenuItem::with_id(app, FORMAT_TASK_LIST_ITEM_ID, "Task List", true, Some(FORMAT_TASK_LIST_ACCELERATOR))?;
+    let format_quote_item = MenuItem::with_id(app, FORMAT_QUOTE_ITEM_ID, "Quote", true, Some(FORMAT_QUOTE_ACCELERATOR))?;
+    let format_code_block_item = MenuItem::with_id(app, FORMAT_CODE_BLOCK_ITEM_ID, "Code Block", true, Some(FORMAT_CODE_BLOCK_ACCELERATOR))?;
+    let format_alert_note_item = MenuItem::with_id(app, FORMAT_ALERT_NOTE_ITEM_ID, "Note", true, None::<&str>)?;
+    let format_alert_tip_item = MenuItem::with_id(app, FORMAT_ALERT_TIP_ITEM_ID, "Tip", true, None::<&str>)?;
+    let format_alert_important_item = MenuItem::with_id(app, FORMAT_ALERT_IMPORTANT_ITEM_ID, "Important", true, None::<&str>)?;
+    let format_alert_warning_item = MenuItem::with_id(app, FORMAT_ALERT_WARNING_ITEM_ID, "Warning", true, None::<&str>)?;
+    let format_alert_caution_item = MenuItem::with_id(app, FORMAT_ALERT_CAUTION_ITEM_ID, "Caution", true, None::<&str>)?;
+    let format_indent_item = MenuItem::with_id(app, FORMAT_INDENT_ITEM_ID, "Increase Indent", true, Some(FORMAT_INDENT_ACCELERATOR))?;
+    let format_outdent_item = MenuItem::with_id(app, FORMAT_OUTDENT_ITEM_ID, "Decrease Indent", true, Some(FORMAT_OUTDENT_ACCELERATOR))?;
+    let format_insert_table_item = MenuItem::with_id(app, FORMAT_INSERT_TABLE_ITEM_ID, "Table", true, None::<&str>)?;
+    let format_insert_rule_item = MenuItem::with_id(app, FORMAT_INSERT_RULE_ITEM_ID, "Horizontal Rule", true, None::<&str>)?;
+    let format_insert_footnote_item = MenuItem::with_id(app, FORMAT_INSERT_FOOTNOTE_ITEM_ID, "Footnote", true, None::<&str>)?;
+    let format_insert_image_item = MenuItem::with_id(app, FORMAT_INSERT_IMAGE_ITEM_ID, "Image…", true, None::<&str>)?;
+    let format_clear_item = MenuItem::with_id(app, FORMAT_CLEAR_ITEM_ID, "Clear Formatting", true, None::<&str>)?;
+    // Format ▸ Table ▸ (第3段 3-2): no accelerators (3-9).
+    let format_table_row_above_item = MenuItem::with_id(app, FORMAT_TABLE_ROW_ABOVE_ITEM_ID, "Insert Row Above", true, None::<&str>)?;
+    let format_table_row_below_item = MenuItem::with_id(app, FORMAT_TABLE_ROW_BELOW_ITEM_ID, "Insert Row Below", true, None::<&str>)?;
+    let format_table_column_left_item = MenuItem::with_id(app, FORMAT_TABLE_COLUMN_LEFT_ITEM_ID, "Insert Column Left", true, None::<&str>)?;
+    let format_table_column_right_item = MenuItem::with_id(app, FORMAT_TABLE_COLUMN_RIGHT_ITEM_ID, "Insert Column Right", true, None::<&str>)?;
+    let format_table_delete_row_item = MenuItem::with_id(app, FORMAT_TABLE_DELETE_ROW_ITEM_ID, "Delete Row", true, None::<&str>)?;
+    let format_table_delete_column_item = MenuItem::with_id(app, FORMAT_TABLE_DELETE_COLUMN_ITEM_ID, "Delete Column", true, None::<&str>)?;
+    let format_table_delete_item = MenuItem::with_id(app, FORMAT_TABLE_DELETE_ITEM_ID, "Delete Table", true, None::<&str>)?;
+    let format_table_sep = PredefinedMenuItem::separator(app)?;
+    let format_sep1 = PredefinedMenuItem::separator(app)?;
+    let format_sep2 = PredefinedMenuItem::separator(app)?;
+    let format_sep3 = PredefinedMenuItem::separator(app)?;
+    let format_sep4 = PredefinedMenuItem::separator(app)?;
+    let format_sep5 = PredefinedMenuItem::separator(app)?;
+    let format_alert_menu = Submenu::with_id_and_items(app, FORMAT_ALERT_MENU_ID, "Alert", true, &[&format_alert_note_item, &format_alert_tip_item, &format_alert_important_item, &format_alert_warning_item, &format_alert_caution_item])?;
+    let format_insert_menu = Submenu::with_id_and_items(app, FORMAT_INSERT_MENU_ID, "Insert", true, &[&format_insert_table_item, &format_insert_rule_item, &format_insert_footnote_item, &format_insert_image_item])?;
+    let format_table_menu = Submenu::with_id_and_items(app, FORMAT_TABLE_MENU_ID, "Table", true, &[&format_table_row_above_item, &format_table_row_below_item, &format_table_column_left_item, &format_table_column_right_item, &format_table_sep, &format_table_delete_row_item, &format_table_delete_column_item, &format_table_delete_item])?;
+    let format_menu = Submenu::with_items(
+        app,
+        "Format",
+        true,
+        &[
+            &format_bold_item,
+            &format_italic_item,
+            &format_strikethrough_item,
+            &format_inline_code_item,
+            &format_link_item,
+            &format_sep1,
+            &format_body_text_item,
+            &format_heading_1_item,
+            &format_heading_2_item,
+            &format_heading_3_item,
+            &format_heading_4_item,
+            &format_heading_5_item,
+            &format_heading_6_item,
+            &format_sep2,
+            &format_bulleted_list_item,
+            &format_numbered_list_item,
+            &format_task_list_item,
+            &format_quote_item,
+            &format_code_block_item,
+            &format_alert_menu,
+            &format_sep3,
+            &format_indent_item,
+            &format_outdent_item,
+            &format_sep4,
+            &format_insert_menu,
+            &format_table_menu,
+            &format_sep5,
+            &format_clear_item,
         ],
     )?;
 
@@ -739,6 +956,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         None::<&str>,
     )?;
+    let raw_source_item = CheckMenuItem::with_id(app, RAW_SOURCE_ITEM_ID, "Raw Source", true, false, Some(RAW_SOURCE_ACCELERATOR))?;
+    // 第4段 4-2(4-5): the formatting toolbar, hidden by default, no accelerator.
+    let show_format_toolbar_item = CheckMenuItem::with_id(app, SHOW_FORMAT_TOOLBAR_ITEM_ID, "Show Formatting Toolbar", true, false, None::<&str>)?;
     let view_chrome_sep = PredefinedMenuItem::separator(app)?;
     let zoom_in_item = MenuItem::with_id(
         app,
@@ -781,6 +1001,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &view_reload_sep,
             &appearance_menu,
             &toggle_full_width_item,
+            &raw_source_item,
+            &show_format_toolbar_item,
             &view_chrome_sep,
             &zoom_in_item,
             &zoom_out_item,
@@ -821,17 +1043,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         &[&go_to_item, &recent_files_item, &go_dashboard_sep, &dashboard_item],
     )?;
 
-    Menu::with_items(
+    let menu = Menu::with_items(
         app,
         &[
             &app_menu,
             &file_menu,
             &edit_menu,
+            &format_menu,
             &view_menu,
             &go_menu,
             &window_menu,
         ],
-    )
+    )?;
+    Ok(menu)
 }
 
 /// Position of the first theme of `themes/` in View ▸ Appearance: after Light,
@@ -931,7 +1155,8 @@ pub fn handle_appearance_theme_click(app: &AppHandle<Wry>, name: &str) {
 /// the whole Default theme is written into `~/.config/vellis/themes/` as
 /// `my-theme.json` (or the next free `my-theme-<n>.json` — an existing file is
 /// never overwritten), then a new window opens with that folder as its root
-/// and the written file as its document.
+/// and the written file as its document (requirements.md #74 (ah): always a
+/// Vellis window, where the theme is edited).
 ///
 /// Nothing is sent to the windows: the theme watcher sees the new file and
 /// rebuilds the Appearance list (it is only asked to look now, in case the
@@ -1120,6 +1345,126 @@ pub fn sync_print_item(app: &AppHandle<Wry>, label: &str) {
     }
 }
 
+/// Emit `event` with `payload` to the focused window only (requirements.md #74
+/// 契約8: a Format item carries its id). The payload-less sibling is
+/// [`handle_menu_open_click`].
+pub fn emit_to_focused<S: serde::Serialize + Clone>(app: &AppHandle<Wry>, event: &str, payload: S) {
+    let Some(window) = focused_or_first_window(app) else {
+        return;
+    };
+    if let Err(e) = app.emit_to(window.label(), event, payload) {
+        tracing::warn!("failed to emit {} to '{}': {}", event, window.label(), e);
+    }
+}
+
+/// The payload of [`RAW_SOURCE_STATE_EVENT`].
+#[derive(serde::Deserialize)]
+struct RawSourceState {
+    label: String,
+    raw: bool,
+}
+
+/// Keep the check of View ▸ Raw Source on the front window's value
+/// (requirements.md #74 契約23・判断 9). The frontend sends `{ label, raw }`
+/// when its surface appears or goes away, when it toggles and when its window
+/// comes to the front; only the front window's report moves the check. No
+/// Tauri command: the frontend emits an event.
+pub fn listen_raw_source_state(app: &AppHandle<Wry>) {
+    let handle = app.clone();
+    app.listen(RAW_SOURCE_STATE_EVENT, move |event| {
+        let state: RawSourceState = match serde_json::from_str(event.payload()) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!("{}: unreadable payload: {}", RAW_SOURCE_STATE_EVENT, e);
+                return;
+            }
+        };
+        let label = state.label;
+        let raw = state.raw;
+        let front = focused_or_first_window(&handle).map(|w| w.label().to_string());
+        if !raw_check_applies(front.as_deref(), &label) {
+            return;
+        }
+        let Some(item) = handle.menu().and_then(|menu| find_check_menu_item(&menu, RAW_SOURCE_ITEM_ID)) else {
+            return;
+        };
+        if let Err(e) = item.set_checked(raw) {
+            tracing::warn!("failed to set the Raw Source check to {}: {}", raw, e);
+        }
+    });
+}
+
+/// The payload of [`FORMAT_TOOLBAR_STATE_EVENT`].
+#[derive(serde::Deserialize)]
+struct FormatToolbarState {
+    label: String,
+    shown: bool,
+}
+
+/// Keep the check of View ▸ Show Formatting Toolbar on the front window's value
+/// (requirements.md #74 第4段 4-2), the same way as Raw Source: only the front
+/// window's report moves the check. No Tauri command: the frontend emits an event.
+pub fn listen_format_toolbar_state(app: &AppHandle<Wry>) {
+    let handle = app.clone();
+    app.listen(FORMAT_TOOLBAR_STATE_EVENT, move |event| {
+        let state: FormatToolbarState = match serde_json::from_str(event.payload()) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!("{}: unreadable payload: {}", FORMAT_TOOLBAR_STATE_EVENT, e);
+                return;
+            }
+        };
+        let front = focused_or_first_window(&handle).map(|w| w.label().to_string());
+        if !raw_check_applies(front.as_deref(), &state.label) {
+            return;
+        }
+        let Some(item) = handle.menu().and_then(|menu| find_check_menu_item(&menu, SHOW_FORMAT_TOOLBAR_ITEM_ID)) else {
+            return;
+        };
+        if let Err(e) = item.set_checked(state.shown) {
+            tracing::warn!("failed to set the Show Formatting Toolbar check to {}: {}", state.shown, e);
+        }
+    });
+}
+
+/// muda flips a `CheckMenuItem`'s check on every click before the event arrives.
+/// Undo that flip so the check of View ▸ Raw Source / Show Formatting Toolbar
+/// follows only the window's report (`raw_source_state` / `format_toolbar_state`,
+/// see [`listen_raw_source_state`] / [`listen_format_toolbar_state`]). A surface
+/// with no listener (code, text, image, Dashboard …) then leaves the check as is.
+pub fn revert_check_toggle(app: &AppHandle<Wry>, id: &str) {
+    let Some(item) = app.menu().and_then(|menu| find_check_menu_item(&menu, id)) else {
+        return;
+    };
+    match item.is_checked() {
+        Ok(checked) => {
+            if let Err(e) = item.set_checked(!checked) {
+                tracing::warn!("failed to revert the check of {}: {}", id, e);
+            }
+        }
+        Err(e) => tracing::warn!("failed to read the check of {}: {}", id, e),
+    }
+}
+
+/// Whether a `raw_source_state` report from the window `label` moves the check
+/// of View ▸ Raw Source: only the front window's value does (判断 9).
+pub fn raw_check_applies(front: Option<&str>, label: &str) -> bool {
+    front == Some(label)
+}
+
+/// The check menu item `id`, at the top level of `menu` or one level down in a
+/// submenu (see [`find_menu_item`]).
+fn find_check_menu_item<R: Runtime>(menu: &Menu<R>, id: &str) -> Option<CheckMenuItem<R>> {
+    if let Some(item) = menu.get(id).and_then(|kind| kind.as_check_menuitem().cloned()) {
+        return Some(item);
+    }
+    menu.items().unwrap_or_default().into_iter().find_map(|kind| {
+        kind.as_submenu()
+            .and_then(|submenu| submenu.get(id))
+            .and_then(|found| found.as_check_menuitem().cloned())
+    })
+}
+
 /// The plain menu item `id`, looked up at the top level of `menu` and then one
 /// level down in each submenu — where every item of this app's menu bar lives.
 fn find_menu_item<R: Runtime>(menu: &Menu<R>, id: &str) -> Option<MenuItem<R>> {
@@ -1209,9 +1554,9 @@ pub fn handle_new_window_click(app: &AppHandle<Wry>) {
 /// the defaults first (an existing file — even a broken one — is left as it
 /// is), then a new window opens with the settings folder as its root and the
 /// file as its document, built the same way as File ▸ New Window. The file is
-/// JSON, i.e. text, so it is edited and saved with the editor of
-/// requirements.md #48. Failures are logged: the menu has nowhere to return an
-/// error to.
+/// JSON, i.e. text, so it is edited and saved in the code editor of
+/// requirements.md #74 (契約5・(ah)). Failures are logged: the menu has
+/// nowhere to return an error to.
 pub fn handle_settings_click(app: &AppHandle<Wry>) {
     let Some(path) = crate::settings::default_settings_path() else {
         tracing::warn!("Settings…: no home directory to keep the settings file in");
@@ -1315,6 +1660,8 @@ impl Drop for CheckForUpdatesInFlight {
 /// Handle the App menu's "Check for Updates…" click (requirements.md #67
 /// 契約7・8・10): check right away and always answer with a native dialog —
 /// Download / Later when a newer release exists, otherwise a single OK.
+/// On a preview build (requirements.md #87 契約4) nothing is fetched: the
+/// dialog says it is a development build and names `scripts/install-dev.sh`.
 ///
 /// A click while a check (or its dialog) is still up is ignored, so a
 /// double press never sends a second request or stacks a second dialog.
@@ -1329,6 +1676,18 @@ pub fn handle_check_for_updates_click(app: &AppHandle<Wry>) {
         return;
     }
     let guard = CheckForUpdatesInFlight;
+    // A preview (開発版, requirements.md #87 契約4) does not ask GitHub: its
+    // releases are in the private development repository. Say so, and how
+    // newer ones are installed.
+    if crate::features::current_channel() == crate::channel::Channel::Preview {
+        let dialog = crate::update_check::preview_check_dialog(env!("VELLIS_BUILD_NAME"));
+        app.dialog()
+            .message(dialog.body)
+            .title(dialog.title)
+            .kind(MessageDialogKind::Info)
+            .show(move |_| drop(guard));
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let outcome = crate::update_check::run_manual_check(&app).await;

@@ -743,14 +743,34 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		};
 		expect(Object.keys(pkg.dependencies).sort()).toEqual(
 			[
+				// 要件74 第1段(2026-11-16・契約20 (am) 決定)= CodeMirror 6 の部品 6 つ(要件側更新=req-74.md 棚卸し 1)。
+				'@codemirror/commands',
+				'@codemirror/language',
+				'@codemirror/language-data',
+				'@codemirror/state',
+				'@codemirror/view',
+				'@lezer/highlight',
 				'@shikijs/rehype',
 				'@tauri-apps/api',
 				'@tauri-apps/plugin-dialog',
 				'@tauri-apps/plugin-opener',
-				'hast-util-to-mdast',
+				// 要件74 第2段 2-5(2026-11-17 仮・契約20・棚卸し 1=承認済み (r)(as)): 撤去で hast-util-to-mdast を外した
 				'mdast-util-to-markdown',
 				'mdast-util-to-string',
 				'mermaid',
+				// 要件74 第2段 2-1(2026-11-17・仮の前提=判断 3 で prosemirror-schema-list を含む・契約20 (D))= ProseMirror の部品 9 つ(要件側更新=req-74.md 棚卸し 1)。
+				'prosemirror-commands',
+				'prosemirror-dropcursor',
+				'prosemirror-gapcursor',
+				'prosemirror-history',
+				'prosemirror-inputrules',
+				'prosemirror-keymap',
+				'prosemirror-model',
+				'prosemirror-schema-list',
+				'prosemirror-state',
+				'prosemirror-tables',
+				'prosemirror-transform',
+				'prosemirror-view',
 				'rehype-parse',
 				'rehype-raw',
 				'rehype-sanitize',
@@ -971,14 +991,20 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		const hash = (rel: string) =>
 			createHash('sha256').update(readFileSync(resolve(REPO_ROOT, rel))).digest('hex');
 		expect(hash('src/components/Viewer.find.wiring.test.ts')).toBe(
-			'7c94a6251ddd306a0b74ad6027dbf7bf0f08a75cf8c87a73bfc25f6793ba7775'
+			'8cd9779f989d21aa4ba27a946b03fd38f06f36884ec7e9e1077afc657dd3e3d4'
 		);
 		// 要件#49 追補h(3)(2026-10-05)で AC-54-14 の edit.ts 固定値を更新したため、このファイルの固定値も更新
 		// 要件#49 追補i(3)(2026-10-07)で AC-54-14 の edit.ts 固定値を再び更新したため、このファイルの固定値も更新
 		// 要件#8 追補a(4)(2026-10-19)で AC-54-14 の html-viewer.ts 固定値を更新したため、このファイルの固定値も更新
 		// 要件#8 追補d・要件#54 追補e(2026-10-26・由谷承認・Issue #550・#551・#380・#705)で AC-54-14 の html-viewer.ts と edit.ts の固定値を更新したため、このファイルの固定値も更新
+		// 要件#74 第1段(2026-11-16・契約22・棚卸し 1・2)で AC-54-14 の依存の一覧に CodeMirror の 6 つを足したため、このファイルの固定値も更新
+		// 要件#74 第2段 2-1(2026-11-17・仮の前提)で AC-54-14 の依存の一覧に ProseMirror の 9 つを足したため、このファイルの固定値も更新
+		// 要件#74 第2段 2-5(2026-11-17 仮・契約21・棚卸し 2・4=承認済み (r)(as))で AC-54-14 の依存から hast-util-to-mdast を外し src/markdown/edit.ts の固定を外したため、
+		// また Viewer.find.wiring のブロック編集中の Esc の件を編集面の件に書き直したため、この 2 本の固定値を更新
+		// (6c8768d で Viewer.find.wiring を撤去の後の形=面の検索の形に直したため、その固定値を再び更新)
+		// (要件74 第3段 3-1 で依存の固定に prosemirror-gapcursor / prosemirror-inputrules、3-5 で prosemirror-dropcursor を足したため=棚卸し 1・2、再び更新)
 		expect(hash('src/lib/find-in-document.acceptance.test.ts')).toBe(
-			'4b3a7a4ea4e58563d7321e650b509517f808e2c5566c60fbbd79bd03b634bf06'
+			'dc44fc88b050da5b87dfffe5874560bf60ec796f03dce3245543e46e3d794d1d'
 		);
 	});
 });

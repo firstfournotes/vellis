@@ -145,16 +145,19 @@ function countText(container: HTMLElement): string {
 	return ((el as HTMLElement).textContent ?? '').trim();
 }
 
+// 要件74 第2段 2-5(2026-11-17 仮・契約17・棚卸し 7=承認済み (r)(as)): Markdown は常に ProseMirror の面になり、面の検索は DOM を変えない
+// (CSS Custom Highlight API=2-2 の AC-74-18・37。無い jsdom では塗らず <mark> の代替も出さない)。現在の一致の番目は `n of m` の
+// 表示で見る(`currentMarkIndex` は `n of m` の n − 1)。面の DOM に <mark data-vellis-find> が混入しないことも見る。
 function marks(container: HTMLElement): HTMLElement[] {
 	return [...container.querySelectorAll('mark[data-vellis-find]')] as HTMLElement[];
 }
 
-/** 現在の一致(`data-vellis-find-current`)が全 mark の中で何番目か(0 始まり・無ければ -1)。 */
+/** 現在の一致が何番目か(0 始まり)= find-count の `n of m` の n − 1。 */
 function currentMarkIndex(container: HTMLElement): number {
-	const all = marks(container);
-	const current = all.filter((m) => m.hasAttribute('data-vellis-find-current'));
-	expect(current, 'exactly one current mark').toHaveLength(1);
-	return all.indexOf(current[0]);
+	const m = /^(\d+) of (\d+)$/.exec(countText(container));
+	expect(m, `find-count reads "n of m": ${countText(container)}`).not.toBeNull();
+	expect(marks(container), '面の DOM に <mark> は混入しない').toHaveLength(0);
+	return Number(m![1]) - 1;
 }
 
 async function waitForCount(container: HTMLElement, expected: string) {
@@ -191,8 +194,8 @@ describe('要件#55 追補b・AC-55-21: Viewer の findInitialIndex — findRequ
 		await waitForCount(container, `3 of ${TOTAL}`);
 
 		expect(findInput(container).value).toBe('zebra');
-		expect(marks(container)).toHaveLength(TOTAL);
 		expect(currentMarkIndex(container)).toBe(2);
+		expect(container.querySelector('[data-testid="markdown-editor"] .ProseMirror'), 'Markdown は面').not.toBeNull();
 	});
 
 	it('findInitialIndex=1 なら 2 of 4(番目=index + 1)', async () => {
