@@ -371,6 +371,17 @@
 	 */
 	let toolbarHeight = $state(0);
 
+	/**
+	 * Issue #848: 開いている検索バーの実寸(閉じていれば 0)。帯・知らせ(sticky)を検索バーの下に積むために測る。
+	 */
+	let findBarHeight = $state(0);
+
+	/**
+	 * FindBar.svelte の `.find-bar--sticky` の `top: calc(var(--vellis-find-bar-top) + 8px)` の 8px
+	 * (札の上の間)。検索バーが貼り付いたときの上端=ツールバーの直下 + この値。
+	 */
+	const FIND_BAR_STICKY_GAP = 8;
+
 	/** 要件#53: html 種別か(閲覧は HtmlViewer の iframe・検索は複製面)。HTML の編集は要件79 まで無い。 */
 	let htmlDocument = $derived(detectFileType(document.uri) === 'html');
 
@@ -388,6 +399,12 @@
 
 	/** 検索バーを出しているか。ウインドウ単位・揮発(localStorage へ保存しない)。 */
 	let findOpen = $state(false);
+
+	/**
+	 * Issue #848: 重なりの帯・削除の帯・取り込みの知らせを貼り付ける高さ(`--vellis-banner-top`)。
+	 * ツールバーの直下。検索バーが開いている間はその下端(貼り付いた上端 + 実寸)。
+	 */
+	let bannerTop = $derived(toolbarHeight + (findOpen ? FIND_BAR_STICKY_GAP + findBarHeight : 0));
 
 	/**
 	 * Esc を一時 UI のバーへ譲るか(要件#54 契約⑤・要件#60 契約⑦)。バーは編集より
@@ -472,23 +489,48 @@
 	);
 
 	/**
-	 * 追補c(1): 検索バーを貼り付ける高さ=ツールバーの実寸を測る。
+	 * 追補c(1): 検索バーを貼り付ける高さ=ツールバーの実寸を測る。Issue #848 から、帯・知らせも
+	 * ツールバーの直下に貼り付くので、検索バーが閉じていても測る。
 	 *
 	 * `bind:clientHeight` を使わないのは ResizeObserver を呼ぶため(テストの JSDOM
-	 * には無い)。ツールバーの中身が変わる契機(編集の出入り・種別)と窓の幅の
-	 * 変化だけ測り直せば足りる ―― 測れないときは 0 で上端に貼り付く。
+	 * には無い)。ツールバーの中身が変わる契機(編集の出入り・種別・Unsaved の札・
+	 * 書式のツールバーの 2 段目)と窓の幅の変化だけ測り直せば足りる ―― 測れないときは
+	 * 0 で上端に貼り付く。
 	 */
 	$effect(() => {
-		if (!findOpen) return;
 		const header = toolbarEl;
 		if (!header) return;
 		// ツールバーのボタンが増減する(=高さが変わりうる)契機。
 		void document.uri;
+		void anyFace;
+		void windowState.fileEditor?.dirty;
+		void formatToolbarHandle;
 		const measure = () => {
 			toolbarHeight = header.offsetHeight;
 		};
 		measure();
 		const view = header.ownerDocument.defaultView;
+		view?.addEventListener('resize', measure);
+		return () => view?.removeEventListener('resize', measure);
+	});
+
+	/**
+	 * Issue #848: 検索バーの実寸を測る(帯・知らせをその下に積む)。置換の行の出し入れで高さが変わる。
+	 */
+	$effect(() => {
+		if (!findOpen) {
+			findBarHeight = 0;
+			return;
+		}
+		const scroller = viewerEl;
+		if (!scroller) return;
+		void replaceOpen;
+		void canReplace;
+		const measure = () => {
+			findBarHeight = scroller.querySelector<HTMLElement>('.find-bar--sticky')?.offsetHeight ?? 0;
+		};
+		measure();
+		const view = scroller.ownerDocument.defaultView;
 		view?.addEventListener('resize', measure);
 		return () => view?.removeEventListener('resize', measure);
 	});
@@ -911,7 +953,7 @@
 	 * sticky で上に重なる帯(ツールバー・開いていれば検索バー)の直下 ―― へ運ぶ。
 	 * 検索の `scrollRangeIntoContainer` と同じく容器の `scrollTop` だけを動かし、
 	 * 祖先は巻き込まない。帯の高さはスクロールのたびに実寸を読む ―― `toolbarHeight`
-	 * は検索バーを開いたときにしか測られない(閉じた窓では 0 のまま)。
+	 * は決まった契機でしか測り直さないので、運ぶ瞬間の値を使う。
 	 */
 	function scrollElementIntoViewer(el: HTMLElement) {
 		const scroller = viewerEl;
@@ -981,8 +1023,15 @@
 <!--
 	要件#54 追補c(1): 検索バーはツールバーの直下に貼り付く(sticky)。その `top` は
 	ツールバーの実寸なので、ここで測って CSS カスタムプロパティに渡す。
+	Issue #848: 重なりの帯・削除の帯・取り込みの知らせも貼り付く。その `top`(`--vellis-banner-top`)は
+	ツールバーの直下、検索バーが開いている間はその下端。
 -->
-<article class="viewer" bind:this={viewerEl} style:--vellis-find-bar-top="{toolbarHeight}px">
+<article
+	class="viewer"
+	bind:this={viewerEl}
+	style:--vellis-find-bar-top="{toolbarHeight}px"
+	style:--vellis-banner-top="{bannerTop}px"
+>
 	<header class="viewer-toolbar" bind:this={toolbarEl}>
 		<button
 			type="button"
@@ -1049,8 +1098,8 @@
 			</header>
 	{#if findOpen}
 		<!--
-			要件#54 契約①: 閲覧面の上部に出す検索バー。ツールバーの直下に敷く1行で、
-			本文の上には重ねない(外部変更の帯・構造変化の通知と同じ流儀)。
+			要件#54 契約①: 閲覧面の上部に出す検索バー。ツールバーの直下に貼り付く1行。
+			外部変更の帯・取り込みの知らせは、開いている間はこの下に貼り付く(Issue #848)。
 		-->
 		<FindBar
 			query={findQuery}
@@ -1312,16 +1361,23 @@
 	}
 
 	/*
-	 * 要件#48 契約⑥: 外部変更の衝突表示。ツールバーの直下に敷く1行で、本文の
-	 * 上に重ねない — 編集中の文字を隠さないため。sticky はツールバー側だけに
-	 * 掛かっているので、この帯は本文と一緒にスクロールして退く。
+	 * 要件#48 契約⑥・Issue #848(由谷 2026-11-26): 外部変更の重なりの帯・削除の帯。
+	 * ツールバーの直下に貼り付く(sticky)1行 —— 長い文書を下までスクロールして直して
+	 * いても画面の外に出ない。`top` は Viewer が測って `--vellis-banner-top` に入れる
+	 * (ツールバーの実寸。検索バーが開いている間はその下端)。本文の上端(帯の高さ分)に
+	 * 載るのは受け入れる。z-index は検索バー(9)より下・本文より上。地の色は半透明の
+	 * 警告色なので、下に本文の地(--color-bg-surface)を敷いて文字を透かさない。
 	 */
 	.external-change {
+		position: sticky;
+		top: var(--vellis-banner-top, 0px);
+		z-index: 8;
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		padding: 6px 12px;
-		background-color: var(--color-warning-soft);
+		background-color: var(--color-bg-surface);
+		background-image: linear-gradient(var(--color-warning-soft), var(--color-warning-soft));
 		border-bottom: 1px solid var(--color-warning);
 		font-size: var(--text-sm);
 		color: var(--color-text-primary);
@@ -1333,10 +1389,14 @@
 	}
 
 	/*
-	 * 要件#53 契約④: 構造変化で確定を拒否したときの通知。外部変更の帯と同じ場所・
-	 * 同じ高さに敷いて、本文の上に重ねない(編集中の文字を隠さない)。
+	 * 要件#74 契約13・Issue #848: 重ならない外部変更を取り込んだ知らせ(と閾値超えの知らせ)。
+	 * 外部変更の帯と同じ場所・同じ高さ・同じ貼り付き方(ツールバーの直下、検索バーが
+	 * 開いている間はその下)。
 	 */
 	.merged-notice {
+		position: sticky;
+		top: var(--vellis-banner-top, 0px);
+		z-index: 8;
 		padding: 6px 12px;
 		background-color: var(--color-bg-raised);
 		border-bottom: 1px solid var(--color-border);

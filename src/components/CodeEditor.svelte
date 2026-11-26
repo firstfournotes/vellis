@@ -239,6 +239,9 @@
 	}
 
 	function applyNow(payload: DocumentPayload): FileChangedDecision {
+		// Issue #848: 自分のエコーでない外部変更を取り込んだ(当てた・マージした・帯にした)ら、自分の保存のハッシュは
+		// 忘れる。残すと、外部が自分の以前の保存と同じ中身に戻した書き込みがエコーとして捨てられる。
+		selfHash = null;
 		const incoming = payload.content;
 		if (incoming === currentText) {
 			setBase(incoming);
@@ -351,6 +354,8 @@
 			}
 			if (conflict && theirs !== null && payload.content === theirs) return 'external-conflict';
 			if (composing) {
+				// Issue #848: 待たせた外部変更も取り込みに数える(変換中に自分の以前の保存の中身が届いても捨てない)。
+				selfHash = null;
 				pendingFile = payload;
 				return 'apply';
 			}
