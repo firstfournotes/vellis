@@ -73,6 +73,9 @@
 	import { announceRawSource, fromRaw, MENU_RAW_SOURCE_EVENT, toRaw, watchFocusForRawSource } from '../editor/raw-sync';
 	import { listen } from '$lib/events';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
+	import { currentAlertVisibility } from '$lib/alert-visibility';
+	import { applyAlertStatesToPrint } from '$lib/alert-dom';
+	import { alertVisibilityPlugin, faceAlerts } from '../editor/alert-visibility-plugin';
 	import RawSourceEditor from './RawSourceEditor.svelte';
 	import {
 		applyCodeTheme,
@@ -310,6 +313,8 @@
 			showNotice(MERGED_NOTICE);
 			return 'apply';
 		}
+		// 要件#89 契約12: 重なりの相手が変わったら version を進める(開いているマージの画面が塊を作り直す)
+		if (theirs !== incoming) stateVersion++;
 		theirs = incoming;
 		conflict = true;
 		return 'external-conflict';
@@ -334,6 +339,8 @@
 			// 実機ゲート A・事後確認 (19)(20): front matter は編集面のどの操作でも消えず、先頭以外にはできない。札の
 			// Backspace / Delete は keymap より先に食う(取引を起こさない)
 			frontMatterGuardPlugin(),
+			// 要件#90: GitHub Alerts の隠す・畳む・開く(decoration だけ=文書は変えない)。矢印キーで隠した枠を飛ばすので keymap より前
+			alertVisibilityPlugin(),
 			keymap(MARKDOWN_KEYMAP),
 			...markdownGapCursor(),
 			dropCursor({ color: false, class: 'vellis-dropcursor' }),
@@ -389,11 +396,19 @@
 		}
 	}
 
+	/** 要件#90 契約6: 印刷の文書は画面と同じ(隠した枠は刷らない・印は刷らない・畳んだ枠は畳んだ形)。 */
+	function applyAlertsToPrint() {
+		if (!printEl) return;
+		const states = view && !raw ? faceAlerts(view.state) : [];
+		applyAlertStatesToPrint(printEl, states, currentAlertVisibility());
+	}
+
 	function onBeforePrint() {
 		const text = currentText;
 		if (preparedPrint && preparedPrint.text === text) {
 			printHtml = preparedPrint.html;
 			flushSync();
+			applyAlertsToPrint();
 			if (printEl) void mountMermaid(printEl);
 			return;
 		}
@@ -402,6 +417,7 @@
 			preparedPrint = { text, html };
 			printHtml = html;
 			flushSync();
+			applyAlertsToPrint();
 			if (printEl) void mountMermaid(printEl);
 		});
 	}
@@ -489,6 +505,9 @@
 			}
 			void readDisk().then((read) => {
 				if (read === null) return;
+				// Issue #851 (3): ディスクの版を取り込んだので、自分の以前の保存の印も忘れる(applyNow と同じ)。
+				// 外部がその中身に戻しても、エコーとして捨てずに普通の外部変更として扱う。
+				selfHash = null;
 				setBase(read);
 				syncWindowDocument(read, undefined);
 			});
@@ -510,6 +529,24 @@
 		showSaveConflict() {
 			theirs = null;
 			conflict = true;
+		},
+		// 要件#89 契約11: マージの Apply(取引 1 つ・履歴に積む)。rendered は変わったブロックだけを置き換え(外部変更の取り込みと
+		// 同じ当て方)、raw は原文の CodeMirror に。基準の版はマージに使ったディスクの版
+		applyMerge(merged: string, disk: string) {
+			if (merged !== currentText) {
+				if (raw) rawEditor?.applyText(merged);
+				else if (view) {
+					const { tr, origin, generation } = replaceChangedBlocks(view.state, merged, { addToHistory: true, keepOrigin: model.origin });
+					model = { ...model, origin, generation };
+					if (tr) view.dispatch(closeHistory(tr));
+					else recompute();
+				}
+			}
+			selfHash = null;
+			conflict = false;
+			theirs = null;
+			setBase(disk);
+			syncWindowDocument(disk, undefined);
 		},
 		reset(next: string) {
 			resetDocument(next);

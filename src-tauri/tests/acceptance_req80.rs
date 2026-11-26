@@ -310,7 +310,8 @@ fn squash(s: &str) -> String {
 
 // 要件側更新(2026-11-17 仮・要件#74 第2段 2-3・(ao)・棚卸し 3): Toggle Full Width の直後に `raw_source_item`(View ▸ Raw Source)。13 → 14。
 // 要件側更新(2026-11-17 要件#74 第4段 4-2・4-5・棚卸し 3): Raw Source の直後に `show_format_toolbar_item`(View ▸ Show Formatting Toolbar)。14 → 15。
-const EXPECTED_VIEW: [&str; 15] = [
+// 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts ▸(`alerts_menu`)を Show Formatting Toolbar の直後に。15 → 16。
+const EXPECTED_VIEW: [&str; 16] = [
     "show_tab_bar_item",
     "show_all_tabs_item",
     "view_tab_sep",
@@ -320,6 +321,7 @@ const EXPECTED_VIEW: [&str; 15] = [
     "toggle_full_width_item",
     "raw_source_item",
     "show_format_toolbar_item",
+    "alerts_menu",
     "view_chrome_sep",
     "zoom_in_item",
     "zoom_out_item",
@@ -391,7 +393,7 @@ fn view_menu_holds_reload_file_and_its_separator_right_after_the_tab_items() {
     let idents = submenu_item_idents(view);
     assert_eq!(
         idents, EXPECTED_VIEW,
-        "the View menu must hold exactly these 15 entries in this order (requirement #80 契約 2, (r); #74 2-3 adds Raw Source; #74 4-2 adds Show Formatting Toolbar): found {idents:?}"
+        "the View menu must hold exactly these 16 entries in this order (requirement #80 契約 2, (r); #74 2-3 adds Raw Source; #74 4-2 adds Show Formatting Toolbar; #90 adds Alerts): found {idents:?}"
     );
     let separators = separator_bindings(&code);
     for sep in ["view_tab_sep", "view_reload_sep", "view_chrome_sep", "view_sep"] {

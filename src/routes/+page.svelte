@@ -59,7 +59,7 @@
 		pickFolderAndSetRoot,
 		versionAfterFailedInit
 	} from '$lib/root-picker';
-	import { registerDashboardListener, toggleDashboard } from '$lib/dashboard';
+	import { planDashboardOpen, registerDashboardListener, toggleDashboard } from '$lib/dashboard';
 	import { bookmarks } from '../stores/bookmarks.svelte';
 	import { getBuildInfo } from '$lib/buildInfo';
 	import {
@@ -106,6 +106,7 @@
 	import { registerRootSwitchRequestListener, switchRootConfirmed } from '$lib/root-switch-request';
 	import { handleCloseRequested } from '$lib/close-window';
 	import { MENU_SAVE_EVENT } from '$lib/save-document';
+	import { MENU_SAVE_AS_EVENT, saveAs, type SaveAsDeps } from '$lib/save-as';
 	import { DEFAULT_ZOOM, isZoomTarget, loadZoom } from '$lib/zoom';
 	import {
 		loadExplorerZoom,
@@ -132,6 +133,7 @@
 		type ResolvedTheme
 	} from '$lib/theme';
 	import { effectiveMode, registerUiChromeListeners, restoreUiChrome } from '$lib/ui-chrome';
+	import { loadAlertVisibility, registerAlertVisibilityListeners } from '$lib/alert-visibility';
 	import type { PageData } from './$types';
 	import '../styles/theme.css';
 	import '../styles/app.css';
@@ -146,6 +148,8 @@
 	// already has them. Choosing, saving and following other windows live in
 	// `$lib/ui-chrome`; the theme itself (resolved in Rust) in `$lib/theme`.
 	restoreUiChrome();
+	// 要件#90 契約7: GitHub Alerts の表示の設定(アプリ全体で 1 値)も描く前に読む。メニューと他の窓の選択は下の onMount で受ける。
+	loadAlertVisibility();
 
 	// The resolved theme now in effect. `null` = the Default of theme.css
 	// (`get_theme` was unavailable). Not drawn from, so not `$state`.
@@ -246,6 +250,8 @@
 		void registerUiChromeListeners({
 			onEffectiveModeChange: () => redrawCodeHighlight()
 		}).then(keep);
+		// 要件#90 契約1・7: View ▸ Alerts(面の無い窓でも受ける)と他の窓の選択(storage)
+		void registerAlertVisibilityListeners().then(keep);
 		return () => {
 			disposed = true;
 			for (const off of unlisteners) off();
@@ -902,6 +908,44 @@
 		if (windowState.fileEditor) await saveFileEditor(windowState.fileEditor);
 	}
 
+	/**
+	 * 要件#89 契約4: Save As… で書けた新しいファイルを開く手段。未保存の確認は挟まない(中身は書けている)。
+	 * 中=Explorer の行を押したのと同じ open(開いたら Recent Files の行と同じく祖先を展開して行へ運ぶ)。
+	 * 外=Dashboard の開き方と同じ順(planDashboardOpen → set_root → 文書 → 画面へ移す)。
+	 */
+	const saveAsDeps: SaveAsDeps = {
+		openInRoot: async (uri) => {
+			try {
+				windowState.setDocument(await openForDisplay(uri));
+			} catch (err) {
+				alert(openFileFailedMessage(err));
+				return;
+			}
+			void handleRecentFileOpened(uri);
+		},
+		openOutsideRoot: async (uri) => {
+			const plan = planDashboardOpen({ kind: 'file', uri }, windowState.root || null);
+			let root: RootPayload | null = null;
+			if (plan.root !== null) {
+				try {
+					root = await invoke<RootPayload>('set_root', { uri: plan.root });
+				} catch (err) {
+					alert(openFolderFailedMessage(err));
+					return;
+				}
+			}
+			let doc: DocumentPayload | null = null;
+			try {
+				doc = await openForDisplay(uri);
+			} catch (err) {
+				if (root) handleDashboardOpened(root, null);
+				alert(openFileFailedMessage(err));
+				return;
+			}
+			handleDashboardOpened(root, doc);
+		}
+	};
+
 	// 購読の解除があるので await を挟まない専用の onMount に分けている。
 	onMount(() => {
 		let unlisten: (() => void) | null = null;
@@ -910,6 +954,11 @@
 			// 要件#74 契約21: 編集は通常の機能(フラグなし)。Save は面があれば効く。
 			listen(MENU_SAVE_EVENT, () => {
 				void saveCurrentEdits();
+			}),
+			// 要件#89 契約1〜7: File ▸ Save As…。編集できる文書でだけ効く(saveAs が見る)。Dashboard の間は後ろの面に当てない。
+			listen(MENU_SAVE_AS_EVENT, () => {
+				if (rootPicker.open) return;
+				void saveAs(windowState.fileEditor, saveAsDeps);
 			}),
 			// 要件#74 契約8: Format ▸ の項目。前面の面が Markdown の編集面のときだけ当たる(raw・コード・読み取り専用・
 			// HTML では runFormatCommand が何もしない)。Dashboard の間は後ろの面に当てない(要件#83 契約15)。

@@ -1199,8 +1199,9 @@ fn tauri_commands_are_not_added() {
     // 要件#48 追補m(2026-10-26・Issue #750)で `switch_root_confirmed` が 1 つ増えて 37・36=由谷承認 2026-10-26。
     // 要件#56 第1段(2026-11-02・契約 3 のテーマ)で command `get_theme` が 1 つ増えて 38・37=由谷承認 2026-11-03。
     // 要件#83(2026-11-05・契約 16・承認 2)で Dashboard と Bookmark の command が 7 つ増えて 45・44。
-    assert_eq!(blocks[0].len(), 45, "{:?}", blocks[0]);
-    assert_eq!(blocks[1].len(), 44, "{:?}", blocks[1]);
+    // 要件#89(2026-11-26)で改めた(docs/requirements/req-89.md「要件側の更新」): Save As… の `save_document_as` が 1 つ増えて 46・45。
+    assert_eq!(blocks[0].len(), 46, "{:?}", blocks[0]);
+    assert_eq!(blocks[1].len(), 45, "{:?}", blocks[1]);
 }
 
 /// 42. Rust の `INVALID_PATTERN_MESSAGE` と TS の `FIND_IN_FOLDER_INVALID_REGEX` が同じ値。

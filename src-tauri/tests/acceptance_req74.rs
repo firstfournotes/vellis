@@ -493,13 +493,15 @@ fn ac74_23_capabilities_and_tauri_conf_are_unchanged() {
     );
 }
 
-/// 19. `generate_handler!` の 2 つの一覧は 45 / 44 のまま(command は増やさない。並びは AC-84-6 の 23 が固定)。
+/// 19. `generate_handler!` の 2 つの一覧は 46 / 45(並びは AC-84-6 の 23 が固定)。
+///     要件89(2026-11-26)で改めた(docs/requirements/req-89.md「要件側の更新」): Save As… の command `save_document_as` を足して
+///     45/44 → 46/45。テスト名の数は要件74 当時のまま残す(名前は変えない)。
 #[test]
 fn ac74_23_generate_handler_lists_keep_45_and_44_commands() {
     let lists = generate_handler_lists(&lib_rs_code());
     assert_eq!(lists.len(), 2);
-    assert_eq!(lists[0].len(), 45, "webdriver list");
-    assert_eq!(lists[1].len(), 44, "default list");
+    assert_eq!(lists[0].len(), 46, "webdriver list (45 + save_document_as, 要件89)");
+    assert_eq!(lists[1].len(), 45, "default list (44 + save_document_as, 要件89)");
     assert!(lists[0].contains(&"save_document".to_string()));
     assert!(lists[1].contains(&"save_document".to_string()));
 }

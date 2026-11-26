@@ -163,6 +163,115 @@
 .markdown-body .markdown-alert-warning { --md-alert-color: var(--md-color-alert-warning); }
 .markdown-body .markdown-alert-caution { --md-alert-color: var(--md-color-alert-caution); }
 
+/* --- Hiding and folding alerts (requirement #90) ---
+ * Screen-only state: the Markdown is never rewritten. A hidden alert keeps its
+ * content in the DOM (find counts it) under the `hidden` attribute; the place it
+ * leaves shows a marker (a thin line in the alert colour and a label such as
+ * "NOTE 2", drawn from `data-label` so its text stays out of find and copy).
+ * A folded alert shows its title and the first words of its body on one line. */
+.markdown-body blockquote.markdown-alert[hidden] {
+	display: none !important;
+}
+
+.markdown-body blockquote.markdown-alert[data-alert-state] > .markdown-alert-title {
+	cursor: pointer;
+}
+
+.markdown-body blockquote.markdown-alert[data-alert-state] > .markdown-alert-title:focus-visible {
+	outline: 2px solid var(--md-alert-color, var(--md-color-blockquote-border));
+	outline-offset: 2px;
+}
+
+/* On the editing surface the title is not part of the document: keep it out
+ * of text selection there. The read-only rendering keeps it selectable, so a
+ * copy still carries it as before. */
+.ProseMirror blockquote.markdown-alert > .markdown-alert-title {
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.markdown-body blockquote.markdown-alert[data-alert-state="collapsed"] {
+	display: flex;
+	align-items: baseline;
+	gap: 0.5em;
+}
+
+.markdown-body blockquote.markdown-alert[data-alert-state="collapsed"] > :not(.markdown-alert-title) {
+	display: none;
+}
+
+.markdown-body blockquote.markdown-alert[data-alert-state="collapsed"] > .markdown-alert-title {
+	flex: none;
+	margin: 0;
+}
+
+.markdown-body blockquote.markdown-alert[data-alert-state="collapsed"]::after {
+	content: attr(data-alert-summary);
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--md-color-blockquote-text);
+}
+
+.markdown-body .vellis-alert-marker {
+	--md-alert-color: var(--md-color-blockquote-border);
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	margin: 0 0 1em;
+}
+
+.markdown-body .vellis-alert-marker[data-alert-kind="note"] { --md-alert-color: var(--md-color-alert-note); }
+.markdown-body .vellis-alert-marker[data-alert-kind="tip"] { --md-alert-color: var(--md-color-alert-tip); }
+.markdown-body .vellis-alert-marker[data-alert-kind="important"] { --md-alert-color: var(--md-color-alert-important); }
+.markdown-body .vellis-alert-marker[data-alert-kind="warning"] { --md-alert-color: var(--md-color-alert-warning); }
+.markdown-body .vellis-alert-marker[data-alert-kind="caution"] { --md-alert-color: var(--md-color-alert-caution); }
+
+.markdown-body .vellis-alert-marker::after {
+	content: "";
+	flex: 1 1 auto;
+	border-top: 1px solid var(--md-alert-color);
+}
+
+.markdown-body .vellis-alert-marker-label {
+	flex: none;
+	margin: 0;
+	padding: 0 0.4em;
+	font: inherit;
+	font-size: 0.75em;
+	font-weight: 600;
+	line-height: 1.5;
+	color: var(--md-alert-color);
+	background: none;
+	border: 1px solid var(--md-alert-color);
+	border-radius: 0.25em;
+	cursor: pointer;
+}
+
+.markdown-body .vellis-alert-marker-label::before {
+	content: attr(data-label);
+}
+
+@media screen {
+	.markdown-body > .vellis-alert-marker {
+		max-width: var(--doc-measure);
+	}
+
+	:root[data-doc-measure="full"] .markdown-body > .vellis-alert-marker {
+		max-width: none;
+	}
+}
+
+/* The marker is screen-only: the paper carries what the screen shows minus the
+ * markers (requirement #90 contract 6). print.css is pinned, so the rule lives here. */
+@media print {
+	.markdown-body .vellis-alert-marker {
+		display: none !important;
+	}
+}
+
 .markdown-body hr {
 	height: 0.25em;
 	padding: 0;

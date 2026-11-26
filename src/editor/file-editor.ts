@@ -56,6 +56,12 @@ export interface FileEditorHandle {
 	baseText?(): string;
 	/** 第4段 4-1: 重なりの帯の相手(届いた内容)。保存の照合の衝突から来たときはディスクを読み直して返す。衝突でなければ null。 */
 	conflictText?(): Promise<string | null>;
+	/**
+	 * 要件#89 契約11: マージの Apply。`merged` を面に取引 1 つで入れる(履歴に積む=Command + Z 1 回で前の文字列に戻る。
+	 * 外部変更の取り込みとは違い履歴に残す)。基準の版を `disk`(マージに使ったディスクの版)にし、重なりを下ろす。
+	 * dirty は文字列の比較のまま。次の Command + S は contentHash(disk) で照合する。面は必ず持つ(テストの代役の handle は持たなくてよい)。
+	 */
+	applyMerge?(merged: string, disk: string): void;
 }
 
 /** Markdown の編集面(ProseMirror)の handle(要件#74 第2段)。 */

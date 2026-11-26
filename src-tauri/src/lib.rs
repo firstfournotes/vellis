@@ -47,7 +47,7 @@ use commands::app::init_window;
 use commands::asset::handle_asset_for_window;
 use commands::build_info::get_build_info;
 use commands::dir_watch::{subscribe_dir, unsubscribe_dir};
-use commands::document::{open_binary_document, open_document, save_document};
+use commands::document::{open_binary_document, open_document, save_document, save_document_as};
 use commands::bookmarks::{add_bookmark, list_bookmarks, move_bookmark, remove_bookmark};
 use commands::dashboard::{list_missing_paths, scan_recently_modified};
 use commands::history::{list_history, remove_history_entry};
@@ -325,6 +325,7 @@ pub(crate) fn run_app(
         open_document,
         open_binary_document,
         save_document,
+        save_document_as,
         set_root,
         switch_root_confirmed,
         new_window,
@@ -373,6 +374,7 @@ pub(crate) fn run_app(
         open_document,
         open_binary_document,
         save_document,
+        save_document_as,
         set_root,
         switch_root_confirmed,
         new_window,
@@ -448,6 +450,8 @@ pub(crate) fn run_app(
             menu::listen_raw_source_state(app.handle());
             // View ▸ Show Formatting Toolbar のチェック印も前面の窓の値に合わせる(要件#74 第4段 4-2)
             menu::listen_format_toolbar_state(app.handle());
+            // View ▸ Alerts のチェック印と Show All / Hide All の有効はアプリ全体の設定に合わせる(要件#90 契約1・7)
+            menu::listen_alerts_state(app.handle());
             #[cfg(target_os = "macos")]
             let window_menu_owner = menu.clone();
             app.set_menu(menu)?;
@@ -575,6 +579,11 @@ pub(crate) fn run_app(
                     // Open 系と同じくフォーカス中の窓へ投げて任せる(要件#48)。
                     menu::handle_menu_open_click(app_handle, menu::MENU_SAVE_EVENT);
                 }
+                id if id == menu::SAVE_AS_ITEM_ID => {
+                    // 保存のダイアログも書く中身も窓の側にしかないので、Save と同じく
+                    // フォーカス中の窓へ投げて任せる(要件#89 契約1)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_SAVE_AS_EVENT);
+                }
                 id if id == menu::SETTINGS_ITEM_ID => {
                     // 設定ファイルの置き場も既定値も Rust が知っているので、窓へは投げず
                     // Rust の中で「無ければ書き出して新しい窓で開く」まで済ませる(要件#65 契約6)。
@@ -613,6 +622,21 @@ pub(crate) fn run_app(
                     // /code-review B)。受け手のない面ではチェックは変わらない。
                     menu::revert_check_toggle(app_handle, menu::RAW_SOURCE_ITEM_ID);
                     menu::handle_menu_open_click(app_handle, menu::MENU_RAW_SOURCE_EVENT);
+                }
+                id if id == menu::SHOW_ALL_ALERTS_ITEM_ID => {
+                    // 表示の設定は窓の側(localStorage)にあるので前面の窓へ。設定が変わると窓が
+                    // alerts_state で知らせ、全部の窓には storage イベントで広がる(要件#90 契約1・7)。
+                    menu::handle_menu_open_click(app_handle, menu::MENU_ALERTS_SHOW_ALL_EVENT);
+                }
+                id if id == menu::HIDE_ALL_ALERTS_ITEM_ID => {
+                    menu::handle_menu_open_click(app_handle, menu::MENU_ALERTS_HIDE_ALL_EVENT);
+                }
+                id if menu::alert_kind_of_item_id(id).is_some() => {
+                    // 種類のチェックは muda の自動反転のまま。窓が alerts_state で set_checked し直す
+                    // (revert_check_toggle は呼ばない=要件#90 判断 5)。
+                    if let Some(kind) = menu::alert_kind_of_item_id(id) {
+                        menu::emit_to_focused(app_handle, menu::MENU_ALERTS_TOGGLE_KIND_EVENT, kind.to_string());
+                    }
                 }
                 id if id.starts_with(menu::FORMAT_ITEM_ID_PREFIX) => {
                     // Format ▸ の項目はすべて ID を payload に前面の窓へ(要件#74 契約8)。

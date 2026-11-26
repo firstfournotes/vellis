@@ -49,6 +49,19 @@ pub const SAVE_ITEM_ID: &str = "save";
 /// there. Nothing is saved automatically — this event is the only trigger.
 pub const MENU_SAVE_EVENT: &str = "menu_save";
 
+/// Stable identifier for the "Save As…" menu item (requirements.md #89 契約1).
+pub const SAVE_AS_ITEM_ID: &str = "save-as";
+
+/// Event emitted to the focused window when "Save As…" is clicked
+/// (requirements.md #89 契約1・2).
+///
+/// Same division of labour as Save: whether the window holds an editable
+/// document, what it holds and where it came from are known only to the
+/// window, so it asks for the path (the save dialog) and calls
+/// `save_document_as` itself (`src/lib/save-as.ts`). Name must stay in sync
+/// with `MENU_SAVE_AS_EVENT` there.
+pub const MENU_SAVE_AS_EVENT: &str = "menu_save_as";
+
 /// Stable identifier for the Edit menu's "Find…" item (requirements.md #54 契約①).
 pub const FIND_ITEM_ID: &str = "find";
 
@@ -109,6 +122,11 @@ pub const FIND_IN_FOLDER_ACCELERATOR: &str = "CmdOrCtrl+Shift+F";
 /// drops an unparseable accelerator silently, so the test and the menu read
 /// the same literal.
 pub const SAVE_ACCELERATOR: &str = "CmdOrCtrl+S";
+
+/// Accelerator for the Save As… item (requirements.md #89 契約1): Shift +
+/// Command + S, as macOS apps have it. A constant for the same reason as
+/// `SAVE_ACCELERATOR`.
+pub const SAVE_AS_ACCELERATOR: &str = "CmdOrCtrl+Shift+S";
 
 /// Stable identifier for the "New Window" menu item (requirements.md #12).
 pub const NEW_WINDOW_ITEM_ID: &str = "new-window";
@@ -499,6 +517,65 @@ pub const MENU_SHOW_FORMAT_TOOLBAR_EVENT: &str = "menu_show_format_toolbar";
 /// a window may have changed. Same spelling as `FORMAT_TOOLBAR_STATE_EVENT` there.
 pub const FORMAT_TOOLBAR_STATE_EVENT: &str = "format_toolbar_state";
 
+/// View ▸ Alerts (requirements.md #90 契約1): Show All / Hide All Alerts and a
+/// check per GitHub Alert kind, right after Show Formatting Toolbar. Hiding and
+/// collapsing happen on the screen only; the settings live in the window
+/// (`localStorage`, `src/lib/alert-visibility.ts`) and are shared by all windows.
+pub const ALERTS_MENU_ID: &str = "alerts-menu";
+/// "Show All Alerts": enabled only while every kind is hidden.
+pub const SHOW_ALL_ALERTS_ITEM_ID: &str = "show-all-alerts";
+/// "Hide All Alerts": enabled while at least one kind is shown.
+pub const HIDE_ALL_ALERTS_ITEM_ID: &str = "hide-all-alerts";
+/// Option + Command + A toggles all alerts (決定⑨). Both Show All and Hide All
+/// carry it; only the enabled one takes the key (AppKit's key equivalents), so
+/// the key hides all while any kind is shown and shows all when all are hidden.
+pub const TOGGLE_ALL_ALERTS_ACCELERATOR: &str = "CmdOrCtrl+Alt+A";
+/// Head of the id of a kind's check item: `alerts-kind:note` and so on.
+pub const ALERT_KIND_ITEM_ID_PREFIX: &str = "alerts-kind:";
+/// The five kinds of requirement #15, in this order (same as `ALERT_KINDS` there).
+pub const ALERT_KINDS: [&str; 5] = ["note", "tip", "important", "warning", "caution"];
+/// Events emitted to the focused window (no payload / the kind as payload).
+/// Same spelling as the constants of `src/lib/alert-visibility.ts`.
+pub const MENU_ALERTS_SHOW_ALL_EVENT: &str = "menu_alerts_show_all";
+pub const MENU_ALERTS_HIDE_ALL_EVENT: &str = "menu_alerts_hide_all";
+pub const MENU_ALERTS_TOGGLE_KIND_EVENT: &str = "menu_alerts_toggle_kind";
+/// Event a window sends with `{ label, visibility: { note: bool, … } }` whenever
+/// the app-wide alert settings may have changed (see [`listen_alerts_state`]).
+pub const ALERTS_STATE_EVENT: &str = "alerts_state";
+
+/// The id of the check item of `kind` in View ▸ Alerts.
+pub fn alert_kind_item_id(kind: &str) -> String {
+    format!("{ALERT_KIND_ITEM_ID_PREFIX}{kind}")
+}
+
+/// The kind of a View ▸ Alerts check item id; `None` for any other id.
+pub fn alert_kind_of_item_id(id: &str) -> Option<&str> {
+    let rest = id.strip_prefix(ALERT_KIND_ITEM_ID_PREFIX)?;
+    ALERT_KINDS.iter().copied().find(|kind| *kind == rest)
+}
+
+/// The label of the check item of `kind` (the English canonical form).
+pub fn alert_kind_label(kind: &str) -> Option<&'static str> {
+    match kind {
+        "note" => Some("Note"),
+        "tip" => Some("Tip"),
+        "important" => Some("Important"),
+        "warning" => Some("Warning"),
+        "caution" => Some("Caution"),
+        _ => None,
+    }
+}
+
+/// Show All Alerts is enabled only while every kind is hidden (契約1).
+pub fn show_all_alerts_enabled(shown: &[bool]) -> bool {
+    !shown.iter().any(|s| *s)
+}
+
+/// Hide All Alerts is enabled while at least one kind is shown (契約1).
+pub fn hide_all_alerts_enabled(shown: &[bool]) -> bool {
+    shown.iter().any(|s| *s)
+}
+
 /// Stable identifier for the Window submenu, so it can be found again after
 /// the menu is installed (see [`attach_windows_menu_to_nsapp`]).
 pub const WINDOW_MENU_ID: &str = "window-menu";
@@ -628,6 +705,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // items: the menu does not know whether anything is being edited, and a
     // window with nothing to save simply ignores the event.
     let save_item = MenuItem::with_id(app, SAVE_ITEM_ID, "Save", true, Some(SAVE_ACCELERATOR))?;
+    // Save As… right after Save (requirements.md #89 契約1). Enabled like Save:
+    // the window decides whether it does anything (an editable document) or
+    // ignores the event.
+    let save_as_item = MenuItem::with_id(app, SAVE_AS_ITEM_ID, "Save As…", true, Some(SAVE_AS_ACCELERATOR))?;
     let save_sep = PredefinedMenuItem::separator(app)?;
     let print_item = MenuItem::with_id(
         app,
@@ -649,6 +730,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &open_folder_item,
             &file_sep,
             &save_item,
+            &save_as_item,
             &save_sep,
             &print_item,
         ],
@@ -959,6 +1041,17 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let raw_source_item = CheckMenuItem::with_id(app, RAW_SOURCE_ITEM_ID, "Raw Source", true, false, Some(RAW_SOURCE_ACCELERATOR))?;
     // 第4段 4-2(4-5): the formatting toolbar, hidden by default, no accelerator.
     let show_format_toolbar_item = CheckMenuItem::with_id(app, SHOW_FORMAT_TOOLBAR_ITEM_ID, "Show Formatting Toolbar", true, false, None::<&str>)?;
+    // 要件#90 契約1: View ▸ Alerts. Built with everything shown (the default);
+    // the window's `alerts_state` brings the checks and the enabled items in line.
+    let show_all_alerts_item = MenuItem::with_id(app, SHOW_ALL_ALERTS_ITEM_ID, "Show All Alerts", false, Some(TOGGLE_ALL_ALERTS_ACCELERATOR))?;
+    let hide_all_alerts_item = MenuItem::with_id(app, HIDE_ALL_ALERTS_ITEM_ID, "Hide All Alerts", true, Some(TOGGLE_ALL_ALERTS_ACCELERATOR))?;
+    let alerts_kind_sep = PredefinedMenuItem::separator(app)?;
+    let alerts_note_item = alert_kind_item(app, "note")?;
+    let alerts_tip_item = alert_kind_item(app, "tip")?;
+    let alerts_important_item = alert_kind_item(app, "important")?;
+    let alerts_warning_item = alert_kind_item(app, "warning")?;
+    let alerts_caution_item = alert_kind_item(app, "caution")?;
+    let alerts_menu = Submenu::with_id_and_items(app, ALERTS_MENU_ID, "Alerts", true, &[&show_all_alerts_item, &hide_all_alerts_item, &alerts_kind_sep, &alerts_note_item, &alerts_tip_item, &alerts_important_item, &alerts_warning_item, &alerts_caution_item])?;
     let view_chrome_sep = PredefinedMenuItem::separator(app)?;
     let zoom_in_item = MenuItem::with_id(
         app,
@@ -1003,6 +1096,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &toggle_full_width_item,
             &raw_source_item,
             &show_format_toolbar_item,
+            &alerts_menu,
             &view_chrome_sep,
             &zoom_in_item,
             &zoom_out_item,
@@ -1072,6 +1166,12 @@ fn theme_item<R: Runtime>(app: &AppHandle<R>, name: &str) -> tauri::Result<MenuI
         true,
         None::<&str>,
     )
+}
+
+/// The View ▸ Alerts check item of `kind`: enabled, checked (shown by default),
+/// no accelerator. The single place the five kind items are made.
+fn alert_kind_item<R: Runtime>(app: &AppHandle<R>, kind: &str) -> tauri::Result<CheckMenuItem<R>> {
+    CheckMenuItem::with_id(app, alert_kind_item_id(kind), alert_kind_label(kind).unwrap_or(kind), true, true, None::<&str>)
 }
 
 /// Replace the theme list of View ▸ Appearance with `names` — called when the
@@ -1423,6 +1523,71 @@ pub fn listen_format_toolbar_state(app: &AppHandle<Wry>) {
         };
         if let Err(e) = item.set_checked(state.shown) {
             tracing::warn!("failed to set the Show Formatting Toolbar check to {}: {}", state.shown, e);
+        }
+    });
+}
+
+/// The payload of [`ALERTS_STATE_EVENT`]. `label` names the sender; the settings
+/// are app-wide, so any window's report applies.
+#[derive(serde::Deserialize)]
+struct AlertsState {
+    #[allow(dead_code)]
+    label: String,
+    visibility: std::collections::HashMap<String, bool>,
+}
+
+/// The View ▸ Alerts submenu (two levels down: menu bar ▸ View ▸ Alerts).
+fn find_alerts_submenu<R: Runtime>(menu: &Menu<R>) -> Option<Submenu<R>> {
+    menu.items().unwrap_or_default().into_iter().find_map(|kind| {
+        kind.as_submenu()
+            .and_then(|submenu| submenu.get(ALERTS_MENU_ID))
+            .and_then(|found| found.as_submenu().cloned())
+    })
+}
+
+/// Keep View ▸ Alerts on the app-wide settings (requirements.md #90 契約1・7):
+/// each kind's check is its "shown", Show All is enabled only while all are
+/// hidden and Hide All while any is shown — so Option + Command + A reaches the
+/// right one. A kind item flipped by muda's own click is set again here from
+/// the window's report (no `revert_check_toggle`). No Tauri command: the
+/// frontend emits an event.
+pub fn listen_alerts_state(app: &AppHandle<Wry>) {
+    let handle = app.clone();
+    app.listen(ALERTS_STATE_EVENT, move |event| {
+        let state: AlertsState = match serde_json::from_str(event.payload()) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!("{}: unreadable payload: {}", ALERTS_STATE_EVENT, e);
+                return;
+            }
+        };
+        let shown: Vec<bool> = ALERT_KINDS
+            .iter()
+            .map(|kind| state.visibility.get(*kind).copied().unwrap_or(true))
+            .collect();
+        let Some(alerts) = handle.menu().and_then(|menu| find_alerts_submenu(&menu)) else {
+            tracing::warn!("Alerts submenu '{}' not found in the app menu", ALERTS_MENU_ID);
+            return;
+        };
+        for (kind, on) in ALERT_KINDS.iter().zip(shown.iter()) {
+            let id = alert_kind_item_id(kind);
+            let Some(item) = alerts.get(&id).and_then(|found| found.as_check_menuitem().cloned()) else {
+                continue;
+            };
+            if let Err(e) = item.set_checked(*on) {
+                tracing::warn!("failed to set the check of {} to {}: {}", id, on, e);
+            }
+        }
+        for (id, enabled) in [
+            (SHOW_ALL_ALERTS_ITEM_ID, show_all_alerts_enabled(&shown)),
+            (HIDE_ALL_ALERTS_ITEM_ID, hide_all_alerts_enabled(&shown)),
+        ] {
+            let Some(item) = alerts.get(id).and_then(|found| found.as_menuitem().cloned()) else {
+                continue;
+            };
+            if let Err(e) = item.set_enabled(enabled) {
+                tracing::warn!("failed to set {} enabled={}: {}", id, enabled, e);
+            }
         }
     });
 }

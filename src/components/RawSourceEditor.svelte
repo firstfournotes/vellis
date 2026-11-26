@@ -12,6 +12,7 @@
 	import { Compartment, StateEffect, Transaction, type Extension } from '@codemirror/state';
 	import { EditorView, keymap } from '@codemirror/view';
 	import { LanguageDescription, bracketMatching, syntaxHighlighting } from '@codemirror/language';
+	import { isolateHistory } from '@codemirror/commands';
 	import { languages } from '@codemirror/language-data';
 
 	import { DEFAULT_ZOOM } from '$lib/zoom';
@@ -169,6 +170,12 @@
 	export function replaceText(target: string): void {
 		if (!view) return;
 		view.dispatch({ ...replaceWith(view.state, target), annotations: Transaction.addToHistory.of(false) });
+	}
+
+	/** 要件#89 契約11: 文書を `target` にする取引 1 つ(マージの Apply。履歴に積む=Command + Z 1 回で戻る)。 */
+	export function applyText(target: string): void {
+		if (!view || target === sliceStateText(view.state)) return;
+		view.dispatch({ ...replaceWith(view.state, target), annotations: isolateHistory.of('full'), userEvent: 'merge' });
 	}
 
 	/** 文書を作り直す(Reload File・Use the File on Disk=履歴 0)。 */

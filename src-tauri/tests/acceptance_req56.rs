@@ -409,8 +409,9 @@ fn default_theme_item_is_a_plain_menu_item_labelled_default() {
     assert_eq!(first_string_literal(call), Some("Default"));
     assert!(last_argument(call).starts_with("None"), "Default must have no accelerator");
     // 要件74 4-2(決定 4-5): View ▸ Show Formatting Toolbar(SHOW_FORMAT_TOOLBAR_ITEM_ID)も CheckMenuItem なので 2 つ(Raw Source と Show Formatting Toolbar)。
+    // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts の種類のチェック項目を helper `alert_kind_item` 1 か所で作るので 3 つ。
     let checks: Vec<usize> = code.match_indices("CheckMenuItem::with_id(").map(|(i, _)| i).collect();
-    assert_eq!(checks.len(), 2, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23) and View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5)");
+    assert_eq!(checks.len(), 3, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23), View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5) and the alert kinds' helper alert_kind_item (要件90)");
     let check_calls: Vec<&str> = checks.iter().map(|&at| &code[at..code[at..].find(')').unwrap() + at]).collect();
     assert!(check_calls.iter().any(|c| c.contains("RAW_SOURCE_ITEM_ID")), "one CheckMenuItem is Raw Source: {check_calls:?}");
     assert!(check_calls.iter().any(|c| c.contains("SHOW_FORMAT_TOOLBAR_ITEM_ID")), "the other CheckMenuItem is Show Formatting Toolbar: {check_calls:?}");
@@ -455,7 +456,8 @@ fn view_menu_holds_appearance_and_full_width_between_the_tab_items_and_zoom() {
     let idents = submenu_item_idents(view);
     let separators = separator_bindings(&code);
     // 要件#74 第4段 4-2(2026-11-17 由谷の決定 4-5・棚卸し 3): Raw Source の直後に `show_format_toolbar_item`(View ▸ Show Formatting Toolbar)。14 → 15。
-    assert_eq!(idents.len(), 15, "View must hold exactly 15 entries ({idents:?})");
+    // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): Show Formatting Toolbar の直後に `alerts_menu`(View ▸ Alerts ▸)。15 → 16。
+    assert_eq!(idents.len(), 16, "View must hold exactly 16 entries ({idents:?})");
 
     let show_tab_bar = menu_item_binding(&code, "SHOW_TAB_BAR_ITEM_ID");
     let show_all_tabs = menu_item_binding(&code, "SHOW_ALL_TABS_ITEM_ID");
@@ -476,12 +478,14 @@ fn view_menu_holds_appearance_and_full_width_between_the_tab_items_and_zoom() {
     assert_eq!(idents[6], full_width, "View[6] must be Toggle Full Width ({idents:?})");
     assert_eq!(idents[7], "raw_source_item", "View[7] must be Raw Source (requirement #74 (ao)) ({idents:?})");
     assert_eq!(idents[8], "show_format_toolbar_item", "View[8] must be Show Formatting Toolbar (requirement #74 4-2) ({idents:?})");
-    assert!(separators.contains(idents[9]), "View[9] must be a separator ({idents:?})");
-    assert_eq!(idents[10], zoom_in, "View[10] ({idents:?})");
-    assert_eq!(idents[11], zoom_out, "View[11] ({idents:?})");
-    assert_eq!(idents[12], actual_size, "View[12] ({idents:?})");
-    assert!(separators.contains(idents[13]), "View[13] must be a separator ({idents:?})");
-    assert_eq!(idents[14], devtools, "View[14] ({idents:?})");
+    // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): [9] Alerts ▸(区切り線以降はさらに 1 つずれる)。
+    assert_eq!(idents[9], "alerts_menu", "View[9] must be the Alerts submenu (requirement #90 契約1) ({idents:?})");
+    assert!(separators.contains(idents[10]), "View[10] must be a separator ({idents:?})");
+    assert_eq!(idents[11], zoom_in, "View[11] ({idents:?})");
+    assert_eq!(idents[12], zoom_out, "View[12] ({idents:?})");
+    assert_eq!(idents[13], actual_size, "View[13] ({idents:?})");
+    assert!(separators.contains(idents[14]), "View[14] must be a separator ({idents:?})");
+    assert_eq!(idents[15], devtools, "View[15] ({idents:?})");
 }
 
 // ---------------------------------------------------------------------------

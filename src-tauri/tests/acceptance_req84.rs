@@ -585,6 +585,7 @@ fn ac84_3_frontend_flag_names_match_the_registry() {
 // ---------------------------------------------------------------------------
 
 /// 8. `Submenu::with_items` の File と Edit の並びの字面は今のまま(Save・区切り線・Edit を並びからは外さない)。
+///    要件89(2026-11-26)で改めた(docs/requirements/req-89.md「要件側の更新」): File ▸ Save As…(`save_as_item`)を Save の直後に足す。
 #[test]
 fn ac84_4_file_and_edit_slices_are_unchanged() {
     let code = menu_rs_code();
@@ -600,10 +601,12 @@ fn ac84_4_file_and_edit_slices_are_unchanged() {
             "open_folder_item",
             "file_sep",
             "save_item",
+            // 要件89(2026-11-26): File ▸ Save As… は Save の直後(docs/requirements/req-89.md 契約1)
+            "save_as_item",
             "save_sep",
             "print_item",
         ],
-        "the File slice must stay as built; Save is removed after building (契約4)"
+        "the File slice must stay as built (+ save_as_item after save_item, 要件89); Save is removed after building (契約4)"
     );
     let edit = submenu_call_with_label(&code, "Edit").expect("menu.rs must build the Edit submenu");
     assert_eq!(
@@ -911,13 +914,16 @@ fn ac84_6_require_follows_is_enabled_of_this_build() {
 }
 
 /// 23. `generate_handler!` の 2 つの一覧は無改変(command の数と並び=要件83 の後の 45 / 44)。
+///     要件89(2026-11-26)で改めた(docs/requirements/req-89.md「要件側の更新」): Save As… の command `save_document_as` を
+///     save_document の直後に足して 46 / 45。
 #[test]
 fn ac84_6_generate_handler_lists_are_unchanged() {
-    const COMMON: [&str; 44] = [
+    const COMMON: [&str; 45] = [
         "init_window",
         "open_document",
         "open_binary_document",
         "save_document",
+        "save_document_as",
         "set_root",
         "switch_root_confirmed",
         "new_window",
@@ -963,8 +969,8 @@ fn ac84_6_generate_handler_lists_are_unchanged() {
     assert_eq!(lists.len(), 2, "lib.rs builds the invoke handler twice (webdriver / not)");
     let mut webdriver: Vec<&str> = COMMON.to_vec();
     webdriver.push("__test_list_windows");
-    assert_eq!(lists[0], webdriver, "webdriver list: 45 commands, unchanged");
-    assert_eq!(lists[1], COMMON.to_vec(), "default list: 44 commands, unchanged");
+    assert_eq!(lists[0], webdriver, "webdriver list: 46 commands (45 + save_document_as, 要件89)");
+    assert_eq!(lists[1], COMMON.to_vec(), "default list: 45 commands (44 + save_document_as, 要件89)");
 }
 
 // ---------------------------------------------------------------------------

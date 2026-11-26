@@ -6,9 +6,15 @@
 	 * 行の差分は `src/editor/line-diff.ts` の `lineDiff`(3 方向マージと共有)。前後 3 行の文脈を出し、それより長い変わらない連なりは
 	 * 「N unchanged lines」に畳む(押すと開く)。改行コードだけが違う行には「Line endings differ」。差分が大きすぎれば本文は
 	 * 「Too many differences to show.」だけ。文言は英語。
+	 *
+	 * 要件#89 契約8〜12: `merge` を渡すと同じ 1 枚がマージの画面(Merge Changes)になる(由谷の決定=今の Show Differences の
+	 * 画面を広げる)。塊は `mergeChunks`(基準の版・自分の修正・ディスクの版)の conflict。重ならない変更は自動で入り、塊ごとに
+	 * My Edits / On Disk / Both を選ぶ。全部選ぶと Apply が押せる。届いた中身が変わって作り直すときは、同じ中身の塊の選びを
+	 * 残す(`carryChoices`)。衝突の差分(onKeep / onUseDisk があるとき)には Merge…(onMerge)を出す。
 	 */
-	import { onMount } from 'svelte';
-	import { lineDiff } from '../editor/line-diff';
+	import { onMount, untrack } from 'svelte';
+	import { lineDiff, splitLines } from '../editor/line-diff';
+	import { applyChoices, carryChoices, mergeChunks, type MergeChoice, type MergePart } from '../editor/merge-chunks';
 
 	let {
 		title,
@@ -19,6 +25,8 @@
 		onClose,
 		onKeep,
 		onUseDisk,
+		onMerge,
+		merge,
 	}: {
 		title: string;
 		leftName: string;
@@ -30,6 +38,20 @@
 		onKeep?: () => void;
 		/** 衝突のときだけ: Use the File on Disk(帯と同じ)。 */
 		onUseDisk?: () => void;
+		/** 要件#89 契約8: 衝突のときだけ: Merge…(マージの画面へ)。 */
+		onMerge?: () => void;
+		/**
+		 * 要件#89 契約9〜12: マージの画面にする。base=基準の版・mine=今の文字列・theirs=ディスクの版・rebuilt=作り直しの印。
+		 * Cancel は onCancel、Apply は onApply(マージした文字列)。
+		 */
+		merge?: {
+			base: string;
+			mine: string;
+			theirs: string;
+			rebuilt: boolean;
+			onCancel: () => void;
+			onApply: (merged: string) => void;
+		};
 	} = $props();
 
 	/** 前後に出す文脈の行の数。 */
@@ -119,8 +141,79 @@
 		if (e.key !== 'Escape' || e.isComposing) return;
 		e.preventDefault();
 		e.stopPropagation();
-		onClose();
+		if (merge) merge.onCancel();
+		else onClose();
 	}
+
+	// --- マージの画面(要件#89) ------------------------------------------------
+
+	type Conflict = Extract<MergePart, { kind: 'conflict' }>;
+	/** 画面の並び: 文脈(clean の前後の行)・畳んだ行の数・塊(conflict の番号つき)。 */
+	type MergeRow =
+		| { type: 'context'; key: string; lines: string[] }
+		| { type: 'fold'; key: string; count: number }
+		| { type: 'chunk'; key: string; index: number; chunk: Conflict };
+
+	function conflictsOf(parts: readonly MergePart[] | null): Conflict[] {
+		return (parts ?? []).filter((p): p is Conflict => p.kind === 'conflict');
+	}
+
+	/** 塊の並び(mergeChunks)。null=差分が大きすぎる。中身(base・mine・theirs)が変わったときだけ作り直す。 */
+	let mergeParts = $state.raw<MergePart[] | null>(untrack(() => (merge ? mergeChunks(merge.base, merge.mine, merge.theirs) : null)));
+	/** 塊ごとの選び(conflict の番号の並び)。 */
+	let choices = $state<Array<MergeChoice | null>>(untrack(() => conflictsOf(mergeParts).map(() => null)));
+	let builtFrom: { base: string; mine: string; theirs: string } | null = untrack(() =>
+		merge ? { base: merge.base, mine: merge.mine, theirs: merge.theirs } : null,
+	);
+
+	// 契約12: 届いた中身(か今の文字列・基準の版)が変わったら塊を作り直し、同じ中身の塊の選びを残す。
+	$effect.pre(() => {
+		const m = merge;
+		if (!m) return;
+		const { base, mine, theirs } = m;
+		untrack(() => {
+			if (builtFrom && builtFrom.base === base && builtFrom.mine === mine && builtFrom.theirs === theirs) return;
+			const next = mergeChunks(base, mine, theirs);
+			choices = carryChoices(mergeParts ?? [], choices, next ?? []);
+			mergeParts = next;
+			builtFrom = { base, mine, theirs };
+		});
+	});
+
+	/** 選びを当てた文字列(未選択が残れば null=Apply は押せない)。 */
+	let merged = $derived(mergeParts === null ? null : applyChoices(mergeParts, choices));
+	let chunkCount = $derived(conflictsOf(mergeParts).length);
+
+	function choose(index: number, choice: MergeChoice) {
+		const next = [...choices];
+		next[index] = choice;
+		choices = next;
+	}
+
+	/** clean の前後に出す文脈(塊の前後 CONTEXT 行。長い連なりは「N unchanged lines」に畳む)。 */
+	let mergeRows = $derived.by((): MergeRow[] => {
+		const parts = mergeParts;
+		if (!parts) return [];
+		const out: MergeRow[] = [];
+		let index = 0;
+		parts.forEach((part, i) => {
+			if (part.kind === 'conflict') {
+				out.push({ type: 'chunk', key: `chunk-${i}`, index: index++, chunk: part });
+				return;
+			}
+			const all = splitLines(part.text).map(strip);
+			const head = i === 0 ? 0 : CONTEXT;
+			const tail = i === parts.length - 1 ? 0 : CONTEXT;
+			if (all.length <= head + tail) {
+				out.push({ type: 'context', key: `context-${i}`, lines: all });
+				return;
+			}
+			if (head > 0) out.push({ type: 'context', key: `context-${i}-head`, lines: all.slice(0, head) });
+			out.push({ type: 'fold', key: `fold-${i}`, count: all.length - head - tail });
+			if (tail > 0) out.push({ type: 'context', key: `context-${i}-tail`, lines: all.slice(all.length - tail) });
+		});
+		return out;
+	});
 
 	onMount(() => {
 		panelEl?.focus({ preventScroll: true });
@@ -128,6 +221,97 @@
 </script>
 
 <div class="editor-diff-layer">
+	{#if merge}
+		<!-- 要件#89: マージの画面(同じ層・同じ見た目のトークン)。section に role="dialog" -->
+		<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+		<section
+			class="editor-diff merge-view"
+			data-testid="merge-view"
+			role="dialog"
+			aria-label="Merge Changes"
+			tabindex="-1"
+			bind:this={panelEl}
+			onkeydown={handleKeydown}
+		>
+			<header class="editor-diff-header">
+				<span class="editor-diff-title">Merge Changes</span>
+				<span class="editor-diff-names">
+					{#if mergeParts === null}
+						My Edits ↔ On Disk
+					{:else if chunkCount === 0}
+						No overlapping changes
+					{:else}
+						{chunkCount} overlapping {chunkCount === 1 ? 'change' : 'changes'}: choose what to keep
+					{/if}
+				</span>
+				<button type="button" class="editor-diff-button" data-testid="merge-cancel" onclick={merge.onCancel}>Cancel</button>
+				<button
+					type="button"
+					class="editor-diff-button"
+					data-testid="merge-apply"
+					disabled={merged === null}
+					onclick={() => {
+						if (merged !== null) merge?.onApply(merged);
+					}}
+				>
+					Apply
+				</button>
+			</header>
+			{#if merge.rebuilt}
+				<div class="merge-rebuilt" data-testid="merge-rebuilt-notice" role="status">The file on disk changed again. The chunks were rebuilt.</div>
+			{/if}
+			<div class="editor-diff-body">
+				{#if mergeParts === null}
+					<p class="editor-diff-too-many" data-testid="merge-too-many">Too many differences to merge.</p>
+				{:else}
+					{#each mergeRows as row (row.key)}
+						{#if row.type === 'context'}
+							{#each row.lines as line, n (n)}
+								<div class="diff-line merge-context"><span class="diff-text">{line}</span></div>
+							{/each}
+						{:else if row.type === 'fold'}
+							<div class="merge-fold">{row.count} unchanged lines</div>
+						{:else}
+							<div class="merge-chunk" data-testid="merge-chunk" data-index={row.index}>
+								<div class="merge-side" data-side="mine">
+									<span class="merge-side-name">My Edits{row.chunk.mine === '' ? ' (removed)' : ''}</span>
+									<pre class="merge-text" data-testid="merge-chunk-mine">{row.chunk.mine}</pre>
+								</div>
+								<div class="merge-side" data-side="theirs">
+									<span class="merge-side-name">On Disk{row.chunk.theirs === '' ? ' (removed)' : ''}</span>
+									<pre class="merge-text" data-testid="merge-chunk-theirs">{row.chunk.theirs}</pre>
+								</div>
+								<div class="merge-choices" role="group" aria-label="Keep for change {row.index + 1}">
+									<button
+										type="button"
+										class="editor-diff-button merge-choice"
+										data-testid="merge-choose-mine"
+										aria-pressed={choices[row.index] === 'mine' ? 'true' : 'false'}
+										onclick={() => choose(row.index, 'mine')}>My Edits</button
+									>
+									<button
+										type="button"
+										class="editor-diff-button merge-choice"
+										data-testid="merge-choose-theirs"
+										aria-pressed={choices[row.index] === 'theirs' ? 'true' : 'false'}
+										onclick={() => choose(row.index, 'theirs')}>On Disk</button
+									>
+									<button
+										type="button"
+										class="editor-diff-button merge-choice"
+										data-testid="merge-choose-both"
+										title="Keep both: my edits, then the file on disk"
+										aria-pressed={choices[row.index] === 'both' ? 'true' : 'false'}
+										onclick={() => choose(row.index, 'both')}>Both</button
+									>
+								</div>
+							</div>
+						{/if}
+					{/each}
+				{/if}
+			</div>
+		</section>
+	{:else}
 	<!-- 契約どおり section に role="dialog"(DiffView.svelte と同じ形) -->
 	<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
 	<section
@@ -185,9 +369,13 @@
 				{#if onUseDisk}
 					<button type="button" class="editor-diff-button" data-testid="editor-diff-disk" onclick={onUseDisk}>Use the File on Disk</button>
 				{/if}
+				{#if onMerge}
+					<button type="button" class="editor-diff-button" data-testid="editor-diff-merge" onclick={onMerge}>Merge…</button>
+				{/if}
 			</footer>
 		{/if}
 	</section>
+	{/if}
 </div>
 
 <style>
@@ -299,6 +487,79 @@
 		margin-left: auto;
 		font-family: inherit;
 		color: var(--color-text-secondary);
+	}
+
+	/* 要件#89: マージの画面 */
+	.editor-diff-button:disabled {
+		color: var(--color-text-muted);
+		cursor: default;
+	}
+
+	.merge-rebuilt {
+		padding: 4px 10px;
+		background-color: var(--color-warning-soft);
+		border-bottom: 1px solid var(--color-border-strong);
+	}
+
+	/* 契約9: 文脈の行は長い行を折り返す(.diff-line の white-space: pre を上書き) */
+	.merge-context {
+		color: var(--color-text-secondary);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
+	.merge-fold {
+		margin: 2px 10px;
+		color: var(--color-text-muted);
+	}
+
+	.merge-chunk {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4px 8px;
+		margin: 4px 10px;
+		padding: 6px;
+		border: 1px solid var(--color-border-strong);
+		border-radius: 6px;
+	}
+
+	.merge-side {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+	}
+
+	.merge-side-name {
+		color: var(--color-text-secondary);
+	}
+
+	.merge-text {
+		margin: 2px 0 0;
+		padding: 2px 6px;
+		min-height: 1.5em;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		font: inherit;
+	}
+
+	.merge-side[data-side='mine'] .merge-text {
+		background-color: var(--color-success-soft);
+	}
+
+	.merge-side[data-side='theirs'] .merge-text {
+		background-color: var(--color-accent-soft);
+	}
+
+	.merge-choices {
+		grid-column: 1 / -1;
+		display: flex;
+		gap: 6px;
+		justify-content: flex-end;
+	}
+
+	.merge-choice[aria-pressed='true'] {
+		background-color: var(--color-accent-soft);
+		border-color: var(--color-accent);
 	}
 
 	.editor-diff-too-many {

@@ -21,6 +21,7 @@
 	import { Compartment, EditorState, StateEffect, Transaction, type Extension } from '@codemirror/state';
 	import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 	import { bracketMatching, syntaxHighlighting } from '@codemirror/language';
+	import { isolateHistory } from '@codemirror/commands';
 
 	import { contentHash, type FileChangedDecision } from '$lib/document-edit';
 	import { languageForFile } from '$lib/code-language';
@@ -266,6 +267,8 @@
 			showNotice(MERGED_NOTICE);
 			return 'apply';
 		}
+		// 要件#89 契約12: 重なりの相手が変わったら version を進める(開いているマージの画面が塊を作り直す)
+		if (theirs !== incoming) version++;
 		theirs = incoming;
 		conflict = true;
 		return 'external-conflict';
@@ -373,6 +376,9 @@
 			// 保存の照合の衝突から来たときは、ディスクの今の版を読んで基準にする。
 			void readDisk().then((read) => {
 				if (read === null) return;
+				// Issue #851 (3): ディスクの版を取り込んだので、自分の以前の保存の印も忘れる(applyNow と同じ)。
+				// 外部がその中身に戻しても、エコーとして捨てずに普通の外部変更として扱う。
+				selfHash = null;
 				setBase(read);
 				syncWindowDocument(read, undefined);
 			});
@@ -394,6 +400,17 @@
 		showSaveConflict() {
 			theirs = null;
 			conflict = true;
+		},
+		// 要件#89 契約11: マージの Apply(取引 1 つ・履歴に積む)。基準の版はマージに使ったディスクの版
+		applyMerge(merged: string, disk: string) {
+			if (view && merged !== currentText) {
+				view.dispatch({ ...replaceWith(view.state, merged), annotations: isolateHistory.of('full'), userEvent: 'merge' });
+			}
+			selfHash = null;
+			conflict = false;
+			theirs = null;
+			setBase(disk);
+			syncWindowDocument(disk, undefined);
 		},
 		reset(next: string) {
 			resetDocument(next);

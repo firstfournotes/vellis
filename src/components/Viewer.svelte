@@ -13,6 +13,7 @@
 	import { openInNewWindowFailedMessage } from '$lib/open-in-new-window';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
 	import { holdScrollForPrint } from '$lib/print-scroll';
+	import { attachAlertVisibility, revealAlertsAround } from '$lib/alert-dom';
 	import {
 		applyHighlights,
 		clearHighlights,
@@ -273,6 +274,7 @@
 		if (!face) return;
 		const theirs = await face.conflictText?.();
 		if (theirs === null || theirs === undefined || windowState.fileEditor !== face) return;
+		mergeView = null;
 		diffView = { kind: 'conflict', left: face.text(), right: theirs };
 	}
 
@@ -313,6 +315,72 @@
 		void document.uri;
 		untrack(() => {
 			diffView = null;
+			mergeView = null;
+		});
+	});
+
+	// --- 重なりを選んでマージ(要件#89 契約8〜13) -----------------------------
+
+	/**
+	 * 開いているマージの画面(基準の版・今の文字列・届いた内容=ディスクの版・作り直しの印)。重なりの帯の Merge… と、
+	 * 衝突の差分の画面の Merge… から開く。
+	 */
+	let mergeView = $state<{ base: string; mine: string; theirs: string; rebuilt: boolean } | null>(null);
+	/** 届いた内容の取り直しの番号(後から届いた結果だけを当てる)。 */
+	let mergeFetch = 0;
+
+	/** Merge…: 届いた内容(保存の照合の衝突ならディスクを読み直した内容=契約13)で塊を作る。差分の画面は閉じる。 */
+	async function openMerge() {
+		diffView = null;
+		const face = windowState.fileEditor;
+		if (!face?.applyMerge || !face.conflict) return;
+		const seq = ++mergeFetch;
+		const theirs = await face.conflictText?.();
+		if (theirs === null || theirs === undefined || seq !== mergeFetch) return;
+		if (windowState.fileEditor !== face || !face.conflict) return;
+		mergeView = { base: face.baseText?.() ?? '', mine: face.text(), theirs, rebuilt: false };
+	}
+
+	function closeMerge() {
+		mergeFetch++;
+		mergeView = null;
+	}
+
+	/** Apply(契約11): マージした文字列を面に入れ、基準の版をマージに使ったディスクの版にする(帯は下りる・Unsaved のまま)。 */
+	function applyMerge(merged: string) {
+		const open = mergeView;
+		const face = windowState.fileEditor;
+		closeMerge();
+		if (!open || !face) return;
+		face.applyMerge?.(merged, open.theirs);
+	}
+
+	// 開いている間(契約12): 重なりが解けた・面が替わったら閉じる。今の文字列か基準の版が変わったら塊を作り直し、
+	// それ以外で面が進んだ(外部変更がまた届いた)ら届いた内容を取り直し、変わっていれば作り直して知らせる。
+	$effect(() => {
+		const face = windowState.fileEditor;
+		const conflictNow = face?.conflict;
+		void face?.version;
+		untrack(() => {
+			const open = mergeView;
+			if (!open) return;
+			if (!face || !conflictNow || !face.applyMerge) {
+				closeMerge();
+				return;
+			}
+			const mine = face.text();
+			const base = face.baseText?.() ?? open.base;
+			if (mine !== open.mine || base !== open.base) {
+				mergeView = { ...open, mine, base };
+				return;
+			}
+			const seq = ++mergeFetch;
+			void face.conflictText?.().then((theirs) => {
+				const now = mergeView;
+				if (seq !== mergeFetch || !now || windowState.fileEditor !== face) return;
+				if (theirs === null || theirs === undefined || theirs === now.theirs) return;
+				mergeView = { ...now, theirs, rebuilt: true };
+			});
 		});
 	});
 
@@ -405,6 +473,44 @@
 	 * ツールバーの直下。検索バーが開いている間はその下端(貼り付いた上端 + 実寸)。
 	 */
 	let bannerTop = $derived(toolbarHeight + (findOpen ? FIND_BAR_STICKY_GAP + findBarHeight : 0));
+
+	/**
+	 * Issue #851 (2): 貼り付く帯・知らせ(DOM の順に 重なりの帯 → 取り込みの知らせ → 削除の帯)。
+	 * 同時に出たら、後のものを先のものの実寸だけ下げて積む(`--vellis-banner-offset`)。
+	 * 重なりの帯と削除の帯は同時に出ない(要件#48 追補h 契約1)。
+	 */
+	let conflictShown = $derived(
+		Boolean(anyFace && windowState.fileEditor?.conflict && !windowState.externalRemoved),
+	);
+	let noticeShown = $derived(Boolean(anyFace && windowState.fileEditor?.notice));
+	let conflictBannerEl: HTMLElement | null | undefined = $state();
+	let mergedNoticeEl: HTMLElement | null | undefined = $state();
+	let removedBannerEl: HTMLElement | null | undefined = $state();
+	let conflictBannerHeight = $state(0);
+	let mergedNoticeHeight = $state(0);
+	let mergedNoticeOffset = $derived(conflictShown ? conflictBannerHeight : 0);
+	let removedBannerOffset = $derived(
+		(conflictShown ? conflictBannerHeight : 0) + (noticeShown ? mergedNoticeHeight : 0),
+	);
+
+	/**
+	 * Issue #851 (4): `targets` の大きさが変わったら `measure` を呼ぶ。ResizeObserver があればそれで
+	 * (ペインの幅の変化でツールバーが折り返す、など)、無い環境(テストの JSDOM)でも窓の resize で測り直す。
+	 * 戻り値は後始末(listener を外し、observe をやめる)。
+	 */
+	function watchSize(
+		targets: ReadonlyArray<Element | null | undefined>,
+		measure: () => void,
+		view: Window | null | undefined,
+	): () => void {
+		view?.addEventListener('resize', measure);
+		const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => measure()) : null;
+		for (const target of targets) if (target) observer?.observe(target);
+		return () => {
+			view?.removeEventListener('resize', measure);
+			observer?.disconnect();
+		};
+	}
 
 	/**
 	 * Esc を一時 UI のバーへ譲るか(要件#54 契約⑤・要件#60 契約⑦)。バーは編集より
@@ -509,9 +615,8 @@
 			toolbarHeight = header.offsetHeight;
 		};
 		measure();
-		const view = header.ownerDocument.defaultView;
-		view?.addEventListener('resize', measure);
-		return () => view?.removeEventListener('resize', measure);
+		// Issue #851 (4): 窓の resize に加えて、ツールバー自身の大きさの変化(折り返し)でも測り直す。
+		return watchSize([header], measure, header.ownerDocument.defaultView);
 	});
 
 	/**
@@ -526,13 +631,29 @@
 		if (!scroller) return;
 		void replaceOpen;
 		void canReplace;
+		const bar = scroller.querySelector<HTMLElement>('.find-bar--sticky');
 		const measure = () => {
 			findBarHeight = scroller.querySelector<HTMLElement>('.find-bar--sticky')?.offsetHeight ?? 0;
 		};
 		measure();
-		const view = scroller.ownerDocument.defaultView;
-		view?.addEventListener('resize', measure);
-		return () => view?.removeEventListener('resize', measure);
+		return watchSize([bar], measure, scroller.ownerDocument.defaultView);
+	});
+
+	/**
+	 * Issue #851 (2): 先に出ている帯・知らせの実寸を測る(後のものをその下に積む)。知らせの文言が変わる・
+	 * 折り返すと高さが変わる。
+	 */
+	$effect(() => {
+		const conflictEl = conflictBannerEl;
+		const noticeEl = mergedNoticeEl;
+		void windowState.fileEditor?.notice;
+		const measure = () => {
+			conflictBannerHeight = conflictEl?.offsetHeight ?? 0;
+			mergedNoticeHeight = noticeEl?.offsetHeight ?? 0;
+		};
+		measure();
+		if (!conflictEl && !noticeEl) return;
+		return watchSize([conflictEl, noticeEl], measure, (conflictEl ?? noticeEl)?.ownerDocument.defaultView);
 	});
 
 	/**
@@ -685,6 +806,37 @@
 		return () => {
 			clearHighlights(container, api);
 		};
+	});
+
+	/**
+	 * 要件#90 契約5: 現在の一致が隠した・畳んだアラートの枠の中なら、その枠だけを開く(面も読み取り専用の描画も)。
+	 * 塗る effect(CSS Custom Highlight API の有無で止まる)とは別にして、一致の文字範囲から枠を見つける。
+	 */
+	$effect(() => {
+		const container = findTarget;
+		const ranges = findRanges;
+		const current = findCurrent;
+		if (!container || cmFind || !markdownFile) return;
+		if (mdFaceActive && mdComposing) return;
+		const match = ranges[current];
+		if (!match) return;
+		untrack(() => {
+			const range = rangeAtMatch(container, match);
+			if (!range) return;
+			revealAlertsAround(range.startContainer);
+			if (range.endContainer !== range.startContainer) revealAlertsAround(range.endContainer);
+		});
+	});
+
+	/**
+	 * 要件#90 契約9: 読み取り専用の描画(SSH・閾値超え)でも、アラートの枠に面と同じ隠す・畳む・開くを効かせる。
+	 * 描画(`html`)が差し替わるたびに付け直す(1 つずつ畳んだ・開いたは覚えない=契約7)。
+	 */
+	$effect(() => {
+		const root = bodyEl;
+		void html;
+		if (!root || !markdownFile || mdSurface) return;
+		return untrack(() => attachAlertVisibility(root));
 	});
 
 	/** キャレットが対象の中の `contenteditable` にあるか(Shadow DOM も見る)。 */
@@ -950,7 +1102,7 @@
 
 	/**
 	 * 要件#73: 要素の上端をスクロール容器(`article.viewer`)の可視域の上側 ――
-	 * sticky で上に重なる帯(ツールバー・開いていれば検索バー)の直下 ―― へ運ぶ。
+	 * sticky で上に重なる帯(ツールバー・開いていれば検索バー・出ていれば外部変更の帯と知らせ)の直下 ―― へ運ぶ。
 	 * 検索の `scrollRangeIntoContainer` と同じく容器の `scrollTop` だけを動かし、
 	 * 祖先は巻き込まない。帯の高さはスクロールのたびに実寸を読む ―― `toolbarHeight`
 	 * は決まった契機でしか測り直さないので、運ぶ瞬間の値を使う。
@@ -960,7 +1112,12 @@
 		if (!scroller) return;
 		const gap = 8;
 		const findBar = scroller.querySelector<HTMLElement>('.find-bar--sticky');
-		const covered = (toolbarEl?.offsetHeight ?? 0) + (findBar?.offsetHeight ?? 0);
+		// Issue #851 (1): 貼り付いた帯・知らせ(出ているもの)も上に重なる。積まれるので高さの和。
+		const banners = [conflictBannerEl, mergedNoticeEl, removedBannerEl].reduce(
+			(sum, banner) => sum + (banner?.isConnected ? banner.offsetHeight : 0),
+			0,
+		);
+		const covered = (toolbarEl?.offsetHeight ?? 0) + (findBar?.offsetHeight ?? 0) + banners;
 		const offset =
 			el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - covered - gap;
 		scroller.scrollTop = Math.max(0, scroller.scrollTop + offset);
@@ -1118,13 +1275,18 @@
 			onReplaceAll={handleReplaceAll}
 		/>
 	{/if}
-	{#if anyFace && windowState.fileEditor?.conflict && !windowState.externalRemoved}
+	{#if conflictShown}
 		<!--
 			要件#74 契約13: 編集中に重なる外部変更が届いた(か、保存の直前にディスクが変わっていた)。
 			文書は変えずに、どちらを残すかを選ばせる。今の外部変更の帯と同じ場所・同じ class。
 			要件#48 追補h 契約1: ファイルが削除された間は削除の帯だけを出す(同時に出さない)。
 		-->
-		<div class="external-change" data-testid="external-conflict-banner" role="alert">
+		<div
+			class="external-change"
+			data-testid="external-conflict-banner"
+			role="alert"
+			bind:this={conflictBannerEl}
+		>
 			<span class="external-change-text">{CONFLICT_MESSAGE}</span>
 			<button
 				type="button"
@@ -1154,12 +1316,34 @@
 			>
 				Show Differences
 			</button>
+			<!-- 要件#89 契約8: 重なった所を塊ごとに選んでマージする画面へ。 -->
+			<button
+				type="button"
+				class="toolbar-button"
+				data-testid="external-conflict-merge"
+				title="Choose, change by change, between your edits and the file on disk"
+				onclick={() => void openMerge()}
+			>
+				Merge…
+			</button>
 		</div>
 	{/if}
-	{#if anyFace && windowState.fileEditor?.notice}
-		<!-- 要件#74 契約13: 重ならずに取り込んだ外部変更の知らせ(数秒で消える)。 -->
-		<div class="merged-notice" data-testid="external-merged-notice" role="status">
-			{windowState.fileEditor.notice}
+	{#if noticeShown}
+		<!--
+			要件#74 契約13: 重ならずに取り込んだ外部変更の知らせ(数秒で消える)。
+			Issue #851 (2): 重なりの帯と同時に出たら、その下に積む。
+			Issue #851 (5): 紙に載せない。print.css は SHA-256 で固定(AC-56-16)なので、印刷で隠す
+			既存の class(`.structure-notice`。要件#38 追補d。今は他に使う要素が無い)を重ねる。
+			この class に見た目の規則は無い。
+		-->
+		<div
+			class="merged-notice structure-notice"
+			data-testid="external-merged-notice"
+			role="status"
+			bind:this={mergedNoticeEl}
+			style:--vellis-banner-offset="{mergedNoticeOffset}px"
+		>
+			{windowState.fileEditor?.notice}
 		</div>
 	{/if}
 	{#if diffView && anyFace}
@@ -1183,11 +1367,35 @@
 						closeDiff();
 					}
 				: undefined}
+			onMerge={diffView.kind === 'conflict' ? () => void openMerge() : undefined}
+		/>
+	{/if}
+	{#if mergeView && anyFace}
+		<!-- 要件#89 契約9〜12: マージの画面(差分の画面と同じ層の 1 枚)。 -->
+		<EditorDiffView
+			title="Merge Changes"
+			leftName="My Edits"
+			rightName="On Disk"
+			left={mergeView.mine}
+			right={mergeView.theirs}
+			onClose={closeMerge}
+			merge={{
+				base: mergeView.base,
+				mine: mergeView.mine,
+				theirs: mergeView.theirs,
+				rebuilt: mergeView.rebuilt,
+				onCancel: closeMerge,
+				onApply: applyMerge,
+			}}
 		/>
 	{/if}
 	{#if markdownTooBig && !bigRaw}
-		<!-- 要件#74 契約18・判断 8: 閾値を超えた Markdown は今の描画(読み取り専用)で開く。 -->
-		<div class="merged-notice" data-testid="markdown-too-large-notice" role="status">
+		<!--
+			要件#74 契約18・判断 8: 閾値を超えた Markdown は今の描画(読み取り専用)で開く。
+			Issue #851 (6): 貼り付かない(専用の class。見た目は取り込みの知らせと同じ)。
+			Issue #851 (5): 取り込みの知らせと同じく `.structure-notice` で紙に載せない。
+		-->
+		<div class="too-large-notice structure-notice" data-testid="markdown-too-large-notice" role="status">
 			This file is too large to edit in Vellis. Use View ▸ Raw Source to edit it.
 		</div>
 	{/if}
@@ -1199,7 +1407,13 @@
 			要件#48 追補h 契約2: 編集を原文に戻した(dirty が偽)あとも印は下ろさず、
 			文言と title を dirty に合わせる(守る編集が無いのに「未保存」と言わない)。
 		-->
-		<div class="external-change" data-testid="external-removed-banner" role="alert">
+		<div
+			class="external-change"
+			data-testid="external-removed-banner"
+			role="alert"
+			bind:this={removedBannerEl}
+			style:--vellis-banner-offset="{removedBannerOffset}px"
+		>
 			<span class="external-change-text">
 				{windowState.dirty
 					? 'This file was deleted outside the app. Your edits have not been saved.'
@@ -1367,10 +1581,12 @@
 	 * (ツールバーの実寸。検索バーが開いている間はその下端)。本文の上端(帯の高さ分)に
 	 * 載るのは受け入れる。z-index は検索バー(9)より下・本文より上。地の色は半透明の
 	 * 警告色なので、下に本文の地(--color-bg-surface)を敷いて文字を透かさない。
+	 * Issue #851 (2): 取り込みの知らせと同時に出たら、その下に積む(`--vellis-banner-offset`
+	 * =先に出ている帯・知らせの実寸。Viewer が要素ごとに入れる)。
 	 */
 	.external-change {
 		position: sticky;
-		top: var(--vellis-banner-top, 0px);
+		top: calc(var(--vellis-banner-top, 0px) + var(--vellis-banner-offset, 0px));
 		z-index: 8;
 		display: flex;
 		align-items: center;
@@ -1389,14 +1605,22 @@
 	}
 
 	/*
-	 * 要件#74 契約13・Issue #848: 重ならない外部変更を取り込んだ知らせ(と閾値超えの知らせ)。
+	 * 要件#74 契約13・Issue #848: 重ならない外部変更を取り込んだ知らせ。
 	 * 外部変更の帯と同じ場所・同じ高さ・同じ貼り付き方(ツールバーの直下、検索バーが
-	 * 開いている間はその下)。
+	 * 開いている間はその下)。Issue #851 (2): 重なりの帯と同時に出たらその下に積む。
 	 */
 	.merged-notice {
 		position: sticky;
-		top: var(--vellis-banner-top, 0px);
+		top: calc(var(--vellis-banner-top, 0px) + var(--vellis-banner-offset, 0px));
 		z-index: 8;
+	}
+
+	/*
+	 * 取り込みの知らせと閾値超えの知らせ(要件#74 契約18)の見た目。Issue #851 (6): 閾値超えの
+	 * 知らせは専用の class で、貼り付かない(#848 の前のとおり)。
+	 */
+	.merged-notice,
+	.too-large-notice {
 		padding: 6px 12px;
 		background-color: var(--color-bg-raised);
 		border-bottom: 1px solid var(--color-border);

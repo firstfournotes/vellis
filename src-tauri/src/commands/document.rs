@@ -185,6 +185,159 @@ pub async fn save_document(
     Ok(())
 }
 
+/// The result of Save As… (requirements.md #89 契約4): the `file://` URI of
+/// the file written, in the form the frontend can open as it is, and whether
+/// it lies inside the root this window shows (then the window opens it in the
+/// current tab; otherwise it switches the root to the file's folder first).
+/// The keys are snake_case, as the frontend's `SaveAsResult` spells them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SaveAsResult {
+    pub uri: String,
+    pub within_root: bool,
+}
+
+/// Write `content` to `path` for File ▸ Save As… (requirements.md #89 契約3・5・7).
+///
+/// Unlike `save_document` there is neither a root containment nor a save
+/// check: the user picked the place in the system's save dialog (which has
+/// already asked before replacing an existing file), so any folder will do
+/// and an existing file is overwritten. The write itself is the same as a
+/// save's — `LocalProvider::write_text`, tmp (`.<name>.vellis-tmp`) + rename,
+/// bytes verbatim, no temp file left behind on a failure.
+///
+/// `path` must be absolute and name a file in an existing folder: a relative
+/// path, a directory or a missing folder is refused before anything is
+/// created (no folder is made on the way). `root` (the window's root, if any)
+/// only decides `within_root`; when the file is inside it, `uri` is spelled
+/// from that root so it matches the rows the Explorer lists.
+pub async fn write_save_as(
+    root: Option<&std::path::Path>,
+    path: &std::path::Path,
+    content: &str,
+) -> Result<SaveAsResult, String> {
+    use crate::fs::provider::FileProvider;
+
+    if !path.is_absolute() {
+        return Err(format!("Save As needs an absolute path: {}", path.display()));
+    }
+    if path.is_dir() {
+        return Err(format!("{} is a folder, not a file", path.display()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent folder", path.display()))?;
+    if !parent.is_dir() {
+        return Err(format!("the folder {} does not exist", parent.display()));
+    }
+
+    let uri = format!("file://{}", path.display());
+    LocalProvider::new()
+        .write_text(&uri, content)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let inside = root.and_then(|root| {
+        let canonical_root = std::fs::canonicalize(root).ok()?;
+        let resolved = ensure_within_root(root, path).ok()?;
+        let relative = resolved.strip_prefix(&canonical_root).ok()?.to_path_buf();
+        Some(root.join(relative))
+    });
+    Ok(match inside {
+        Some(spelled) => SaveAsResult {
+            uri: format!("file://{}", spelled.display()),
+            within_root: true,
+        },
+        None => SaveAsResult {
+            uri,
+            within_root: false,
+        },
+    })
+}
+
+/// File ▸ Save As… (requirements.md #89 契約3・7): write `content` to `path`
+/// (the absolute path the save dialog returned) through [`write_save_as`].
+///
+/// No `expected_hash`: the write goes to a place the user just chose, so
+/// there is no version to compare with (契約3), and choosing the current file
+/// itself overwrites it (契約7). When the target already exists inside this
+/// window's root, the same pre-write snapshot as `save_document` is taken
+/// first, so the replaced file can be got back through the revert. A target
+/// outside the root has no snapshot store and is written without one. Only
+/// `file://` roots count as a root here (an `ssh://` root's path is remote).
+#[tauri::command]
+pub async fn save_document_as(
+    path: String,
+    content: String,
+    window: Window,
+    state: tauri::State<'_, AppState>,
+) -> Result<SaveAsResult, String> {
+    let label = window.label().to_string();
+    let target = std::path::PathBuf::from(&path);
+    let root_uri = {
+        let wm = state.window_manager.lock().await;
+        wm.get(&label)
+            .and_then(|win_state| win_state.root_uri.clone())
+            .filter(|root| root.scheme == "file")
+    };
+
+    if let Some(root_uri) = &root_uri {
+        if target.is_file() {
+            if let Ok(resolved) = ensure_within_root(&root_uri.path, &target) {
+                snapshot_before_save_as(&window, state.inner(), root_uri, &resolved)?;
+            }
+        }
+    }
+
+    let result = write_save_as(root_uri.as_ref().map(|r| r.path.as_path()), &target, &content).await?;
+    if let Ok(resolved) = std::fs::canonicalize(&target) {
+        if is_settings_file(&resolved) {
+            announce_settings_saved(&window, &resolved);
+        }
+    }
+    Ok(result)
+}
+
+/// The pre-write snapshot of `save_document`, for a Save As… that replaces a
+/// file inside the root (requirements.md #89): the same two stores — under
+/// `<root>/.vellis/snapshots/` with the current AI integration (`ai_marks`),
+/// under the app's data directory otherwise (requirements.md #74 (ag)). A
+/// failure aborts the write, as it does for a save.
+fn snapshot_before_save_as(
+    window: &Window,
+    state: &AppState,
+    root_uri: &Uri,
+    resolved: &std::path::Path,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    if features::is_enabled(features::AI_MARKS) {
+        let store = super::annotation::store_for(state, &root_uri.raw)?;
+        let canonical_root = store.vellis_dir().parent().ok_or_else(|| {
+            format!(
+                "annotation store has no parent root: {}",
+                store.vellis_dir().display()
+            )
+        })?;
+        let relative = relative_to_root(resolved, canonical_root)?;
+        SnapshotManager::new(store.vellis_dir())
+            .take_snapshot(&[relative], &[], now)
+            .map_err(|e| format!("could not snapshot before saving: {}", e))?;
+    } else {
+        let app_data = window
+            .app_handle()
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("could not snapshot before saving: no app data folder: {}", e))?;
+        let canonical_root = std::fs::canonicalize(&root_uri.path)
+            .map_err(|e| format!("could not snapshot before saving: {}", e))?;
+        let relative = relative_to_root(resolved, &canonical_root)?;
+        let store_dir = snapshot_store_dir(&app_data, &canonical_root);
+        SnapshotManager::at(&store_dir, canonical_root.clone())
+            .take_snapshot(&[relative], &[], now)
+            .map_err(|e| format!("could not snapshot before saving: {}", e))?;
+    }
+    Ok(())
+}
+
 /// `resolved` as a path relative to `canonical_root` (the form
 /// `SnapshotManager::take_snapshot` wants).
 fn relative_to_root(resolved: &std::path::Path, canonical_root: &std::path::Path) -> Result<String, String> {

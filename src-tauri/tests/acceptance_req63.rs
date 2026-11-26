@@ -162,6 +162,8 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
         "raw_source_item",
         // 要件#74 第4段 4-2(2026-11-17 由谷の決定 4-5・棚卸し 3): View ▸ Show Formatting Toolbar は Raw Source の直後。14 → 15。
         "show_format_toolbar_item",
+        // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts ▸ は Show Formatting Toolbar の直後。15 → 16。
+        "alerts_menu",
         "view_chrome_sep",
         "zoom_in_item",
         "zoom_out_item",
@@ -171,7 +173,7 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
     ];
     assert_eq!(
         idents, expected,
-        "the View menu must hold exactly the 15 entries of requirement #62 追補b / #56 stage 1 / #80 / #74 2-3 / #74 4-2 in this order (found {idents:?})"
+        "the View menu must hold exactly the 16 entries of requirement #62 追補b / #56 stage 1 / #80 / #74 2-3 / #74 4-2 / #90 in this order (found {idents:?})"
     );
 }
 

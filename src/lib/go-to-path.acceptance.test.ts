@@ -886,6 +886,8 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 			'open_document',
 			'open_binary_document',
 			'save_document',
+			// 要件89(2026-11-26)で改めた(docs/requirements/req-89.md「要件側の更新」): Save As… の command
+			'save_document_as',
 			'set_root',
 			'switch_root_confirmed',
 			'new_window',
