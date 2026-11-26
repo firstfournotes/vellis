@@ -1003,8 +1003,9 @@ describe('AC-60-20: 依存追加ゼロ・Tauri command 追加ゼロ・不変フ�
 		// また Viewer.find.wiring のブロック編集中の Esc の件を編集面の件に書き直したため、この 2 本の固定値を更新
 		// (6c8768d で Viewer.find.wiring を撤去の後の形=面の検索の形に直したため、その固定値を再び更新)
 		// (要件74 第3段 3-1 で依存の固定に prosemirror-gapcursor / prosemirror-inputrules、3-5 で prosemirror-dropcursor を足したため=棚卸し 1・2、再び更新)
+		// 要件#88(2026-11-26・オーケストレーターの決定=req-88.md に記帳)で AC-54-14 の html-viewer.ts の固定値を更新したため、このファイルの固定値も更新
 		expect(hash('src/lib/find-in-document.acceptance.test.ts')).toBe(
-			'dc44fc88b050da5b87dfffe5874560bf60ec796f03dce3245543e46e3d794d1d'
+			'97080b4e4d8a7f9e67240ac7e8bbdbf226ba48fa187756242b18a3baa5a9155e'
 		);
 	});
 });

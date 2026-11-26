@@ -626,9 +626,10 @@ describe('AC-54-14 — 不変と依存(契約⑦)', () => {
 	// 後続要件が正当に変える場合は要件側で決めてから固定値を更新する。
 	// 要件#8 追補a(4)(2026-10-19)で追補a(retargetLinks のコメント終端・生テキスト要素)確定後の内容に更新
 	// 要件#8 追補d(2026-10-26・由谷承認)で追補d(base の href の & を逃がす・生の文字の要素の終わりのタグに境界・svg/math/select の中は生の文字にしない=Issue #380・#705)確定後の内容に更新
+	// 要件#88(2026-11-26・オーケストレーターの決定=req-88.md に記帳)で buildSrcdoc に 4 つ目の引数 links(リンクの差し込み・省くと今までどおり)を足したため、その確定後の内容に更新
 	test('src/lib/html-viewer.ts は無改変(SHA-256 固定)', () => {
 		expect(sha256(readRepoFile('src/lib/html-viewer.ts'))).toBe(
-			'f46496a025f1685c2bc03034a6e56b50e6dfd10a8a8d7fc6dbd03c4b83466b5d',
+			'fc644182c569359203321ff16c8eecc100ff6f6e00dff0ba2b07d3c2e066e52d',
 		);
 	});
 

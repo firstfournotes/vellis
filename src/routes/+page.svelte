@@ -33,7 +33,19 @@
 	import { saveFileEditor } from '../editor/file-editor';
 	import { MENU_FORMAT_EVENT, runFormatCommand, type FormatItemId } from '../editor/commands';
 	import { detectFileType, renderForDisplay, type FileType } from '$lib/file-type';
-	import { openCommandFor, openForDisplay, openInitialDocument } from '$lib/open-document';
+	import {
+		openCommandFor,
+		openFileFailedMessage,
+		openForDisplay,
+		openInitialDocument
+	} from '$lib/open-document';
+	import {
+		HTML_LINK_CLICKED_EVENT,
+		createLinkToken,
+		decideHtmlLink,
+		toDocumentUri
+	} from '$lib/html-link';
+	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { imageSrcWithVersion } from '$lib/image-watch';
 	import {
 		DEFAULT_PANE_WIDTH,
@@ -1644,6 +1656,11 @@
 	// The render the effect below started last (awaited before printing, 判断 (p)).
 	let pendingRender: Promise<void> = Promise.resolve();
 
+	// 要件#88: この窓の HTML の表示のリンクを使えるようにするトークン。ページの読み込みごとに
+	// 1 回だけ作り、この窓の srcdoc はすべてこれで作る(ズームで作り直しても通知と照合が合う)。
+	// 文書はスクリプトを動かせず自分の srcdoc を読めないので、トークンを知り得ない。
+	const htmlLinks = { token: createLinkToken() };
+
 	// Build the viewer body whenever the active document changes.
 	// `renderForDisplay` dispatches on file type (要件#2): Markdown goes
 	// through the unified pipeline, text files are shown verbatim as plain
@@ -1666,9 +1683,59 @@
 		// only they re-render when the code theme changes (an HTML preview would
 		// otherwise rebuild its srcdoc for nothing).
 		const code = type === 'markdown' || type === 'text' ? codeTheme : undefined;
-		pendingRender = renderForDisplay(uri, content, zoom, code).then((result) => {
+		pendingRender = renderForDisplay(uri, content, zoom, code, htmlLinks).then((result) => {
 			windowState.setRenderResult(uri, result);
 		});
+	});
+
+	// --- HTML の表示の中のリンク(要件#88) ------------------------------------
+	// クリックすると iframe は専用の URL へ行こうとし、Rust が断って(プレビューはそのまま)
+	// この窓だけに `html_link_clicked` を送る。することは `decideHtmlLink` が決める:
+	// 外部の URL は確かめずに OS へ(決定③)・ローカルのファイルは Explorer のファイルの行の
+	// クリックと同じ経路で今のタブに開く(決定①②)。開けなければ要件#71 と同じ alert で、
+	// 表示中の文書は前のまま。
+	async function handleHtmlLinkClicked(url: string) {
+		const doc = windowState.currentDocument;
+		// HTML の表示を出していない(今の文書が HTML でない)ときに届いた通知は捨てる。
+		if (!doc || detectFileType(doc.uri) !== 'html') return;
+		const action = decideHtmlLink({ url, token: htmlLinks.token, docUri: doc.uri });
+		if (action.kind === 'external') {
+			openUrl(action.url).catch((err) => {
+				console.warn('[html-link] could not hand the URL to the OS:', err);
+			});
+			return;
+		}
+		if (action.kind !== 'open') return;
+		// Explorer の URI と同じ形(パスを符号化しない)にしてから開く。
+		const uri = toDocumentUri(action.uri);
+		// 要件#2: バイナリは開かない(Explorer のクリックと同じに、開く前に止まる)。
+		if (detectFileType(uri) === 'binary') return;
+		// 要件#48 契約④: この窓で別のファイルを開くと編集は消える。
+		if (!(await confirmDiscardEdits())) return;
+		try {
+			windowState.setDocument(await openForDisplay(uri));
+		} catch (err) {
+			// 要件#71 契約2: 知らせて、表示中の文書は前のまま。
+			alert(openFileFailedMessage(err));
+		}
+	}
+
+	// 購読の解除があるので await を挟まない専用の onMount に分けている。
+	// `$lib/events` の listen は今の窓だけの購読(要件#33)= 別の窓のクリックは届かない(契約 12)。
+	onMount(() => {
+		let unlisten: (() => void) | null = null;
+		let disposed = false;
+		void listen<{ url?: unknown }>(HTML_LINK_CLICKED_EVENT, (e) => {
+			const url = e.payload?.url;
+			if (typeof url === 'string') void handleHtmlLinkClicked(url);
+		}).then((off) => {
+			if (disposed) off();
+			else unlisten = off;
+		});
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
 	});
 
 	// Re-anchor marks for the active document on every content change

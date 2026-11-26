@@ -198,6 +198,11 @@ pub(crate) fn run_app(
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // A click on a link in the HTML viewer is reported to its window
+        // (要件#88). Registered ahead of the net: Tauri asks the plugins in
+        // this order and stops at the first refusal, so behind the net the
+        // click would be refused before it is reported.
+        .plugin(window::html_link::plugin())
         // Every window stays on the app's own URLs: a file dropped onto a
         // frame must not replace the window's content (要件#74 第3段 3-5).
         .plugin(window::navigation::plugin())

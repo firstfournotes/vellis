@@ -18,6 +18,13 @@
  * renamed to `data-vellis-href` — and an SVG link's `xlink:href` to
  * `data-vellis-xlink-href` — which keeps the value verbatim while making the
  * element inert, and a `<style>` restores the look of a link.
+ *
+ * The on-screen preview passes `links` (要件#88): every link then also gets a
+ * target of the app's own — `vellis-asset://link/<token>?href=…`, which the
+ * navigation plugin refuses and reports to the window, or `about:srcdoc#…` for
+ * an in-page jump — so a click opens the file in Vellis or the URL in the
+ * browser while the preview itself stays. The print document leaves `links`
+ * out and gets exactly the bytes it always did.
  */
 import { toAssetUri } from './uri';
 import { DEFAULT_ZOOM } from './zoom';
@@ -76,6 +83,23 @@ const NAVIGATING_ATTRIBUTES = new Map<string, Map<string, string>>([
 	],
 	['area', new Map([['href', 'data-vellis-href']])],
 ]);
+
+/**
+ * The same table for a preview whose links are made clickable (要件#88): on top
+ * of the targets, `target` and `download` are parked too. A sandboxed frame
+ * drops a `_blank` (or a `<base target>`) navigation without asking anyone, and
+ * WebKit turns a `download` link into a download, which never reaches the
+ * navigation handler — the injected `target="_self"` has to be the only target.
+ */
+const CLICKABLE_ATTRIBUTES = new Map<string, Map<string, string>>(
+	[...NAVIGATING_ATTRIBUTES].map(([element, renames]) => [
+		element,
+		new Map([...renames, ['target', 'data-vellis-target'], ['download', 'data-vellis-download']]),
+	]),
+);
+
+/** What `buildSrcdoc` needs to make links clickable: the window's token (`[A-Za-z0-9_-]+`). */
+export type SrcdocLinks = { token: string };
 
 /**
  * Elements whose content is raw text, mapped to the search for their end tag.
@@ -192,8 +216,35 @@ function skipAttributeValue(html: string, from: number): number {
 	return i;
 }
 
-/** One attribute name to rename: `length` characters at `at` become `inert`. */
-type Rename = { at: number; length: number; inert: string };
+/**
+ * The value of the attribute whose name ends at `from` and whose value (if
+ * any) ends at `end`, as written: without its quotes, character references
+ * left alone. A bare attribute's value is the empty string.
+ */
+function attributeValue(html: string, from: number, end: number): string {
+	let i = from;
+	while (i < end && isSpace(html[i])) {
+		i += 1;
+	}
+	if (html[i] !== '=') {
+		return '';
+	}
+	i += 1;
+	while (i < end && isSpace(html[i])) {
+		i += 1;
+	}
+	const quote = html[i];
+	if (quote === '"' || quote === "'") {
+		return html.slice(i + 1, end - 1);
+	}
+	return html.slice(i, end);
+}
+
+/**
+ * One attribute name to rename: `length` characters at `at` become `inert`.
+ * `name` is the lowercased attribute name and `value` its value as written.
+ */
+type Rename = { at: number; length: number; inert: string; name: string; value: string };
 
 /**
  * Walk one open tag's attributes, starting just past the element name. Returns
@@ -230,16 +281,73 @@ function scanTag(
 			i += 1;
 		}
 		const name = html.slice(nameAt, i);
+		const valueFrom = i;
 		i = skipAttributeValue(html, i);
 		if (i === -1) {
 			return null;
 		}
-		const inert = navigating?.get(name.toLowerCase());
+		const lower = name.toLowerCase();
+		const inert = navigating?.get(lower);
 		if (inert !== undefined) {
-			renames.push({ at: nameAt, length: name.length, inert });
+			renames.push({
+				at: nameAt,
+				length: name.length,
+				inert,
+				name: lower,
+				value: attributeValue(html, valueFrom, i),
+			});
 		}
 	}
 	return null;
+}
+
+/** `value` with HTML whitespace taken off both ends. */
+function trimSpace(value: string): string {
+	let start = 0;
+	let end = value.length;
+	while (start < end && isSpace(value[start])) {
+		start += 1;
+	}
+	while (end > start && isSpace(value[end - 1])) {
+		end -= 1;
+	}
+	return value.slice(start, end);
+}
+
+/**
+ * What goes right after a clickable link's element name (要件#88 作り 1):
+ * ` href="<target>" target="_self"`, or nothing when the link has no target.
+ *
+ * The link's target is its first `href`, else its first `xlink:href`; an empty
+ * (or all-whitespace) one is no target. A `#…` value jumps inside the frame
+ * through `about:srcdoc#…`; anything else becomes
+ * `vellis-asset://link/<token>?href=<the value as written, URI-component
+ * encoded>` — character references are decoded by the window that receives the
+ * click, so this stays a plain splice.
+ */
+function clickTarget(renames: Rename[], token: string): string {
+	const link =
+		renames.find((rename) => rename.name === 'href') ?? renames.find((rename) => rename.name === 'xlink:href');
+	if (link === undefined) {
+		return '';
+	}
+	const trimmed = trimSpace(link.value);
+	if (trimmed === '') {
+		return '';
+	}
+	let target: string;
+	if (trimmed.startsWith('#')) {
+		target = `about:srcdoc${trimmed.replace(/"/g, '&quot;')}`;
+	} else {
+		let encoded: string;
+		try {
+			encoded = encodeURIComponent(link.value);
+		} catch {
+			return ''; // a lone surrogate: the link stays inert
+		}
+		target = `vellis-asset://link/${token}?href=${encoded}`;
+	}
+	return ` href="${target}" target="_self"`;
 }
 
 /**
@@ -255,9 +363,14 @@ function scanTag(
  * Inside `<svg>` / `<math>` / `<select>` the raw text elements are markup, so
  * the walk goes on through them (追補d 2026-10-25).
  *
+ * With `links` (要件#88), `target` and `download` are parked as well and every
+ * link with a target gets one of the app's own spliced in right after its
+ * element name (`clickTarget`).
+ *
  * Returns the input itself when there was nothing to rename.
  */
-function retargetLinks(content: string): string {
+function retargetLinks(content: string, links?: SrcdocLinks): string {
+	const table = links === undefined ? NAVIGATING_ATTRIBUTES : CLICKABLE_ATTRIBUTES;
 	let out = '';
 	let copied = 0;
 	let foreignDepth = 0; // open <svg> / <math>, nested ones counted
@@ -299,9 +412,14 @@ function retargetLinks(content: string): string {
 			nameEnd += 1;
 		}
 		const name = content.slice(i, nameEnd).toLowerCase();
-		const tag = scanTag(content, nameEnd, NAVIGATING_ATTRIBUTES.get(name));
+		const tag = scanTag(content, nameEnd, table.get(name));
 		if (tag === null) {
 			break; // unterminated tag: leave the remainder verbatim
+		}
+		const injection = links === undefined ? '' : clickTarget(tag.renames, links.token);
+		if (injection !== '') {
+			out += content.slice(copied, nameEnd) + injection;
+			copied = nameEnd;
 		}
 		for (const rename of tag.renames) {
 			out += content.slice(copied, rename.at) + rename.inert;
@@ -368,9 +486,17 @@ export function zoomStyleTag(zoom: number): string {
  * All insertions are plain string splices — the document is never parsed and
  * re-serialised, so everything around them survives verbatim. They land ahead
  * of any `<base>` the document carries itself, because the first one wins.
+ *
+ * `links` makes the links clickable for the on-screen preview (要件#88); left
+ * out — as the print document does — the result is what it always was.
  */
-export function buildSrcdoc(content: string, docUri: string, zoom: number = DEFAULT_ZOOM): string {
-	const body = retargetLinks(content);
+export function buildSrcdoc(
+	content: string,
+	docUri: string,
+	zoom: number = DEFAULT_ZOOM,
+	links?: SrcdocLinks,
+): string {
+	const body = retargetLinks(content, links);
 	// The href is an attribute value, so `&` is escaped: a folder named `&copy`
 	// would otherwise decode to `©` and shift the base (追補d 2026-10-25). `URL`
 	// already percent-encodes `"` in the path; it is escaped all the same.

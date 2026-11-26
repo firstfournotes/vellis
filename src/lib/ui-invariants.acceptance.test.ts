@@ -375,7 +375,9 @@ describe('AC-56-13 文言の不変(契約 6): menu.rs の文字列リテラル(�
 // ---------------------------------------------------------------------------
 
 const HTML_VIEWER_SVELTE_SHA = '7e33f1e2c5430e87f19ed91a12797d0756136f76f1249405312d2216577483d1';
-const HTML_VIEWER_TS_SHA = 'f46496a025f1685c2bc03034a6e56b50e6dfd10a8a8d7fc6dbd03c4b83466b5d';
+// 要件#88(2026-11-26・オーケストレーターの決定=req-88.md と req-56.md に記帳)で buildSrcdoc に 4 つ目の引数 links(リンクの差し込み・省くと今までどおり)を足したため、
+// html-viewer.ts の固定値をその確定後の内容に更新(HtmlViewer.svelte は無改変のまま)
+const HTML_VIEWER_TS_SHA = 'fc644182c569359203321ff16c8eecc100ff6f6e00dff0ba2b07d3c2e066e52d';
 
 describe('AC-56-14 iframe まわりの不変(契約 6): HtmlViewer.svelte と html-viewer.ts の SHA-256', () => {
 	test('src/components/HtmlViewer.svelte は再起案時点から不変', () => {

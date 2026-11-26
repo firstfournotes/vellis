@@ -17,7 +17,7 @@ import { render } from '../markdown/renderer';
 import type { SourceIndex } from '../markdown/types';
 import { highlightCode } from './code-highlight';
 import { languageForFile } from './code-language';
-import { buildSrcdoc } from './html-viewer';
+import { buildSrcdoc, type SrcdocLinks } from './html-viewer';
 import { toAssetUri } from './uri';
 
 export type FileType =
@@ -267,18 +267,22 @@ export interface DisplayResult {
  * `codeTheme` is the Shiki theme for Markdown fences and code files, chosen by
  * the window from the current theme and mode (要件#56 契約 3). Omitted: the
  * Default theme's light one.
+ *
+ * `links` also only reaches HTML: the window's token that makes the preview's
+ * links clickable (要件#88). Left out, the links stay inert.
  */
 export async function renderForDisplay(
 	uri: string,
 	content: string,
 	zoom?: number,
 	codeTheme?: string,
+	links?: SrcdocLinks,
 ): Promise<DisplayResult> {
 	switch (detectFileType(uri)) {
 		case 'markdown':
 			return await render(content, uri, { codeTheme });
 		case 'html':
-			return { html: '', index: null, srcdoc: buildSrcdoc(content, uri, zoom) };
+			return { html: '', index: null, srcdoc: buildSrcdoc(content, uri, zoom, links) };
 		case 'image':
 			// The body never carries the file itself: the protocol handler reads the
 			// bytes when `<img>` fetches the asset URI (要件#16 ②⑦). SVG source is

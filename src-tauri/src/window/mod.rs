@@ -1,3 +1,4 @@
+pub mod html_link;
 pub mod lifecycle;
 pub mod manager;
 pub mod navigation;
