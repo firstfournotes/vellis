@@ -159,7 +159,21 @@ impl FileProvider for LocalProvider {
             // directory would show up as `Symlink` and the tree could not expand it
             // (要件#31 契約①, backlog #68). Re-stat links through `fs::metadata`
             // (which follows) so kind/size/modified describe the *target*.
-            let mut metadata = de.metadata().await.map_err(io_to_fs)?;
+            //
+            // An entry that vanished between readdir and this stat (e.g. the tmp file
+            // of a write-then-rename save) is skipped instead of failing the whole
+            // listing (Issue #858). Other errors still fail the listing as before.
+            let mut metadata = match de.metadata().await {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!(
+                        path = %entry_path.display(),
+                        "entry vanished mid-listing; skipping it"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(io_to_fs(e)),
+            };
             let mut link = None;
             if metadata.is_symlink() {
                 // The raw link text for the tree's tooltip (要件#70 契約1). A failed

@@ -355,12 +355,20 @@ beforeEach(() => {
 
 	decodeSpy = vi.fn(async (_bytes: ArrayBuffer) => stereoBuffer());
 	const decode = decodeSpy;
+	// 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): スペクトル(既定で出す)が 32 kHz の
+	// context でも decode するので、数えるのは波形の 8 kHz の context の decode だけ。ほかの rate は数えずに同じ buffer を返す。
 	vi.stubGlobal(
 		'OfflineAudioContext',
 		class {
-			constructor(_channels: number, _length: number, _sampleRate: number) {}
+			sampleRate: number;
+			constructor(...args: unknown[]) {
+				const first = args[0];
+				this.sampleRate =
+					typeof first === 'object' && first !== null ? (first as { sampleRate: number }).sampleRate : (args[2] as number);
+			}
 			decodeAudioData(bytes: ArrayBuffer): Promise<FakeAudioBuffer> {
-				return decode(bytes);
+				if (this.sampleRate === 8000) return decode(bytes);
+				return Promise.resolve(stereoBuffer());
 			}
 		},
 	);

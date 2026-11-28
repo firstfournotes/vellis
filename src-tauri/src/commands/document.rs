@@ -121,10 +121,10 @@ pub async fn save_document(
 
     // Optimistic lock (requirements.md #74 契約14): before anything is copied
     // or written, the file must still be the version the editor started from.
+    // A file that cannot be read (gone, a directory, not UTF-8) is not a
+    // conflict: `read_disk_for_save` returns the reason as is (Issue #829).
     if expected_hash.is_some() {
-        let disk = tokio::fs::read_to_string(&resolved)
-            .await
-            .map_err(|e| format!("{SAVE_CONFLICT_PREFIX}: {e}"))?;
+        let disk = read_disk_for_save(&resolved).await?;
         check_expected_hash(&disk, expected_hash.as_deref())?;
     }
 
@@ -387,6 +387,17 @@ fn base36(mut n: u64) -> String {
     }
     out.reverse();
     String::from_utf8(out).expect("base-36 digits are ASCII")
+}
+
+/// Reads the file on disk for the optimistic lock of `save_document`. When it
+/// cannot be read (missing, a directory, not UTF-8) the error carries the io
+/// reason and never starts with [`SAVE_CONFLICT_PREFIX`]: that is not a
+/// "changed on disk" conflict, and the frontend shows it as a save failure
+/// (Issue #829).
+pub async fn read_disk_for_save(path: &std::path::Path) -> Result<String, String> {
+    tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("Could not read {} before saving: {e}", path.display()))
 }
 
 /// The optimistic lock of `save_document` as a pure function: `None` writes

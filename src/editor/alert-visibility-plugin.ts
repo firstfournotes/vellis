@@ -18,6 +18,7 @@ import {
 	groupHiddenAlerts,
 	hideAll,
 	isAlertKind,
+	sameAlertVisibility,
 	subscribeAlertVisibility,
 	type AlertKind,
 	type AlertVisibility,
@@ -26,10 +27,11 @@ import {
 	ALERT_REVEAL_EVENT,
 	ALERT_SELECTOR,
 	ALERT_TITLE_SELECTOR,
-	changedKinds,
 	createAlertMarker,
 	effectiveAlertState,
+	overridesAfterSetting,
 	selectionTouches,
+	toggledOverride,
 	type AlertOverride,
 	type AlertState,
 } from '$lib/alert-dom';
@@ -58,6 +60,9 @@ type AlertMeta =
 	| { toggle: number };
 
 export const alertVisibilityKey = new PluginKey<AlertPluginState>('vellis-alert-visibility');
+
+/** 印の組を作る設定(渡す種類はもう隠れたものだけ)。 */
+const ALL_HIDDEN = hideAll();
 
 function alertKindOf(node: PMNode): AlertKind | null {
 	if (node.type.name !== 'alert') return null;
@@ -89,7 +94,7 @@ function compute(doc: PMNode, visibility: AlertVisibility, overrides: ReadonlyMa
 			kinds.push(hidden ? kind : null);
 			if (!child.isTextblock && !child.isAtom && child.childCount > 0) visit(child, pos + 1);
 		});
-		for (const group of groupHiddenAlerts(kinds, hideAll())) {
+		for (const group of groupHiddenAlerts(kinds, ALL_HIDDEN)) {
 			const at = starts[group.start]!;
 			const size = group.end - group.start;
 			const counts = group.counts;
@@ -144,9 +149,18 @@ function touchesAlerts(tr: Transaction): boolean {
 	return false;
 }
 
-/** 取引で枠の位置を写す(枠に触れていない取引のとき)。 */
+/**
+ * 取引で枠の位置を写す(枠に触れていない取引のとき)。範囲削除で丸ごと消えた枠(写した後に長さ 0)は落とす
+ * (Issue #860: 残すと印刷の突き合わせが数の不一致で全体の設定に落ちる)。
+ */
 function mapAlerts(alerts: FaceAlert[], tr: Transaction): FaceAlert[] {
-	return alerts.map((a) => ({ ...a, pos: tr.mapping.map(a.pos, 1), end: tr.mapping.map(a.end, -1) }));
+	const out: FaceAlert[] = [];
+	for (const a of alerts) {
+		const pos = tr.mapping.map(a.pos, 1);
+		const end = tr.mapping.map(a.end, -1);
+		if (pos < end) out.push({ ...a, pos, end });
+	}
+	return out;
 }
 
 /** 印の組(`start` から続く `size` 個の枠)を開く。 */
@@ -247,19 +261,29 @@ function fixSelection(oldState: EditorState, newState: EditorState): Transaction
 	return newState.tr.setSelection(selection).setMeta('addToHistory', false);
 }
 
+/**
+ * カーソルが文字の塊の端にあり、その `dir` の向きの隣に隠した・畳んだ枠が続くとき、その連なりを越えた位置と今の枠の一覧。
+ * そうでなければ null。
+ */
+function concealedAhead(state: EditorState, dir: 1 | -1): { pos: number; list: FaceAlert[] } | null {
+	const sel = state.selection;
+	if (!sel.empty || !(sel instanceof TextSelection)) return null;
+	const $head = sel.$head;
+	if (!$head.parent.isTextblock) return null;
+	const atEdge = dir > 0 ? $head.parentOffset === $head.parent.content.size : $head.parentOffset === 0;
+	if (!atEdge) return null;
+	const list = concealed(state);
+	if (list.length === 0) return null;
+	const { pos, skipped } = passConcealed(state.doc, list, dir > 0 ? $head.after() : $head.before(), dir);
+	return skipped ? { pos, list } : null;
+}
+
 /** 矢印キーで隠した枠を飛ばす(契約8)。カーソルが文字の塊の端にあり、その先に隠した枠が続くときだけ。 */
 function skipConcealed(view: EditorView, dir: 1 | -1): boolean {
 	const { state } = view;
-	const sel = state.selection;
-	if (!sel.empty || !(sel instanceof TextSelection)) return false;
-	const $head = sel.$head;
-	if (!$head.parent.isTextblock) return false;
-	const atEdge = dir > 0 ? $head.parentOffset === $head.parent.content.size : $head.parentOffset === 0;
-	if (!atEdge) return false;
-	const list = concealed(state);
-	if (list.length === 0) return false;
-	const { pos, skipped } = passConcealed(state.doc, list, dir > 0 ? $head.after() : $head.before(), dir);
-	if (!skipped) return false;
+	const ahead = concealedAhead(state, dir);
+	if (!ahead) return false;
+	const { pos, list } = ahead;
 	const target = Selection.findFrom(state.doc.resolve(pos), dir, true);
 	if (target && !concealedAround(list, target.head)) {
 		view.dispatch(state.tr.setSelection(target).scrollIntoView());
@@ -272,24 +296,14 @@ function skipConcealed(view: EditorView, dir: 1 | -1): boolean {
  * 見えない枠の中身と結合しない(契約8)。出ている枠との結合は今までどおり。
  */
 function guardJoin(view: EditorView, dir: 1 | -1): boolean {
-	const { state } = view;
-	const sel = state.selection;
-	if (!sel.empty || !(sel instanceof TextSelection)) return false;
-	const $head = sel.$head;
-	if (!$head.parent.isTextblock) return false;
-	const atEdge = dir > 0 ? $head.parentOffset === $head.parent.content.size : $head.parentOffset === 0;
-	if (!atEdge) return false;
-	const list = concealed(state);
-	if (list.length === 0) return false;
-	return passConcealed(state.doc, list, dir > 0 ? $head.after() : $head.before(), dir).skipped;
+	return concealedAhead(view.state, dir) !== null;
 }
 
 /** 見出しの要素からその枠の位置。 */
 function alertPosOfTitle(view: EditorView, title: Element): number | null {
 	const alertEl = title.closest(ALERT_SELECTOR);
 	if (!alertEl || alertEl.querySelector(ALERT_TITLE_SELECTOR) !== title) return null;
-	for (const a of faceAlerts(view.state)) if (view.nodeDOM(a.pos) === alertEl) return a.pos;
-	return null;
+	return alertPosOfElement(view, alertEl);
 }
 
 function alertPosOfElement(view: EditorView, el: Element): number | null {
@@ -370,26 +384,17 @@ export function alertVisibilityPlugin(): Plugin<AlertPluginState> {
 				let visibility = prev.visibility;
 				let overrides: Map<number, AlertOverride> = tr.docChanged ? mapOverrides(prev.overrides, tr) : new Map(prev.overrides);
 				if (meta && 'visibility' in meta) {
-					const changed = changedKinds(visibility, meta.visibility);
+					const byPos = new Map(prev.alerts.map((a) => [a.pos, a.kind] as const));
+					overrides =
+						overridesAfterSetting(overrides, (pos) => byPos.get(pos), visibility, meta.visibility, meta.resetLocal === true) ??
+						overrides;
 					visibility = meta.visibility;
-					if (meta.resetLocal) {
-						// Show All / Hide All: 1 つずつの開き・畳みを全部捨てる
-						overrides = new Map();
-					} else if (changed.size > 0) {
-						const byPos = new Map(prev.alerts.map((a) => [a.pos, a.kind] as const));
-						overrides = new Map(
-							[...overrides].filter(([pos]) => {
-								const kind = byPos.get(pos);
-								return kind === undefined || !changed.has(kind);
-							}),
-						);
-					}
 				} else if (meta && 'reveal' in meta) {
 					for (const pos of meta.reveal) overrides.set(pos, 'shown');
 				} else if (meta && 'toggle' in meta) {
 					const current = prev.alerts.find((a) => a.pos === meta.toggle);
-					if (current?.state === 'collapsed') overrides.set(meta.toggle, 'shown');
-					else if (current?.state === 'shown') overrides.set(meta.toggle, 'collapsed');
+					const next = current ? toggledOverride(current.state) : null;
+					if (next) overrides.set(meta.toggle, next);
 				}
 				return { visibility, overrides, ...compute(tr.doc, visibility, overrides) };
 			},
@@ -447,7 +452,7 @@ export function alertVisibilityPlugin(): Plugin<AlertPluginState> {
 		view: (view) => {
 			const unsubscribe = subscribeAlertVisibility((visibility, change) => {
 				const prev = alertVisibilityKey.getState(view.state);
-				const same = !!prev && changedKinds(prev.visibility, visibility).size === 0;
+				const same = !!prev && sameAlertVisibility(prev.visibility, visibility);
 				if (same && (!change.resetLocal || prev.overrides.size === 0)) return;
 				dispatchAlertMeta(view, { visibility, resetLocal: change.resetLocal });
 			});

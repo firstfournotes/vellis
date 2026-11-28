@@ -10,13 +10,25 @@
  */
 import { RELOAD_FILE_LABEL } from '$lib/reload-file';
 import type { FormatItemId } from './commands';
+import type { TableHandleItemId } from './table-commands';
 import type { ActiveFormat } from './active-format';
 
 /** メニューの 1 項目。`predefined` は OS の定義済みの項目(クリップボードは JS を通らない)。 */
 export type EditorMenuEntry =
 	| { kind: 'predefined'; item: 'Cut' | 'Copy' | 'Paste' }
 	| { kind: 'separator' }
-	| { kind: 'item'; id: string; label: string; accelerator?: string; checked?: boolean }
+	| {
+			kind: 'item';
+			id: string;
+			label: string;
+			accelerator?: string;
+			checked?: boolean;
+			/**
+			 * ネイティブの項目の id(省略=`id` から決める)。メニューバーにも同じ id の項目があると、Rust の on_menu_event が
+			 * メニューバーの命令として前面の窓へも送り、JS の action と 2 回走る(Issue #822)。そういう項目は別の id にする
+			 */
+			nativeId?: string;
+	  }
 	| { kind: 'submenu'; id: string; label: string; items: EditorMenuEntry[] };
 
 /** 右クリックされた面。`raw` は Markdown の View ▸ Raw Source。 */
@@ -55,13 +67,70 @@ export const FORMAT_ACCELERATORS: Readonly<Partial<Record<FormatItemId, string>>
 	'format-outdent': 'CmdOrCtrl+[',
 };
 
+/**
+ * Format の項目の英語の名前(メニューバーの Format と同じ綴り=menu.rs)。右クリックの Format ▸ / Table ▸・表の印のメニュー・
+ * 書式のツールバーと浮遊バーが、この 1 つの表から引く。
+ */
+/**
+ * 名前を持つ Format の項目。インデント(キーだけ)と表の端の +(印だけ)は名前を引かない。
+ * 表を `Record` にして、項目を足したときに名前の書き忘れ・綴りの誤りを `pnpm check` で止める。
+ */
+export type FormatNamedItemId =
+	| Exclude<FormatItemId, 'format-indent' | 'format-outdent'>
+	| Exclude<TableHandleItemId, 'format-table-append-row' | 'format-table-append-column'>;
+
+export const FORMAT_ITEM_NAMES: Readonly<Record<FormatNamedItemId, string>> = {
+	'format-bold': 'Bold',
+	'format-italic': 'Italic',
+	'format-strikethrough': 'Strikethrough',
+	'format-inline-code': 'Inline Code',
+	'format-link': 'Link…',
+	'format-clear': 'Clear Formatting',
+	'format-body-text': 'Body Text',
+	'format-heading-1': 'Heading 1',
+	'format-heading-2': 'Heading 2',
+	'format-heading-3': 'Heading 3',
+	'format-heading-4': 'Heading 4',
+	'format-heading-5': 'Heading 5',
+	'format-heading-6': 'Heading 6',
+	'format-bulleted-list': 'Bulleted List',
+	'format-numbered-list': 'Numbered List',
+	'format-task-list': 'Task List',
+	'format-quote': 'Quote',
+	'format-code-block': 'Code Block',
+	'format-alert-note': 'Note',
+	'format-alert-tip': 'Tip',
+	'format-alert-important': 'Important',
+	'format-alert-warning': 'Warning',
+	'format-alert-caution': 'Caution',
+	'format-insert-table': 'Table',
+	'format-insert-rule': 'Horizontal Rule',
+	'format-insert-footnote': 'Footnote',
+	'format-insert-image': 'Image…',
+	'format-table-row-above': 'Insert Row Above',
+	'format-table-row-below': 'Insert Row Below',
+	'format-table-column-left': 'Insert Column Left',
+	'format-table-column-right': 'Insert Column Right',
+	'format-table-delete-row': 'Delete Row',
+	'format-table-delete-column': 'Delete Column',
+	'format-table-delete': 'Delete Table',
+	'format-table-duplicate-row': 'Duplicate Row',
+	'format-table-duplicate-column': 'Duplicate Column',
+	'format-table-align-left': 'Align Left',
+	'format-table-align-center': 'Align Center',
+	'format-table-align-right': 'Align Right',
+};
+
+/** 名前だけの項目(アクセラレータもチェックも無い)。 */
+function namedItem(id: FormatNamedItemId): EditorMenuEntry {
+	return { kind: 'item', id, label: FORMAT_ITEM_NAMES[id] };
+}
+
 /** Format の項目(チェックを持つものは checkable=真)。 */
-function formatItem(id: FormatItemId, label: string, active: ActiveFormat | undefined, checkable: boolean): EditorMenuEntry {
+function formatItem(id: FormatItemId & FormatNamedItemId, active: ActiveFormat | undefined, checkable: boolean): EditorMenuEntry {
 	const accelerator = FORMAT_ACCELERATORS[id];
 	return {
-		kind: 'item',
-		id,
-		label,
+		...namedItem(id),
 		...(accelerator ? { accelerator } : {}),
 		...(checkable ? { checked: active?.has(id) ?? false } : {}),
 	};
@@ -69,45 +138,45 @@ function formatItem(id: FormatItemId, label: string, active: ActiveFormat | unde
 
 /** 第3段 3-4: Markdown の面の Format ▸(モックの画面2 の 9)。 */
 function formatMenu(active: ActiveFormat | undefined): EditorMenuEntry {
-	const check = (id: FormatItemId, label: string) => formatItem(id, label, active, true);
-	const plain = (id: FormatItemId, label: string) => formatItem(id, label, active, false);
-	const headings = [1, 2, 3, 4, 5, 6].map((n) => check(`format-heading-${n}` as FormatItemId, `Heading ${n}`));
+	const check = (id: FormatItemId & FormatNamedItemId) => formatItem(id, active, true);
+	const plain = (id: FormatItemId & FormatNamedItemId) => formatItem(id, active, false);
+	const headings = [1, 2, 3, 4, 5, 6].map((n) => check(`format-heading-${n}` as FormatItemId & FormatNamedItemId));
 	return {
 		kind: 'submenu',
 		id: 'ctx-format-menu',
 		label: 'Format',
 		items: [
-			check('format-bold', 'Bold'),
-			check('format-italic', 'Italic'),
-			check('format-strikethrough', 'Strikethrough'),
-			check('format-inline-code', 'Inline Code'),
-			plain('format-link', 'Link…'),
+			check('format-bold'),
+			check('format-italic'),
+			check('format-strikethrough'),
+			check('format-inline-code'),
+			plain('format-link'),
 			{ kind: 'separator' },
-			plain('format-clear', 'Clear Formatting'),
+			plain('format-clear'),
 			{ kind: 'separator' },
 			{
 				kind: 'submenu',
 				id: 'ctx-paragraph-menu',
 				label: 'Paragraph',
 				items: [
-					check('format-body-text', 'Body Text'),
+					check('format-body-text'),
 					...headings,
 					{ kind: 'separator' },
-					check('format-bulleted-list', 'Bulleted List'),
-					check('format-numbered-list', 'Numbered List'),
-					check('format-task-list', 'Task List'),
-					check('format-quote', 'Quote'),
-					check('format-code-block', 'Code Block'),
+					check('format-bulleted-list'),
+					check('format-numbered-list'),
+					check('format-task-list'),
+					check('format-quote'),
+					check('format-code-block'),
 					{
 						kind: 'submenu',
 						id: 'ctx-alert-menu',
 						label: 'Alert',
 						items: [
-							check('format-alert-note', 'Note'),
-							check('format-alert-tip', 'Tip'),
-							check('format-alert-important', 'Important'),
-							check('format-alert-warning', 'Warning'),
-							check('format-alert-caution', 'Caution'),
+							check('format-alert-note'),
+							check('format-alert-tip'),
+							check('format-alert-important'),
+							check('format-alert-warning'),
+							check('format-alert-caution'),
 						],
 					},
 				],
@@ -117,10 +186,10 @@ function formatMenu(active: ActiveFormat | undefined): EditorMenuEntry {
 				id: 'ctx-insert-menu',
 				label: 'Insert',
 				items: [
-					plain('format-insert-table', 'Table'),
-					plain('format-insert-rule', 'Horizontal Rule'),
-					plain('format-insert-footnote', 'Footnote'),
-					plain('format-insert-image', 'Image…'),
+					plain('format-insert-table'),
+					plain('format-insert-rule'),
+					plain('format-insert-footnote'),
+					plain('format-insert-image'),
 				],
 			},
 		],
@@ -129,25 +198,30 @@ function formatMenu(active: ActiveFormat | undefined): EditorMenuEntry {
 
 /** 第3段 3-4: 表の中だけの Table ▸(3-2 と同じ 7 つ・アクセラレータもチェックも無い)。 */
 function tableMenu(): EditorMenuEntry {
-	const item = (id: FormatItemId, label: string): EditorMenuEntry => ({ kind: 'item', id, label });
 	return {
 		kind: 'submenu',
 		id: 'ctx-table-menu',
 		label: 'Table',
 		items: [
-			item('format-table-row-above', 'Insert Row Above'),
-			item('format-table-row-below', 'Insert Row Below'),
-			item('format-table-column-left', 'Insert Column Left'),
-			item('format-table-column-right', 'Insert Column Right'),
+			namedItem('format-table-row-above'),
+			namedItem('format-table-row-below'),
+			namedItem('format-table-column-left'),
+			namedItem('format-table-column-right'),
 			{ kind: 'separator' },
-			item('format-table-delete-row', 'Delete Row'),
-			item('format-table-delete-column', 'Delete Column'),
-			item('format-table-delete', 'Delete Table'),
+			namedItem('format-table-delete-row'),
+			namedItem('format-table-delete-column'),
+			namedItem('format-table-delete'),
 		],
 	};
 }
 
 export const EDITOR_MENU_RELOAD_FILE = 'reload-file';
+/**
+ * 右クリックの Reload File のネイティブの id(Issue #822)。`reload-file` はメニューバーの View ▸ Reload File
+ * (menu.rs の `RELOAD_FILE_ITEM_ID`)と同じで、Rust が menu_reload_file も送って読み直しが 2 回走るので別の id にする
+ * (Format の項目の `ctx-` と同じ扱い=要件#74 事後確認 (16))。onAction に渡るのは `EDITOR_MENU_RELOAD_FILE` のまま。
+ */
+export const EDITOR_MENU_RELOAD_FILE_NATIVE_ID = 'ctx-reload-file';
 export const EDITOR_MENU_PIN = 'pin-to-bookmarks';
 export const EDITOR_MENU_UNPIN = 'unpin-from-bookmarks';
 
@@ -164,7 +238,7 @@ export function buildEditorContextMenu(input: EditorContextMenuInput): EditorMen
 		{ kind: 'predefined', item: 'Paste' },
 		{ kind: 'separator' },
 		...markdownMenus,
-		{ kind: 'item', id: EDITOR_MENU_RELOAD_FILE, label: RELOAD_FILE_LABEL },
+		{ kind: 'item', id: EDITOR_MENU_RELOAD_FILE, label: RELOAD_FILE_LABEL, nativeId: EDITOR_MENU_RELOAD_FILE_NATIVE_ID },
 		input.pinned
 			? { kind: 'item', id: EDITOR_MENU_UNPIN, label: 'Unpin from Bookmarks' }
 			: { kind: 'item', id: EDITOR_MENU_PIN, label: 'Pin to Bookmarks' },
@@ -176,25 +250,24 @@ export function buildEditorContextMenu(input: EditorContextMenuInput): EditorMen
  * 表ごと消す項目は入れない(Format ▸ Table ▸ Delete Table のまま)。id は `format-table-*`(ネイティブでは `ctx-` が付く)。
  */
 export function buildTableHandleMenu(kind: 'row' | 'column'): EditorMenuEntry[] {
-	const item = (id: string, label: string): EditorMenuEntry => ({ kind: 'item', id, label });
 	if (kind === 'row') {
 		return [
-			item('format-table-row-above', 'Insert Row Above'),
-			item('format-table-row-below', 'Insert Row Below'),
-			item('format-table-duplicate-row', 'Duplicate Row'),
+			namedItem('format-table-row-above'),
+			namedItem('format-table-row-below'),
+			namedItem('format-table-duplicate-row'),
 			{ kind: 'separator' },
-			item('format-table-delete-row', 'Delete Row'),
+			namedItem('format-table-delete-row'),
 		];
 	}
 	return [
-		item('format-table-column-left', 'Insert Column Left'),
-		item('format-table-column-right', 'Insert Column Right'),
-		item('format-table-duplicate-column', 'Duplicate Column'),
+		namedItem('format-table-column-left'),
+		namedItem('format-table-column-right'),
+		namedItem('format-table-duplicate-column'),
 		{ kind: 'separator' },
-		item('format-table-delete-column', 'Delete Column'),
+		namedItem('format-table-delete-column'),
 		{ kind: 'separator' },
-		item('format-table-align-left', 'Align Left'),
-		item('format-table-align-center', 'Align Center'),
-		item('format-table-align-right', 'Align Right'),
+		namedItem('format-table-align-left'),
+		namedItem('format-table-align-center'),
+		namedItem('format-table-align-right'),
 	];
 }

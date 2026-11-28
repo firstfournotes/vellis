@@ -7,7 +7,7 @@
  */
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { FormatItemId } from './commands';
-import { FORMAT_ACCELERATORS } from './editor-context-menu';
+import { FORMAT_ACCELERATORS, FORMAT_ITEM_NAMES } from './editor-context-menu';
 
 /** Rust → 前面の窓(View ▸ Show Formatting Toolbar)。menu.rs の `MENU_SHOW_FORMAT_TOOLBAR_EVENT` と同じ綴り。 */
 export const MENU_SHOW_FORMAT_TOOLBAR_EVENT = 'menu_show_format_toolbar';
@@ -26,6 +26,37 @@ export const FORMAT_TOOLBAR_BLOCK_TYPES: readonly FormatItemId[] = [
 	'format-heading-5',
 	'format-heading-6',
 ];
+
+/** 押下の印(aria-pressed)を持つ項目(mark 4・リスト 3・Quote・Code Block)。Link… / Insert / Clear は持たない。 */
+export const PRESSABLE_FORMAT_ITEMS: ReadonlySet<FormatItemId> = new Set<FormatItemId>([
+	'format-bold',
+	'format-italic',
+	'format-strikethrough',
+	'format-inline-code',
+	'format-bulleted-list',
+	'format-numbered-list',
+	'format-task-list',
+	'format-quote',
+	'format-code-block',
+]);
+
+/** ボタンの字形(モックの sprite の名前)。書式のツールバーと浮遊バーが共有する。 */
+export const FORMAT_ITEM_ICONS: Partial<Record<FormatItemId, string>> = {
+	'format-bold': 'bold',
+	'format-italic': 'italic',
+	'format-strikethrough': 'strike',
+	'format-inline-code': 'code',
+	'format-link': 'chain',
+	'format-bulleted-list': 'list-ul',
+	'format-numbered-list': 'list-ol',
+	'format-task-list': 'task',
+	'format-quote': 'quote',
+	'format-insert-table': 'table',
+	'format-code-block': 'codeblock',
+	'format-insert-image': 'image',
+	'format-insert-footnote': 'footnote',
+	'format-clear': 'clear',
+};
 
 /** ボタンの並び(モックの順)。'|' は組の区切り。 */
 export const FORMAT_TOOLBAR_ITEMS: readonly (FormatItemId | '|')[] = [
@@ -48,34 +79,9 @@ export const FORMAT_TOOLBAR_ITEMS: readonly (FormatItemId | '|')[] = [
 	'format-clear',
 ];
 
-/** 項目の英語の名前(メニューバーの Format と同じ)。 */
-const NAMES: Partial<Record<FormatItemId, string>> = {
-	'format-bold': 'Bold',
-	'format-italic': 'Italic',
-	'format-strikethrough': 'Strikethrough',
-	'format-inline-code': 'Inline Code',
-	'format-link': 'Link…',
-	'format-body-text': 'Body Text',
-	'format-heading-1': 'Heading 1',
-	'format-heading-2': 'Heading 2',
-	'format-heading-3': 'Heading 3',
-	'format-heading-4': 'Heading 4',
-	'format-heading-5': 'Heading 5',
-	'format-heading-6': 'Heading 6',
-	'format-bulleted-list': 'Bulleted List',
-	'format-numbered-list': 'Numbered List',
-	'format-task-list': 'Task List',
-	'format-quote': 'Quote',
-	'format-code-block': 'Code Block',
-	'format-insert-table': 'Table',
-	'format-insert-image': 'Image…',
-	'format-insert-footnote': 'Footnote',
-	'format-clear': 'Clear Formatting',
-};
-
-/** 項目の英語の名前。 */
+/** 項目の英語の名前(名前を持たない項目=インデントは id のまま)。 */
 export function formatToolbarName(id: FormatItemId): string {
-	return NAMES[id] ?? id;
+	return (FORMAT_ITEM_NAMES as Readonly<Partial<Record<FormatItemId, string>>>)[id] ?? id;
 }
 
 /** アクセラレータの綴り → キー名(CmdOrCtrl → Command・Alt → Option・Period → .)。 */

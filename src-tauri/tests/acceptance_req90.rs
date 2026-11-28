@@ -297,7 +297,8 @@ fn squash(s: &str) -> String {
 }
 
 // 要件側更新(2026-11-26・要件#90 契約1): Show Formatting Toolbar の直後に `alerts_menu`(View ▸ Alerts ▸)。15 → 16。
-const EXPECTED_VIEW: [&str; 16] = [
+// 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): Alerts の直後に `show_spectrum_item`(View ▸ Show Audio Spectrum)。16 → 17。
+const EXPECTED_VIEW: [&str; 17] = [
     "show_tab_bar_item",
     "show_all_tabs_item",
     "view_tab_sep",
@@ -308,6 +309,7 @@ const EXPECTED_VIEW: [&str; 16] = [
     "raw_source_item",
     "show_format_toolbar_item",
     "alerts_menu",
+    "show_spectrum_item",
     "view_chrome_sep",
     "zoom_in_item",
     "zoom_out_item",
@@ -439,13 +441,13 @@ fn ac90_1_toggle_rule_enables_exactly_one_of_show_all_and_hide_all() {
 // AC-90-1 — View ▸ Alerts の並び(契約1・ソース走査)
 // ---------------------------------------------------------------------------
 
-/// 6. View は Show Formatting Toolbar の直後に `alerts_menu`(16 項目・束縛名まで一致)。
+/// 6. View は Show Formatting Toolbar の直後に `alerts_menu`(束縛名まで一致。16 項目 → 要件91 で 17 項目)。
 #[test]
 fn ac90_1_view_menu_holds_alerts_right_after_show_formatting_toolbar() {
     let code = menu_rs_code();
     let view = submenu_call_with_label(&code, "View").expect("menu.rs must build a \"View\" submenu");
     let idents = submenu_item_idents(view);
-    assert_eq!(idents, EXPECTED_VIEW, "the View menu must hold exactly these 16 entries in this order: found {idents:?}");
+    assert_eq!(idents, EXPECTED_VIEW, "the View menu must hold exactly these 17 entries in this order (要件91 adds show_spectrum_item after Alerts): found {idents:?}");
 }
 
 /// 7. Alerts = Submenu::with_id_and_items(app, ALERTS_MENU_ID, "Alerts", true, &[Show All / Hide All / ─ / Note / Tip / Important / Warning / Caution]).

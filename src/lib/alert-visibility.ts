@@ -225,8 +225,7 @@ export function currentAlertVisibility(): AlertVisibility {
 /** localStorage を読んで今の値にして返す(保存はし直さない)。 */
 export function loadAlertVisibility(): AlertVisibility {
 	const next = parseAlertVisibility(readStorage());
-	if (sameAlertVisibility(next, current)) current = next;
-	else setCurrent(next);
+	if (!sameAlertVisibility(next, current)) setCurrent(next);
 	return current;
 }
 

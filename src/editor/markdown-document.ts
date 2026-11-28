@@ -65,7 +65,7 @@ const bidPlugin = new Plugin({
 });
 
 export function createMarkdownDocument(content: string, opts: { uri: string; readOnly: boolean }): MarkdownDocument {
-	const { doc, generation, entries } = parseMarkdownDocument(content);
+	const { doc, generation, entries, tree } = parseMarkdownDocument(content);
 	const state = EditorState.create({ doc, schema: markdownSchema, plugins: [history(), bidPlugin] });
 	return {
 		uri: opts.uri,
@@ -73,7 +73,7 @@ export function createMarkdownDocument(content: string, opts: { uri: string; rea
 		state,
 		base: content,
 		baseHash: contentHash(content),
-		origin: createOriginTable(entries, detectMarkdownStyle(content)),
+		origin: createOriginTable(entries, detectMarkdownStyle(content, tree)),
 		generation,
 	};
 }
@@ -114,7 +114,7 @@ export function rekeyAfterSave(doc: MarkdownDocument, savedText: string): Markdo
 		...doc,
 		base: savedText,
 		baseHash: contentHash(savedText),
-		origin: createOriginTable(entries, detectMarkdownStyle(savedText)),
+		origin: createOriginTable(entries, detectMarkdownStyle(savedText, parsed.tree)),
 		generation: parsed.generation,
 	};
 }
@@ -168,7 +168,7 @@ export function replaceChangedBlocks(
 	}
 	// keepOrigin: 置き換えたブロックの前の切片も残す(undo で前の Node に戻ったとき 1 段目で書けるように)
 	const kept = opts.keepOrigin ? [...opts.keepOrigin.byBid.values()] : [];
-	const origin = createOriginTable([...kept, ...entries], detectMarkdownStyle(target));
+	const origin = createOriginTable([...kept, ...entries], detectMarkdownStyle(target, parsed.tree));
 	return { tr, origin, generation: parsed.generation, entries };
 }
 

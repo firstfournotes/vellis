@@ -33,17 +33,16 @@ export interface SaveAsDeps {
 	openOutsideRoot: (uri: string) => Promise<unknown>;
 }
 
-/** 'file:///a/b%20c.md' → '/a/b c.md'(percent-decode)。file:// でなければ null。 */
+/**
+ * 'file:///a/b c.md' → '/a/b c.md'。file:// でなければ null。
+ * アプリの file URI は符号化しない生の文字列(Rust の `with_path` の `format!("file://{}")`)なので、復号せず file:// の後ろを
+ * 字のまま使う(Issue #856: 復号すると字面どおりの `%XX` を持つ名前が化ける)。
+ */
 export function fileUriToPath(uri: string): string | null {
 	if (!uri.startsWith('file://')) return null;
 	const rest = uri.slice('file://'.length);
 	if (!rest.startsWith('/')) return null;
-	try {
-		return decodeURIComponent(rest);
-	} catch {
-		// Explorer の URI はパスを符号化しない形(`100%.md` のような名前)もある。崩れた符号はそのまま
-		return rest;
-	}
+	return rest;
 }
 
 /** 契約1: 面があり、読み取り専用でなく、file:// の文書のときだけ真。 */

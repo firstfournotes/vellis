@@ -40,6 +40,12 @@ pub enum FsError {
     #[error("unsupported operation: {0}")]
     Unsupported(String),
 
+    /// The path to open is not a file (a folder, or a link to one — 要件#71
+    /// 追補e, Issue #871). The caller (`fs::ssh::folder_read_error`) writes
+    /// the whole text, so no prefix is added.
+    #[error("{0}")]
+    NotAFile(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

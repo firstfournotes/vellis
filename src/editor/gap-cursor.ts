@@ -37,7 +37,7 @@ export const insertParagraphAtGap = (state: EditorState, dispatch?: (tr: Transac
 };
 
 /** `GapCursor.valid` は型の宣言で @internal(実装には在る)。 */
-const gapValid = (GapCursor as unknown as { valid($pos: ResolvedPos): boolean }).valid;
+export const gapValid = (GapCursor as unknown as { valid($pos: ResolvedPos): boolean }).valid;
 
 /** 置いてはいけない gap なら、置き直した選択を返す(そのままでよければ null)。 */
 function correctedSelection(state: EditorState): Selection | null {

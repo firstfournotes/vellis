@@ -543,6 +543,17 @@ pub const MENU_ALERTS_TOGGLE_KIND_EVENT: &str = "menu_alerts_toggle_kind";
 /// the app-wide alert settings may have changed (see [`listen_alerts_state`]).
 pub const ALERTS_STATE_EVENT: &str = "alerts_state";
 
+/// View ▸ Show Audio Spectrum (requirements.md #91 contract 11): a check item right
+/// after Alerts, without an accelerator. The setting is app-wide (`localStorage`,
+/// `src/lib/spectrum-visibility.ts`); the item is grey unless the front window
+/// shows a video or audio document.
+pub const SHOW_SPECTRUM_ITEM_ID: &str = "show-audio-spectrum";
+/// Event emitted to the focused window for View ▸ Show Audio Spectrum (no payload).
+/// Same spelling as `MENU_SHOW_SPECTRUM_EVENT` in `src/lib/spectrum-visibility.ts`.
+pub const MENU_SHOW_SPECTRUM_EVENT: &str = "menu_show_spectrum";
+/// Event a window sends with `{ label, shown, available }` (see [`listen_spectrum_state`]).
+pub const SPECTRUM_STATE_EVENT: &str = "spectrum_state";
+
 /// The id of the check item of `kind` in View ▸ Alerts.
 pub fn alert_kind_item_id(kind: &str) -> String {
     format!("{ALERT_KIND_ITEM_ID_PREFIX}{kind}")
@@ -1052,6 +1063,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let alerts_warning_item = alert_kind_item(app, "warning")?;
     let alerts_caution_item = alert_kind_item(app, "caution")?;
     let alerts_menu = Submenu::with_id_and_items(app, ALERTS_MENU_ID, "Alerts", true, &[&show_all_alerts_item, &hide_all_alerts_item, &alerts_kind_sep, &alerts_note_item, &alerts_tip_item, &alerts_important_item, &alerts_warning_item, &alerts_caution_item])?;
+    // Requirement #91 contract 11: grey until a window reports a video / audio document, checked (shown by default).
+    let show_spectrum_item = CheckMenuItem::with_id(app, SHOW_SPECTRUM_ITEM_ID, "Show Audio Spectrum", false, true, None::<&str>)?;
     let view_chrome_sep = PredefinedMenuItem::separator(app)?;
     let zoom_in_item = MenuItem::with_id(
         app,
@@ -1097,6 +1110,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &raw_source_item,
             &show_format_toolbar_item,
             &alerts_menu,
+            &show_spectrum_item,
             &view_chrome_sep,
             &zoom_in_item,
             &zoom_out_item,
@@ -1527,12 +1541,10 @@ pub fn listen_format_toolbar_state(app: &AppHandle<Wry>) {
     });
 }
 
-/// The payload of [`ALERTS_STATE_EVENT`]. `label` names the sender; the settings
-/// are app-wide, so any window's report applies.
+/// The payload of [`ALERTS_STATE_EVENT`]. The sender's `label` is not read: the
+/// settings are app-wide, so any window's report applies.
 #[derive(serde::Deserialize)]
 struct AlertsState {
-    #[allow(dead_code)]
-    label: String,
     visibility: std::collections::HashMap<String, bool>,
 }
 
@@ -1588,6 +1600,46 @@ pub fn listen_alerts_state(app: &AppHandle<Wry>) {
             if let Err(e) = item.set_enabled(enabled) {
                 tracing::warn!("failed to set {} enabled={}: {}", id, enabled, e);
             }
+        }
+    });
+}
+
+/// The payload of [`SPECTRUM_STATE_EVENT`]: the app-wide setting and whether the
+/// sending window shows a video or audio document.
+#[derive(serde::Deserialize)]
+struct SpectrumState {
+    label: String,
+    shown: bool,
+    available: bool,
+}
+
+/// Keep View ▸ Show Audio Spectrum on the windows' reports (requirements.md #91
+/// contract 11): the check is the app-wide `shown`, so any window's report sets
+/// it; the item is enabled only by the front window's `available`, as Raw Source
+/// follows the front window. muda's own click flip is set again here from the
+/// window's answer (no `revert_check_toggle`).
+pub fn listen_spectrum_state(app: &AppHandle<Wry>) {
+    let handle = app.clone();
+    app.listen(SPECTRUM_STATE_EVENT, move |event| {
+        let state: SpectrumState = match serde_json::from_str(event.payload()) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!("{}: unreadable payload: {}", SPECTRUM_STATE_EVENT, e);
+                return;
+            }
+        };
+        let Some(item) = handle.menu().and_then(|menu| find_check_menu_item(&menu, SHOW_SPECTRUM_ITEM_ID)) else {
+            return;
+        };
+        if let Err(e) = item.set_checked(state.shown) {
+            tracing::warn!("failed to set the Show Audio Spectrum check to {}: {}", state.shown, e);
+        }
+        let front = focused_or_first_window(&handle).map(|w| w.label().to_string());
+        if !raw_check_applies(front.as_deref(), &state.label) {
+            return;
+        }
+        if let Err(e) = item.set_enabled(state.available) {
+            tracing::warn!("failed to set Show Audio Spectrum enabled={}: {}", state.available, e);
         }
     });
 }

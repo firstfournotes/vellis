@@ -164,6 +164,8 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
         "show_format_toolbar_item",
         // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts ▸ は Show Formatting Toolbar の直後。15 → 16。
         "alerts_menu",
+        // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): View ▸ Show Audio Spectrum は Alerts の直後。16 → 17。
+        "show_spectrum_item",
         "view_chrome_sep",
         "zoom_in_item",
         "zoom_out_item",
@@ -173,7 +175,7 @@ fn view_menu_keeps_the_eight_entries_from_before_req63() {
     ];
     assert_eq!(
         idents, expected,
-        "the View menu must hold exactly the 16 entries of requirement #62 追補b / #56 stage 1 / #80 / #74 2-3 / #74 4-2 / #90 in this order (found {idents:?})"
+        "the View menu must hold exactly the 17 entries of requirement #62 追補b / #56 stage 1 / #80 / #74 2-3 / #74 4-2 / #90 / #91 in this order (found {idents:?})"
     );
 }
 

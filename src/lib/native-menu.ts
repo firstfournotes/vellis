@@ -15,7 +15,7 @@ type NativeItem = MenuItem | CheckMenuItem | PredefinedMenuItem | Submenu;
  * ネイティブの項目の id(要件#74 実機ゲート・事後確認 (16))。Rust の on_menu_event は `format-` で始まる id を
  * メニューバーの Format として前面の窓へ送る(menu_format)ので、右クリックの Format の項目が同じ id だと JS の action と
  * 2 回走ってトグルが打ち消し合う。`format-` で始まる entry の id は `ctx-` を前に付けて別の id にする
- * (onAction に渡すのは entry の id のまま)。
+ * (onAction に渡すのは entry の id のまま)。entry が `nativeId` を持てばそれを使う(Reload File=Issue #822)。
  */
 function nativeId(id: string): string {
 	return id.startsWith('format-') ? `ctx-${id}` : id;
@@ -29,7 +29,7 @@ async function toNative(entry: EditorMenuEntry, onAction: (id: string) => void):
 			return PredefinedMenuItem.new({ item: 'Separator' });
 		case 'item': {
 			const action = () => onAction(entry.id);
-			const base = { id: nativeId(entry.id), text: entry.label, action, ...(entry.accelerator ? { accelerator: entry.accelerator } : {}) };
+			const base = { id: entry.nativeId ?? nativeId(entry.id), text: entry.label, action, ...(entry.accelerator ? { accelerator: entry.accelerator } : {}) };
 			if (entry.checked !== undefined) return CheckMenuItem.new({ ...base, checked: entry.checked });
 			return MenuItem.new(base);
 		}

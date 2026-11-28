@@ -16,33 +16,36 @@
 	 * - 変換中(IME)は外部変更の取り込みと検索の語の変更を待ち、確定後に 1 回だけ当てる
 	 */
 	import { flushSync, onMount, untrack } from 'svelte';
-	import { replaceAllIn, replaceCurrentIn, type ReplaceOutcome } from '../editor/cm-replace';
 	import { handleEditorContextMenu } from '../editor/editor-context-menu-handler';
 	import { Compartment, EditorState, StateEffect, Transaction, type Extension } from '@codemirror/state';
 	import { EditorView, keymap, lineNumbers } from '@codemirror/view';
-	import { bracketMatching, syntaxHighlighting } from '@codemirror/language';
+	import { bracketMatching } from '@codemirror/language';
 	import { isolateHistory } from '@codemirror/commands';
 
 	import { contentHash, type FileChangedDecision } from '$lib/document-edit';
 	import { languageForFile } from '$lib/code-language';
 	import type { MatchRange } from '$lib/find-in-document';
-	import { findField, matchesIn, setFindMarks } from '../editor/cm-find';
-	import { renderForDisplay } from '$lib/file-type';
-	import { invoke } from '$lib/ipc';
+	import { findField } from '../editor/cm-find';
+	import { copySelection, createCmFinder, createCompositionWatch, createHighlightLoader } from '../editor/cm-face';
+	import { renderForDisplay, renderPlainText } from '$lib/file-type';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
 	import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
 	import {
 		createTextDocument,
 		replaceWith,
 		sliceStateText,
-		stateLineEnding,
 		type TextDocument,
 	} from '../editor/text-document';
-	import { merge3 } from '../editor/merge';
 	import { CODE_KEYMAP } from '../editor/code-keymap';
-	import { highlightStyleFor } from '../editor/code-theme';
 	import { languageSupportFor } from '../editor/code-languages';
-	import { MERGED_NOTICE, type FileEditorHandle } from '../editor/file-editor';
+	import {
+		MERGED_NOTICE,
+		planExternalChange,
+		readDiskText,
+		syncWindowDocument,
+		withDiskVersion,
+		type FileEditorHandle,
+	} from '../editor/file-editor';
 
 	let {
 		uri,
@@ -91,10 +94,9 @@
 	/** 重なった外部変更の中身(Use the File on Disk / Keep My Edits で使う)。保存の照合の衝突では null。 */
 	let theirs: string | null = null;
 
-	/** 変換中(contentDOM の compositionstart〜compositionend を自前で数える)。 */
-	let composing = false;
+	/** 変換中(contentDOM の compositionstart〜compositionend を自前で数える)。終わったら控えた分を 1 回流す。 */
+	const composition = createCompositionWatch({ onEnd: () => setTimeout(flushPending, 0) });
 	let pendingFile: DocumentPayload | null = null;
-	let pendingQuery: string | null = null;
 
 	/** 刷る直前の描画(beforeprint〜afterprint の間だけ)。 */
 	let printHtml = $state<string | null>(null);
@@ -104,105 +106,28 @@
 	const themeCompartment = new Compartment();
 	const languageCompartment = new Compartment();
 
-	// --- 検索(一致の装飾と数え方は `src/editor/cm-find.ts`=raw の面と共有) ----------------
+	// --- 検索と置換(運転は `src/editor/cm-face.ts`=raw の面と共有) ----------------
 
-	let appliedQuery = '';
-	let appliedRanges: MatchRange[] = [];
-	let recountTimer: ReturnType<typeof setTimeout> | undefined;
-	/** 変換中の打鍵で止めた数え直しがある(確定後に 1 回流す=契約10)。 */
-	let recountPending = false;
-
-	function runFind(query: string, moveSelection: boolean) {
-		if (!view) return;
-		const ranges = query.length === 0 ? [] : matchesIn(view.state.doc.toString(), query);
-		appliedQuery = query;
-		appliedRanges = ranges;
-		const current = moveSelection ? 0 : Math.min(untrack(() => findCurrent), Math.max(0, ranges.length - 1));
-		const target = ranges[current];
-		view.dispatch({
-			effects: setFindMarks.of({ ranges, current }),
-			...(moveSelection && target
-				? { selection: { anchor: target.start, head: target.end }, scrollIntoView: true }
-				: {}),
-		});
-		onFindResults?.({ query, ranges });
-	}
+	const finder = createCmFinder({
+		view: () => view,
+		current: () => untrack(() => findCurrent),
+		composing: () => composition.active,
+		onResults: (result) => onFindResults?.(result),
+	});
+	const loadTheme = createHighlightLoader(() => view, themeCompartment);
 
 	// 語が変わったら数え直して、先頭の一致へ移る(変換中は確定まで待つ)。
 	$effect(() => {
 		const query = findQuery;
 		if (!view) return;
-		untrack(() => {
-			if (composing) {
-				pendingQuery = query;
-				return;
-			}
-			if (query !== appliedQuery) runFind(query, true);
-		});
+		untrack(() => finder.setQuery(query));
 	});
 
 	// 現在の一致が変わったら(Prev / Next・番目合わせ)選択をそこへ移す。
 	$effect(() => {
 		const current = findCurrent;
-		untrack(() => {
-			if (!view || appliedRanges.length === 0) return;
-			const target = appliedRanges[current];
-			if (!target) return;
-			view.dispatch({
-				selection: { anchor: target.start, head: target.end },
-				scrollIntoView: true,
-				effects: setFindMarks.of({ ranges: appliedRanges, current }),
-			});
-		});
+		untrack(() => finder.setCurrent(current));
 	});
-
-	/** 打鍵の後の数え直しは間をおく(語の入力ではすぐ数える)。選択は動かさない。 */
-	function scheduleRecount() {
-		if (appliedQuery.length === 0) return;
-		if (recountTimer) clearTimeout(recountTimer);
-		recountTimer = setTimeout(() => {
-			recountTimer = undefined;
-			if (composing) {
-				recountPending = true;
-				return;
-			}
-			runFind(appliedQuery, false);
-		}, 150);
-	}
-
-	// --- 置換(第3段 3-3。純関数は `src/editor/cm-replace.ts`) ----------------
-
-	/** 置換の後: 間をおいた数え直しを捨てて、今数え直した一致と現在を当て、Viewer へ返す(Replace は現在へ選択も移す)。 */
-	function applyReplaceOutcome(outcome: ReplaceOutcome, moveSelection: boolean) {
-		if (!view) return;
-		if (recountTimer) {
-			clearTimeout(recountTimer);
-			recountTimer = undefined;
-		}
-		appliedRanges = outcome.ranges;
-		const target = outcome.ranges[outcome.current];
-		view.dispatch({
-			effects: setFindMarks.of({ ranges: outcome.ranges, current: outcome.current }),
-			...(moveSelection && target ? { selection: { anchor: target.start, head: target.end }, scrollIntoView: true } : {}),
-		});
-		onFindResults?.({ query: appliedQuery, ranges: outcome.ranges, current: outcome.current });
-	}
-
-	function replaceCurrent(replacement: string): boolean {
-		if (!view) return false;
-		const outcome = replaceCurrentIn(view, appliedQuery, untrack(() => findCurrent), replacement);
-		if (!outcome) return false;
-		applyReplaceOutcome(outcome, true);
-		return true;
-	}
-
-	function replaceAllMatches(replacement: string): number {
-		if (!view) return 0;
-		const outcome = replaceAllIn(view, appliedQuery, replacement);
-		if (!outcome) return 0;
-		applyReplaceOutcome(outcome, false);
-		return outcome.count;
-	}
 
 	// --- 文書モデルと窓のつなぎ --------------------------------------------
 
@@ -232,60 +157,38 @@
 		});
 	}
 
-	/** 窓の文書(currentDocument)を基準の版にそろえる(page の再描画・Copy の元)。 */
-	function syncWindowDocument(next: string, modified: number | null | undefined) {
-		const doc = windowState.currentDocument;
-		if (!doc || doc.uri !== uri) return;
-		windowState.currentDocument = { ...doc, content: next, modified: modified ?? doc.modified };
-	}
-
 	function applyNow(payload: DocumentPayload): FileChangedDecision {
 		// Issue #848: 自分のエコーでない外部変更を取り込んだ(当てた・マージした・帯にした)ら、自分の保存のハッシュは
 		// 忘れる。残すと、外部が自分の以前の保存と同じ中身に戻した書き込みがエコーとして捨てられる。
 		selfHash = null;
 		const incoming = payload.content;
-		if (incoming === currentText) {
-			setBase(incoming);
+		const plan = planExternalChange({ base: model.base, current: currentText, incoming, dirty });
+		if (plan.kind === 'conflict') {
+			// 要件#89 契約12: 重なりの相手が変わったら version を進める(開いているマージの画面が塊を作り直す)
+			if (theirs !== incoming) version++;
+			theirs = incoming;
+			conflict = true;
+			return 'external-conflict';
+		}
+		if (plan.kind !== 'same') replaceText(plan.text);
+		setBase(incoming);
+		// 未編集の置き換えでは、出ている帯(保存の照合の衝突など)はそのまま
+		if (plan.kind !== 'replace') {
 			conflict = false;
 			theirs = null;
-			syncWindowDocument(incoming, payload.modified);
-			return 'apply';
 		}
-		if (!dirty) {
-			replaceText(incoming);
-			setBase(incoming);
-			syncWindowDocument(incoming, payload.modified);
-			return 'apply';
-		}
-		const merged = merge3(model.base, currentText, incoming);
-		if (merged.kind === 'clean') {
-			replaceText(merged.text);
-			setBase(incoming);
-			conflict = false;
-			theirs = null;
-			syncWindowDocument(incoming, payload.modified);
-			showNotice(MERGED_NOTICE);
-			return 'apply';
-		}
-		// 要件#89 契約12: 重なりの相手が変わったら version を進める(開いているマージの画面が塊を作り直す)
-		if (theirs !== incoming) version++;
-		theirs = incoming;
-		conflict = true;
-		return 'external-conflict';
+		syncWindowDocument(uri, incoming, payload.modified);
+		if (plan.kind === 'merged') showNotice(MERGED_NOTICE);
+		return 'apply';
 	}
 
 	/** 変換が終わってから、待たせた外部変更と検索の語を 1 回だけ当てる。 */
 	function flushPending() {
-		if (composing) return;
+		if (composition.active) return;
 		const file = pendingFile;
 		pendingFile = null;
 		if (file) applyNow(file);
-		const query = pendingQuery;
-		pendingQuery = null;
-		const recount = recountPending;
-		recountPending = false;
-		if (query !== null && query !== appliedQuery) runFind(query, true);
-		else if (recount && appliedQuery.length > 0) runFind(appliedQuery, false);
+		finder.flush();
 	}
 
 	/** 文書モデルを作り直す(履歴 0・dirty でない)。 */
@@ -300,17 +203,7 @@
 			view.setState(model.state.update({ effects: StateEffect.appendConfig.of(faceExtensions()) }).state);
 			void loadLanguage();
 			void loadTheme(untrack(() => codeTheme));
-			if (appliedQuery) runFind(appliedQuery, false);
-		}
-	}
-
-	async function readDisk(): Promise<string | null> {
-		try {
-			const doc = await invoke<DocumentPayload>('open_document', { uri });
-			return doc.content;
-		} catch (err) {
-			alert(`Could not read the file: ${err}`);
-			return null;
+			finder.recount();
 		}
 	}
 
@@ -334,11 +227,7 @@
 		expectedHash: () => model.baseHash,
 		// 第4段 4-1: 差分表示の左右(未保存の差分=基準の版 ↔ 今・衝突の差分=今 ↔ 届いた内容 / ディスク)
 		baseText: () => model.base,
-		conflictText: async () => {
-			if (!conflict) return null;
-			if (theirs !== null) return theirs;
-			return readDisk();
-		},
+		conflictText: async () => (conflict ? (theirs ?? readDiskText(uri)) : null),
 		markSaved(text: string) {
 			setBase(text);
 			selfHash = contentHash(text);
@@ -352,11 +241,11 @@
 			// (続けて届いた同じ内容・削除+作成で元のまま戻った内容)は取り込み済みなので何もしない
 			// (マージと知らせを繰り返さない)。重なりの帯を出している間は、その版が届き直しただけ。
 			if (hash === model.baseHash && !conflict) {
-				if (composing) pendingFile = null;
+				if (composition.active) pendingFile = null;
 				return 'ignore-echo';
 			}
 			if (conflict && theirs !== null && payload.content === theirs) return 'external-conflict';
-			if (composing) {
+			if (composition.active) {
 				// Issue #848: 待たせた外部変更も取り込みに数える(変換中に自分の以前の保存の中身が届いても捨てない)。
 				selfHash = null;
 				pendingFile = payload;
@@ -368,34 +257,23 @@
 			const disk = theirs;
 			conflict = false;
 			theirs = null;
-			if (disk !== null) {
-				setBase(disk);
-				syncWindowDocument(disk, undefined);
-				return;
-			}
 			// 保存の照合の衝突から来たときは、ディスクの今の版を読んで基準にする。
-			void readDisk().then((read) => {
-				if (read === null) return;
+			withDiskVersion(uri, disk, (next) => {
 				// Issue #851 (3): ディスクの版を取り込んだので、自分の以前の保存の印も忘れる(applyNow と同じ)。
 				// 外部がその中身に戻しても、エコーとして捨てずに普通の外部変更として扱う。
 				selfHash = null;
-				setBase(read);
-				syncWindowDocument(read, undefined);
+				setBase(next);
+				syncWindowDocument(uri, next);
 			});
 		},
 		useFileOnDisk() {
 			const disk = theirs;
 			conflict = false;
 			theirs = null;
-			const apply = (next: string) => {
+			withDiskVersion(uri, disk, (next) => {
 				resetDocument(next);
-				syncWindowDocument(next, undefined);
-			};
-			if (disk !== null) apply(disk);
-			else
-				void readDisk().then((read) => {
-					if (read !== null) apply(read);
-				});
+				syncWindowDocument(uri, next);
+			});
 		},
 		showSaveConflict() {
 			theirs = null;
@@ -410,14 +288,14 @@
 			conflict = false;
 			theirs = null;
 			setBase(disk);
-			syncWindowDocument(disk, undefined);
+			syncWindowDocument(uri, disk);
 		},
 		reset(next: string) {
 			resetDocument(next);
 		},
 		preparePrint: () => preparePrint(),
 		// 第3段 3-3: 置換(読み取り専用の面には無い)
-		...(untrack(() => readOnly) ? {} : { replaceCurrent, replaceAll: replaceAllMatches }),
+		...(untrack(() => readOnly) ? {} : { replaceCurrent: finder.replaceCurrent, replaceAll: finder.replaceAll }),
 	};
 
 	// --- 面の拡張 ----------------------------------------------------------
@@ -448,7 +326,7 @@
 		currentText = sliceStateText(update.state);
 		dirty = currentText !== model.base;
 		version++;
-		scheduleRecount();
+		finder.scheduleRecount();
 	}
 
 	function faceExtensions(): Extension {
@@ -469,46 +347,10 @@
 				cut: (event, v) => copySelection(event, v, true),
 				// 要件#74 第2段 2-6: 文字の上の右クリックはネイティブのメニュー(Option + 右クリック・読み取り専用は既定のまま)
 				contextmenu: (event) => handleEditorContextMenu(event, { surface: 'code', uri, readOnly }),
-				compositionstart: () => {
-					composing = true;
-					return false;
-				},
-				compositionend: () => {
-					composing = false;
-					setTimeout(flushPending, 0);
-					return false;
-				},
-				blur: () => {
-					// WebKit は変換中の blur で compositionend を出さないことがある(契約10)。
-					if (composing) {
-						composing = false;
-						setTimeout(flushPending, 0);
-					}
-					return false;
-				},
+				// 変換中の印(変換中の blur は確定として扱う=契約10)
+				...composition.handlers,
 			}),
 		];
-	}
-
-	/**
-	 * コピー / 切り取り(契約17): `text/plain` は選んだ文字列そのもの(改行は文書の改行コード)。
-	 * 何も選んでいないときは何もしない(CodeMirror の既定の行ごとのコピーを止める=2026-11-16 由谷決定)。
-	 */
-	function copySelection(event: ClipboardEvent, v: EditorView, cut: boolean): boolean {
-		event.preventDefault();
-		const ranges = v.state.selection.ranges.filter((r) => !r.empty);
-		if (ranges.length === 0) return true;
-		const text = ranges.map((r) => sliceStateText(v.state, r.from, r.to)).join(stateLineEnding(v.state));
-		event.clipboardData?.clearData();
-		event.clipboardData?.setData('text/plain', text);
-		if (cut && !v.state.readOnly) {
-			v.dispatch({
-				changes: ranges.map((r) => ({ from: r.from, to: r.to })),
-				userEvent: 'delete.cut',
-				scrollIntoView: true,
-			});
-		}
-		return true;
 	}
 
 	async function loadLanguage() {
@@ -516,18 +358,6 @@
 		const support = await languageSupportFor(lang);
 		if (!support || !view) return;
 		view.dispatch({ effects: languageCompartment.reconfigure(support) });
-	}
-
-	let themeRequest = 0;
-	async function loadTheme(name: string) {
-		const request = ++themeRequest;
-		try {
-			const style = await highlightStyleFor(name);
-			if (request !== themeRequest || !view) return;
-			view.dispatch({ effects: themeCompartment.reconfigure(syntaxHighlighting(style)) });
-		} catch (err) {
-			console.warn(`Could not load the ${name} colours`, err);
-		}
 	}
 
 	// テーマが変わったら色だけ差し替える(EditorState を作り直さない)。
@@ -550,17 +380,9 @@
 		}
 	}
 
-	function plainHtml(text: string): string {
-		const escaped = text.replace(
-			/[&<>"']/g,
-			(c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
-		);
-		return `<pre class="vellis-plaintext">\n${escaped}</pre>`;
-	}
-
 	function onBeforePrint() {
 		const text = currentText;
-		printHtml = preparedPrint && preparedPrint.text === text ? preparedPrint.html : plainHtml(text);
+		printHtml = preparedPrint && preparedPrint.text === text ? preparedPrint.html : renderPlainText(text);
 		flushSync();
 		if (!preparedPrint || preparedPrint.text !== text) {
 			// 準備が間に合わなかったとき(印刷のシートの外から刷られた)は、色付きの描画を後から差す。
@@ -587,14 +409,14 @@
 		void loadLanguage();
 		void loadTheme(untrack(() => codeTheme));
 		const initialQuery = untrack(() => findQuery);
-		if (initialQuery) runFind(initialQuery, true);
+		if (initialQuery) finder.run(initialQuery, true);
 		window.addEventListener('beforeprint', onBeforePrint);
 		window.addEventListener('afterprint', onAfterPrint);
 		return () => {
 			window.removeEventListener('beforeprint', onBeforePrint);
 			window.removeEventListener('afterprint', onAfterPrint);
 			if (noticeTimer) clearTimeout(noticeTimer);
-			if (recountTimer) clearTimeout(recountTimer);
+			finder.dispose();
 			if (windowState.fileEditor === handle) windowState.fileEditor = null;
 			view?.destroy();
 			view = null;

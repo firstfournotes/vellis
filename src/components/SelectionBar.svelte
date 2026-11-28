@@ -9,7 +9,14 @@
 	import Icon from './Icon.svelte';
 	import type { FormatItemId } from '../editor/commands';
 	import { activeFormat } from '../editor/active-format';
-	import { FORMAT_TOOLBAR_BLOCK_TYPES, SELECTION_BAR_ITEMS, formatToolbarName, formatToolbarTitle } from '../editor/format-toolbar';
+	import {
+		FORMAT_ITEM_ICONS as ICONS,
+		FORMAT_TOOLBAR_BLOCK_TYPES,
+		PRESSABLE_FORMAT_ITEMS as PRESSABLE,
+		SELECTION_BAR_ITEMS,
+		formatToolbarName,
+		formatToolbarTitle,
+	} from '../editor/format-toolbar';
 	import type { MarkdownEditorHandle } from '../editor/file-editor';
 
 	let {
@@ -29,18 +36,6 @@
 		/** バーの要素(面が大きさを測る)。 */
 		el?: HTMLElement;
 	} = $props();
-
-	/** 押下の印を持つ項目(mark 4 つ)。Link… / Clear は持たない。 */
-	const PRESSABLE: ReadonlySet<FormatItemId> = new Set<FormatItemId>(['format-bold', 'format-italic', 'format-strikethrough', 'format-inline-code']);
-
-	const ICONS: Partial<Record<FormatItemId, string>> = {
-		'format-bold': 'bold',
-		'format-italic': 'italic',
-		'format-strikethrough': 'strike',
-		'format-inline-code': 'code',
-		'format-link': 'chain',
-		'format-clear': 'clear',
-	};
 
 	let active = $derived.by(() => {
 		void handle.version;

@@ -15,6 +15,7 @@
 
 use crate::fs::provider::FileProvider;
 use crate::fs::uri::Uri;
+use crate::wav_spectrum::SpectrumWav;
 use crate::wav_waveform::{
     check_riff_magic, chunk_advance, chunk_header, parse_fmt, usable_frames, WavDecimator,
     WavFormat, NO_AUDIO, UNREADABLE, WAV_WAVEFORM_MAX_RETAINED_SAMPLES,
@@ -87,6 +88,50 @@ pub async fn analyze_wav_waveform(
     }
 
     Ok(tauri::ipc::Response::new(decimator.finish()))
+}
+
+/// The audio of a wav file for the spectrum band (requirements.md #91 contract 3): a 16-bit PCM WAV at 32 kHz
+/// (see `crate::wav_spectrum`), built from the `data` chunk read in pieces like the waveform's. Reached through
+/// `extract_waveform_audio` (no new command); the rejections are the waveform's words plus `too-large` for an output
+/// a WAV header cannot hold.
+pub(crate) async fn wav_spectrum_audio(provider: &dyn FileProvider, uri: &Uri) -> Result<Vec<u8>, String> {
+    if uri.scheme != "file" {
+        return Err(UNREADABLE.to_string());
+    }
+    let total = provider
+        .stat(uri)
+        .await
+        .map_err(|_| UNREADABLE.to_string())?
+        .size
+        .ok_or_else(|| NO_AUDIO.to_string())?;
+
+    let head = read_exact_at(provider, uri, 0, 12).await?;
+    check_riff_magic(&head)?;
+
+    let (format, data_start, declared) = locate(provider, uri, total).await?;
+    let frames = usable_frames(&format, declared, total.saturating_sub(data_start));
+    if frames == 0 {
+        return Err(NO_AUDIO.to_string());
+    }
+
+    let mut wav = SpectrumWav::new(format, frames)?;
+    let mut remaining = frames * format.bytes_per_frame() as u64;
+    let mut at = data_start;
+    while remaining > 0 {
+        let want = remaining.min(READ_CHUNK_LEN);
+        let chunk = provider
+            .read_range(uri, at, want)
+            .await
+            .map_err(|_| UNREADABLE.to_string())?;
+        if chunk.is_empty() {
+            break;
+        }
+        let read = chunk.len() as u64;
+        wav.push(&chunk);
+        at += read;
+        remaining -= read.min(remaining);
+    }
+    Ok(wav.finish())
 }
 
 /// `fmt ` と `data` をチャンクヘッダだけ辿って見つける。

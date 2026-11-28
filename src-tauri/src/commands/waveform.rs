@@ -103,6 +103,13 @@ pub async fn extract_waveform_audio(
         .resolve(&parsed)
         .map_err(|_| UNREADABLE.to_string())?;
 
+    // A wav comes here only for the spectrum band (requirement #91): its audio goes back as a 32 kHz 16-bit WAV.
+    // The waveform of a wav keeps its own command (`analyze_wav_waveform`), so nothing of the movie path changes.
+    if is_wav_path(&parsed) {
+        let bytes = super::wav_waveform::wav_spectrum_audio(provider.as_ref(), &parsed).await?;
+        return Ok(tauri::ipc::Response::new(bytes));
+    }
+
     let moov = read_moov(provider.as_ref(), &parsed)
         .await?
         .ok_or_else(|| UNREADABLE.to_string())?;
@@ -165,6 +172,14 @@ pub async fn extract_waveform_audio(
     };
 
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Whether the file name ends in `.wav` (any case), the same test as the frontend's `waveformPlan`.
+fn is_wav_path(uri: &Uri) -> bool {
+    uri.path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
 }
 
 /// The `moov` box of the movie, or `None` when the file has none that can be

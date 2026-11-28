@@ -25,6 +25,7 @@ pub mod theme;
 pub mod update_check;
 pub mod video_frames;
 pub mod video_sync;
+pub mod wav_spectrum;
 pub mod wav_waveform;
 pub mod watch;
 pub mod window;
@@ -452,6 +453,8 @@ pub(crate) fn run_app(
             menu::listen_format_toolbar_state(app.handle());
             // View ▸ Alerts のチェック印と Show All / Hide All の有効はアプリ全体の設定に合わせる(要件#90 契約1・7)
             menu::listen_alerts_state(app.handle());
+            // View ▸ Show Audio Spectrum: the check follows the app-wide setting, the enabled state the front window (requirement #91)
+            menu::listen_spectrum_state(app.handle());
             #[cfg(target_os = "macos")]
             let window_menu_owner = menu.clone();
             app.set_menu(menu)?;
@@ -631,12 +634,15 @@ pub(crate) fn run_app(
                 id if id == menu::HIDE_ALL_ALERTS_ITEM_ID => {
                     menu::handle_menu_open_click(app_handle, menu::MENU_ALERTS_HIDE_ALL_EVENT);
                 }
-                id if menu::alert_kind_of_item_id(id).is_some() => {
+                id if id == menu::SHOW_SPECTRUM_ITEM_ID => {
+                    // The setting lives in the window (localStorage): the focused window toggles it and answers with
+                    // spectrum_state, which sets the check again (no revert of muda's flip; requirement #91 contract 11).
+                    menu::handle_menu_open_click(app_handle, menu::MENU_SHOW_SPECTRUM_EVENT);
+                }
+                id if let Some(kind) = menu::alert_kind_of_item_id(id) => {
                     // 種類のチェックは muda の自動反転のまま。窓が alerts_state で set_checked し直す
                     // (revert_check_toggle は呼ばない=要件#90 判断 5)。
-                    if let Some(kind) = menu::alert_kind_of_item_id(id) {
-                        menu::emit_to_focused(app_handle, menu::MENU_ALERTS_TOGGLE_KIND_EVENT, kind.to_string());
-                    }
+                    menu::emit_to_focused(app_handle, menu::MENU_ALERTS_TOGGLE_KIND_EVENT, kind.to_string());
                 }
                 id if id.starts_with(menu::FORMAT_ITEM_ID_PREFIX) => {
                     // Format ▸ の項目はすべて ID を payload に前面の窓へ(要件#74 契約8)。

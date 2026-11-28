@@ -23,7 +23,7 @@
  * }
  * /** 契約1: 面があり、読み取り専用でなく、file:// の文書のときだけ真。 *\/
  * export function canSaveAs(handle: FileEditorHandle | null | undefined): boolean;
- * /** 'file:///a/b%20c.md' → '/a/b c.md'(percent-decode)。file:// でなければ null。 *\/
+ * /** 'file:///a/b c.md' → '/a/b c.md'(file:// の後ろを字のまま。復号しない=2026-11-28 #856 の由谷の決定で改めた)。file:// でなければ null。 *\/
  * export function fileUriToPath(uri: string): string | null;
  * /**
  *  * File ▸ Save As…(Shift + Command + S)の一手。
@@ -128,9 +128,12 @@ describe('AC-89-1: 定数と canSaveAs(契約1)', () => {
 		expect(canSaveAs(fakeHandle({ uri: 'ssh://host/a/b.md' }))).toBe(false);
 	});
 
-	test('fileUriToPath: percent-decode して絶対パス・file:// でなければ null', () => {
+	// 2026-11-28 #856 の由谷の決定で改めた: アプリの file URI は符号化しない(Rust の with_path の形)ので、復号せず file:// の後ろを字のまま
+	// 絶対パスにする(以前は percent-decode を期待していた)。期待は save-as.issue856-raw-uri.wiring.test.ts とそろえる
+	test('fileUriToPath: file:// の後ろを字のまま絶対パスに(復号しない)・file:// でなければ null', () => {
 		expect(fileUriToPath(URI)).toBe(PATH);
-		expect(fileUriToPath('file:///Users/a/my%20notes/plan%23x.md')).toBe('/Users/a/my notes/plan#x.md');
+		expect(fileUriToPath('file:///Users/a/my notes/plan#x.md')).toBe('/Users/a/my notes/plan#x.md');
+		expect(fileUriToPath('file:///Users/a/my%20notes/plan%23x.md'), '字面の %XX も復号しない').toBe('/Users/a/my%20notes/plan%23x.md');
 		expect(fileUriToPath('ssh://host/a.md')).toBeNull();
 		expect(fileUriToPath('https://example.com/a.md')).toBeNull();
 	});
@@ -279,11 +282,13 @@ describe('AC-89-5: 帯が出ている間も使える・自分自身を選んだ�
 		expect(alertMock).not.toHaveBeenCalled();
 	});
 
-	test('自分自身の判定はパスで行う(URI の percent-encoding の違いに惑わされない)', async () => {
+	// 2026-11-28 #856 の由谷の決定で改めた: 自分自身の判定はパスの字面で行う。アプリの URI は符号化しないので、空白を含む名前は URI にも
+	// 空白のまま入っていて、ダイアログの返すパスと字面で一致する(以前は %20 の URI と空白のパスが一致することを期待していた)
+	test('自分自身の判定はパスで行う(空白を含む名前でも、符号化しない URI のパスとダイアログのパスが字面で一致する)', async () => {
 		saveMock.mockResolvedValue('/Users/a/my notes/plan.md');
-		invokeMock.mockResolvedValue({ uri: 'file:///Users/a/my%20notes/plan.md', within_root: true });
-		const h = fakeHandle({ uri: 'file:///Users/a/my%20notes/plan.md' });
-		windowState.setDocument({ uri: 'file:///Users/a/my%20notes/plan.md', content: 'base', modified: 1 });
+		invokeMock.mockResolvedValue({ uri: 'file:///Users/a/my notes/plan.md', within_root: true });
+		const h = fakeHandle({ uri: 'file:///Users/a/my notes/plan.md' });
+		windowState.setDocument({ uri: 'file:///Users/a/my notes/plan.md', content: 'base', modified: 1 });
 		const d = deps();
 		expect(await saveAs(h, d)).toBe('overwrote-self');
 		expect(h.markSaved).toHaveBeenCalledWith(CONTENT);

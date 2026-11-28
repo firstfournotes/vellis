@@ -12,38 +12,15 @@
  */
 
 import { diffHunks, splitLines, type Hunk } from './line-diff';
+import { byPosition, overlaps, sameHunk, splitByLine } from './merge';
 
 export type MergeChoice = 'mine' | 'theirs' | 'both';
 export type MergePart = { kind: 'clean'; text: string } | { kind: 'conflict'; mine: string; theirs: string };
+export type MergeConflict = Extract<MergePart, { kind: 'conflict' }>;
 
-/** `merge.ts` と同じ: 塊を行の単位に割る(置き換えは 1 行ずつ・行数の差は末尾の削除か挿入)。 */
-function splitByLine(hunk: Hunk): Hunk[] {
-	const baseCount = hunk.to - hunk.from;
-	const common = Math.min(baseCount, hunk.lines.length);
-	const out: Hunk[] = [];
-	for (let i = 0; i < common; i++) out.push({ from: hunk.from + i, to: hunk.from + i + 1, lines: [hunk.lines[i]!] });
-	if (baseCount > common) out.push({ from: hunk.from + common, to: hunk.to, lines: [] });
-	if (hunk.lines.length > common) out.push({ from: hunk.from + common, to: hunk.from + common, lines: hunk.lines.slice(common) });
-	return out;
-}
-
-function sameHunk(a: Hunk, b: Hunk): boolean {
-	return a.from === b.from && a.to === b.to && a.lines.length === b.lines.length && a.lines.every((l, i) => l === b.lines[i]);
-}
-
-/** `merge.ts` と同じ: 2 つの塊が同じ base の範囲を取り合うか。 */
-function overlaps(a: Hunk, b: Hunk): boolean {
-	const aEmpty = a.from === a.to;
-	const bEmpty = b.from === b.to;
-	if (aEmpty && bEmpty) return a.from === b.from;
-	if (aEmpty) return b.from < a.from && a.from < b.to;
-	if (bEmpty) return a.from < b.from && b.from < a.to;
-	return a.from < b.to && b.from < a.to;
-}
-
-/** 同じ位置の挿入と、その位置から始まる置き換えは、挿入を先に置く(merge3 と同じ並び)。 */
-function byPosition(a: { from: number; to: number }, b: { from: number; to: number }): number {
-	return a.from - b.from || a.to - a.from - (b.to - b.from);
+/** 塊の並びのうち、重なった塊(conflict)だけ。 */
+export function conflictsOf(parts: readonly MergePart[] | null): MergeConflict[] {
+	return (parts ?? []).filter((p): p is MergeConflict => p.kind === 'conflict');
 }
 
 /** base の `[from, to)` を、その側の塊(範囲の中のもの)を当てた文字列にする。 */
@@ -179,7 +156,7 @@ export function carryChoices(
 	oldChoices: ReadonlyArray<MergeChoice | null | undefined>,
 	newParts: readonly MergePart[],
 ): Array<MergeChoice | null> {
-	const old = oldParts.filter((p): p is Extract<MergePart, { kind: 'conflict' }> => p.kind === 'conflict');
+	const old = conflictsOf(oldParts);
 	const used = old.map(() => false);
 	const out: Array<MergeChoice | null> = [];
 	for (const part of newParts) {

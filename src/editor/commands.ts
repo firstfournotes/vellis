@@ -7,7 +7,7 @@
  * Link… と Image… は入力欄・ファイルを選ぶダイアログを出す面の仕事なので、ここの Command は「リンクの中なら
  * リンクを外す・それ以外は false」/「false」。
  */
-import { Fragment, type Mark, type MarkType, type Node as PMNode, type NodeType } from 'prosemirror-model';
+import { Fragment, type Mark, type MarkType, type Node as PMNode, type NodeType, type ResolvedPos } from 'prosemirror-model';
 import { TextSelection, type Command, type EditorState, type Transaction } from 'prosemirror-state';
 import { lift, setBlockType, toggleMark, wrapIn } from 'prosemirror-commands';
 import { liftListItem, sinkListItem, wrapInList } from 'prosemirror-schema-list';
@@ -68,6 +68,20 @@ const marks = schema.marks;
 
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
 
+/** `$pos` を含む単語の範囲(前後どちらも語の文字のときだけ)。文字のブロックの外・単語の上でなければ null。 */
+export function wordRangeAt($pos: ResolvedPos): { from: number; to: number } | null {
+	const parent = $pos.parent;
+	if (!parent.isTextblock) return null;
+	const text = parent.textBetween(0, parent.content.size, '\0', '\0');
+	const offset = $pos.parentOffset;
+	if (!WORD_CHAR.test(text[offset - 1] ?? '') || !WORD_CHAR.test(text[offset] ?? '')) return null;
+	let start = offset;
+	while (start > 0 && WORD_CHAR.test(text[start - 1]!)) start--;
+	let end = offset;
+	while (end < text.length && WORD_CHAR.test(text[end]!)) end++;
+	return { from: $pos.start() + start, to: $pos.start() + end };
+}
+
 /**
  * mark の付け外し。範囲の選択はそのまま `toggleMark`。空の選択はカーソルの単語(前後どちらも語の文字の位置)に付ける
  * / 外す。単語の上でなければ、以後打つ文字に付く(stored mark)。
@@ -81,17 +95,9 @@ function markCommand(type: MarkType): Command {
 		if (!$cursor) return toggle(state, dispatch);
 		const parent = $cursor.parent;
 		if (!parent.isTextblock || !parent.type.allowsMarkType(type)) return false;
-		const text = parent.textBetween(0, parent.content.size, '\0', '\0');
-		const offset = $cursor.parentOffset;
-		const before = text[offset - 1];
-		const after = text[offset];
-		if (!before || !after || !WORD_CHAR.test(before) || !WORD_CHAR.test(after)) return toggle(state, dispatch);
-		let start = offset;
-		while (start > 0 && WORD_CHAR.test(text[start - 1]!)) start--;
-		let end = offset;
-		while (end < text.length && WORD_CHAR.test(text[end]!)) end++;
-		const from = $cursor.start() + start;
-		const to = $cursor.start() + end;
+		const word = wordRangeAt($cursor);
+		if (!word) return toggle(state, dispatch);
+		const { from, to } = word;
 		if (dispatch) {
 			const tr = state.doc.rangeHasMark(from, to, type) ? state.tr.removeMark(from, to, type) : state.tr.addMark(from, to, type.create());
 			dispatch(tr);
@@ -399,17 +405,22 @@ export function discardDeferredFormat(view: EditorView): void {
 	deferred.delete(view);
 }
 
+/** Format の項目を当てられる面(Markdown の編集面・raw でない・読み取り専用でない)。それ以外は null。 */
+function formatTarget(handle: FileEditorHandle | MarkdownEditorHandle | null): MarkdownEditorHandle | null {
+	if (!handle || handle.kind !== 'markdown') return null;
+	const md = handle as MarkdownEditorHandle;
+	return md.raw || md.readOnly ? null : md;
+}
+
 /**
  * Format のイベントの受け手: handle が Markdown の編集面(kind 'markdown'・raw でない・readOnly でない)のときだけ
  * Command を当てて true。raw・コード(kind 'text')・読み取り専用・null では何もせず false。変換中は控え、
  * compositionend の後に 1 回だけ当てる(返り値は false)。
  */
 export function runFormatCommand(id: FormatItemId, handle: FileEditorHandle | MarkdownEditorHandle | null): boolean {
-	if (!handle || handle.kind !== 'markdown') return false;
-	const md = handle as MarkdownEditorHandle;
-	if (md.raw || md.readOnly) return false;
+	const md = formatTarget(handle);
 	const command = FORMAT_COMMANDS[id];
-	if (!command) return false;
+	if (!md || !command) return false;
 	const view = md.view;
 	if (view.composing) {
 		deferUntilComposed(view, id);
@@ -429,9 +440,8 @@ export function runFormatCommand(id: FormatItemId, handle: FileEditorHandle | Ma
  * 鍵は捨てる=差し戻し P2)。当てられない面(raw・コード・読み取り専用)では何もしない。
  */
 export function deferFormatCommand(id: FormatItemId, handle: FileEditorHandle | MarkdownEditorHandle | null): void {
-	if (!handle || handle.kind !== 'markdown') return;
-	const md = handle as MarkdownEditorHandle;
-	if (md.raw || md.readOnly || !FORMAT_COMMANDS[id]) return;
+	const md = formatTarget(handle);
+	if (!md || !FORMAT_COMMANDS[id]) return;
 	deferUntilComposed(md.view, id);
 }
 

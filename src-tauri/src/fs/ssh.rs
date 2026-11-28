@@ -366,6 +366,26 @@ impl SshProvider {
             link: None,
         }
     }
+
+    /// After a failed read, whether `path` is a folder or a link to one
+    /// (要件#71 追補e 契約3, Issue #871). Best-effort: asks once on the
+    /// connection the pool already keeps for `key`, and gives `None` when
+    /// none is kept, a lookup fails, or `path` is not a folder — the caller
+    /// then returns the original error. No connection is opened here, so a
+    /// host that is unreachable does not wait out another connect timeout.
+    async fn folder_behind(&self, key: &str, path: &str) -> Option<FolderBehind> {
+        let session = self.pool.cached(key).await?;
+        let followed = session.sftp.metadata(path).await.ok()?;
+        if !followed.is_dir() {
+            return None;
+        }
+        let own = session.sftp.symlink_metadata(path).await.ok()?;
+        if !own.is_symlink() {
+            return Some(FolderBehind::Folder);
+        }
+        let target = session.sftp.read_link(path).await.ok();
+        Some(FolderBehind::Link { target })
+    }
 }
 
 impl Default for SshProvider {
@@ -498,7 +518,7 @@ impl FileProvider for SshProvider {
 
         // The whole open + read is one operation: a connection that drops
         // mid-read is retried from the open on a fresh connection.
-        let buf = self
+        let read = self
             .pool
             .run(&key, || Self::open(authority, self.connect_timeout), |session| async move {
                 let mut file = session
@@ -510,8 +530,18 @@ impl FileProvider for SshProvider {
                 file.read_to_end(&mut buf).await.map_err(classify_io_error)?;
                 Ok(buf)
             })
-            .await?;
-        Ok(buf)
+            .await;
+        let failed = match read {
+            Ok(buf) => return Ok(buf),
+            Err(e) => FsError::from(e),
+        };
+        // 要件#71 追補e (Issue #871): sftp-server lets a folder be opened and
+        // only fails the read with a bare `Failure`, so look once more at what
+        // is there and say so when it is a folder (or a link to one).
+        Err(match self.folder_behind(&key, path).await {
+            Some(behind) => folder_read_error(&uri.raw, &behind),
+            None => failed,
+        })
     }
 
     /// Poll the remote path at once and then every `POLL_INTERVAL` (longer
@@ -554,6 +584,34 @@ impl FileProvider for SshProvider {
         tracing::debug!(id, host = %authority.host, "started ssh poll watch");
         Ok(WatchHandle::new(id, stop_tx))
     }
+}
+
+/// What sits at a path that could not be read as a file (要件#71 追補e
+/// 契約2, Issue #871).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderBehind {
+    /// A plain folder.
+    Folder,
+    /// A symbolic link to a folder; `target` is the link's text when the
+    /// server returned it.
+    Link { target: Option<String> },
+}
+
+/// The error for opening a folder (or a link to one) as a file over ssh
+/// (要件#71 追補e 契約2, Issue #871). The text carries the ssh URI verbatim,
+/// so the alert says where and over what the open failed.
+pub fn folder_read_error(uri: &str, behind: &FolderBehind) -> FsError {
+    const LINK_HINT: &str =
+        "Folders behind a symbolic link cannot be opened over ssh; open the folder it points to instead.";
+    FsError::NotAFile(match behind {
+        FolderBehind::Folder => format!("{uri} is a folder, not a file."),
+        FolderBehind::Link { target: Some(t) } => {
+            format!("{uri} is a symbolic link to a folder ({t}), not a file. {LINK_HINT}")
+        }
+        FolderBehind::Link { target: None } => {
+            format!("{uri} is a symbolic link to a folder, not a file. {LINK_HINT}")
+        }
+    })
 }
 
 /// Size and mtime of a watched remote file, as one poll round sees it.

@@ -4,7 +4,8 @@
  * `version` / `buildNumber` / `buildTime` / `buildName` are baked at compile time by
  * `src-tauri/build.rs` and exposed via the `get_build_info` Tauri command.
  * The values never change for a running process, so we cache the first
- * fetch and serve subsequent calls from memory.
+ * successful fetch and serve subsequent calls from memory; a failed fetch is
+ * not cached and the next call retries.
  */
 import { invoke } from './ipc';
 
@@ -33,10 +34,19 @@ let inflight: Promise<BuildInfo> | null = null;
 export async function getBuildInfo(): Promise<BuildInfo> {
 	if (cached) return cached;
 	if (inflight) return inflight;
-	inflight = invoke<BuildInfo>('get_build_info').then((info) => {
-		cached = info;
-		inflight = null;
-		return info;
-	});
+	// Issue #831: clear `inflight` on failure too, so one rejected invoke (e.g. an
+	// IPC race at startup) is returned only to the callers sharing it, and the
+	// next call retries instead of replaying the rejection for the whole process.
+	inflight = invoke<BuildInfo>('get_build_info').then(
+		(info) => {
+			cached = info;
+			inflight = null;
+			return info;
+		},
+		(err: unknown) => {
+			inflight = null;
+			throw err;
+		}
+	);
 	return inflight;
 }

@@ -330,8 +330,9 @@ fn export_default_theme_item_is_fixed() {
     // 「CheckMenuItem が無い」は「`CheckMenuItem::with_id(` は 1 つだけで、それは Raw Source(RAW_SOURCE_ITEM_ID)」に改める。
     // 要件74 4-2(決定 4-5): View ▸ Show Formatting Toolbar(SHOW_FORMAT_TOOLBAR_ITEM_ID)も CheckMenuItem なので 2 つ(Raw Source と Show Formatting Toolbar)。
     // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts の種類のチェック項目を helper `alert_kind_item` 1 か所で作るので 3 つ。
+    // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): View ▸ Show Audio Spectrum(SHOW_SPECTRUM_ITEM_ID)も CheckMenuItem なので 4 つ。
     let checks: Vec<usize> = code.match_indices("CheckMenuItem::with_id(").map(|(i, _)| i).collect();
-    assert_eq!(checks.len(), 3, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23), View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5) and the alert kinds' helper alert_kind_item (要件90)");
+    assert_eq!(checks.len(), 4, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23), View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5), the alert kinds' helper alert_kind_item (要件90) and View ▸ Show Audio Spectrum (要件91)");
     let check_calls: Vec<&str> = checks.iter().map(|&at| &code[at..code[at..].find(')').unwrap() + at]).collect();
     assert!(check_calls.iter().any(|c| c.contains("RAW_SOURCE_ITEM_ID")), "one CheckMenuItem is Raw Source: {check_calls:?}");
     assert!(check_calls.iter().any(|c| c.contains("SHOW_FORMAT_TOOLBAR_ITEM_ID")), "the other CheckMenuItem is Show Formatting Toolbar: {check_calls:?}");

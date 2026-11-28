@@ -282,11 +282,6 @@ export function withState(doc: TextDocument, state: EditorState): TextDocument {
 	return { ...doc, state };
 }
 
-/** 基準の版を進めた文書(保存・外部変更の取り込みの後)。 */
-export function withBase(doc: TextDocument, base: string): TextDocument {
-	return { ...doc, base, baseHash: contentHash(base) };
-}
-
 /** dirty = isDirty(documentText(doc), doc.base)(byte 比較)。 */
 export function isDocumentDirty(doc: TextDocument): boolean {
 	return isDirty(documentText(doc), doc.base);

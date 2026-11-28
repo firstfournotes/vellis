@@ -33,7 +33,15 @@
 	import { dropCursor } from 'prosemirror-dropcursor';
 	import SelectionBar from './SelectionBar.svelte';
 	import { SELECTION_BAR_SETTLE_MS, selectionBarPosition } from '../editor/format-toolbar';
-	import { deferFormatCommand, discardDeferredFormat, linkRangeAt, runFormatCommand, type FormatItemId } from '../editor/commands';
+	import {
+		deferFormatCommand,
+		discardDeferredFormat,
+		linkRangeAt,
+		plainTextParagraphs,
+		runFormatCommand,
+		wordRangeAt,
+		type FormatItemId,
+	} from '../editor/commands';
 	import { closeHistory } from 'prosemirror-history';
 	import {
 		PASTE_AS_MARKDOWN_LABEL,
@@ -47,7 +55,7 @@
 	import { contentHash, type FileChangedDecision } from '$lib/document-edit';
 	import { confirmDiscardEdits } from '$lib/edit-guard';
 	import { invoke } from '$lib/ipc';
-	import { isExternal } from '$lib/uri';
+	import { isExternal, resolveAppUri } from '$lib/uri';
 	import { mountMermaid } from '$lib/mermaid-mounter';
 	import { openFileFailedMessage } from '$lib/open-document';
 	import { openInNewWindowFailedMessage } from '$lib/open-in-new-window';
@@ -62,14 +70,19 @@
 		withState,
 		type MarkdownDocument,
 	} from '../editor/markdown-document';
-	import { merge3 } from '../editor/merge';
 	import { markdownInputRules, undoMarkdownInputRule } from '../editor/input-rules';
 	import { headingSoftBreakPlugin } from '../editor/heading-breaks';
 	import { frontMatterGuardPlugin } from '../editor/front-matter-guard';
 	import { markdownGapCursor } from '../editor/gap-cursor';
 	import { inTableCell, MARKDOWN_KEYMAP } from '../editor/markdown-keymap';
-	import { plainTextParagraphs } from '../editor/commands';
-	import { MERGED_NOTICE, type MarkdownEditorHandle } from '../editor/file-editor';
+	import {
+		MERGED_NOTICE,
+		planExternalChange,
+		readDiskText,
+		syncWindowDocument,
+		withDiskVersion,
+		type MarkdownEditorHandle,
+	} from '../editor/file-editor';
 	import { announceRawSource, fromRaw, MENU_RAW_SOURCE_EVENT, toRaw, watchFocusForRawSource } from '../editor/raw-sync';
 	import { listen } from '$lib/events';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
@@ -160,7 +173,6 @@
 	let rawStart = $state<{ text: string; anchor: number; head: number }>({ text: untrack(() => content), anchor: 0, head: 0 });
 	let rawEditor: RawSourceEditor | undefined = $state();
 
-	/** Link… の URL の入力欄(選んだ範囲と入力中の値)。 */
 	/**
 	 * 第4段 4-5: リンクの欄(Text と Link・Remove Link・Done)。[from, to) が対象の範囲。existing=リンクの中から開いた
 	 * (その mark)。origText / origUrl は開いたときの値(変えずに Done なら何もしない)。
@@ -266,12 +278,6 @@
 		stateVersion++;
 	}
 
-	function syncWindowDocument(next: string, modified: number | null | undefined) {
-		const doc = windowState.currentDocument;
-		if (!doc || doc.uri !== uri) return;
-		windowState.currentDocument = { ...doc, content: next, modified: modified ?? doc.modified };
-	}
-
 	/** 文書を `target` にする(変わったブロックだけを置き換え・履歴に積まない)。 */
 	function replaceText(target: string) {
 		if (raw) {
@@ -290,34 +296,44 @@
 		// 忘れる。残すと、外部が自分の以前の保存と同じ中身に戻した書き込みがエコーとして捨てられる。
 		selfHash = null;
 		const incoming = payload.content;
-		if (incoming === currentText) {
-			setBase(incoming);
+		const plan = planExternalChange({ base: model.base, current: currentText, incoming, dirty });
+		if (plan.kind === 'conflict') {
+			// 要件#89 契約12: 重なりの相手が変わったら version を進める(開いているマージの画面が塊を作り直す)
+			if (theirs !== incoming) stateVersion++;
+			theirs = incoming;
+			conflict = true;
+			return 'external-conflict';
+		}
+		if (plan.kind !== 'same') replaceText(plan.text);
+		setBase(incoming);
+		// 未編集の置き換えでは、出ている帯(保存の照合の衝突など)はそのまま
+		if (plan.kind !== 'replace') {
 			conflict = false;
 			theirs = null;
-			syncWindowDocument(incoming, payload.modified);
-			return 'apply';
 		}
-		if (!dirty) {
-			replaceText(incoming);
-			setBase(incoming);
-			syncWindowDocument(incoming, payload.modified);
-			return 'apply';
-		}
-		const merged = merge3(model.base, currentText, incoming);
-		if (merged.kind === 'clean') {
-			replaceText(merged.text);
-			setBase(incoming);
-			conflict = false;
-			theirs = null;
-			syncWindowDocument(incoming, payload.modified);
-			showNotice(MERGED_NOTICE);
-			return 'apply';
-		}
-		// 要件#89 契約12: 重なりの相手が変わったら version を進める(開いているマージの画面が塊を作り直す)
-		if (theirs !== incoming) stateVersion++;
-		theirs = incoming;
-		conflict = true;
-		return 'external-conflict';
+		syncWindowDocument(uri, incoming, payload.modified);
+		if (plan.kind === 'merged') showNotice(MERGED_NOTICE);
+		return 'apply';
+	}
+
+	/** 変換の始まり(編集面か raw の面の compositionstart)。 */
+	function startComposition(): boolean {
+		// 第4段 4-3: 変換中は浮遊バーを出さない
+		hideBar();
+		composing = true;
+		onComposingChange?.(true);
+		return false;
+	}
+
+	/** 変換の終わり(compositionend か、変換中の blur): 控えた分(外部変更・raw の切り替え)を 1 回流す。 */
+	function endComposition(): boolean {
+		if (!composing) return false;
+		composing = false;
+		setTimeout(() => {
+			onComposingChange?.(false);
+			flushPending();
+		}, 0);
+		return false;
 	}
 
 	function flushPending() {
@@ -364,20 +380,14 @@
 			// 確定の来ない Format の控え(変換中の Format ▸ Bold・Command + B / I)は新しい文書に持ち越さない(差し戻し P3)
 			discardDeferredFormat(view);
 			view.updateState(model.state);
+			// updateState は dispatchTransaction を通らないので、取引の後の仕事を呼び直す(Issue #839):
+			// 再利用された脚注の NodeView の番号と、書式のツールバーの押下表示(stateVersion)
+			refreshFootnoteNumbers(view);
 			refreshTableHandles();
 		}
+		stateVersion++;
 		if (raw) rawEditor?.resetText(next);
 		onDocChange?.();
-	}
-
-	async function readDisk(): Promise<string | null> {
-		try {
-			const doc = await invoke<DocumentPayload>('open_document', { uri });
-			return doc.content;
-		} catch (err) {
-			alert(`Could not read the file: ${err}`);
-			return null;
-		}
 	}
 
 	// --- 印刷(契約17・刷るのは今の描画) -----------------------------------
@@ -462,11 +472,7 @@
 		expectedHash: () => model.baseHash,
 		// 第4段 4-1: 差分表示の左右(未保存の差分=基準の版 ↔ 今・衝突の差分=今 ↔ 届いた内容 / ディスク)
 		baseText: () => model.base,
-		conflictText: async () => {
-			if (!conflict) return null;
-			if (theirs !== null) return theirs;
-			return readDisk();
-		},
+		conflictText: async () => (conflict ? (theirs ?? readDiskText(uri)) : null),
 		markSaved(text: string) {
 			// 保存の後は全ブロックが「触っていない」(続けて直すと 2 段目)=項目 13。raw の間は基準の版だけを進め、
 			// raw から戻るとき(fromRaw)に保存した文字列が新しい原文になる。
@@ -498,33 +504,22 @@
 			const disk = theirs;
 			conflict = false;
 			theirs = null;
-			if (disk !== null) {
-				setBase(disk);
-				syncWindowDocument(disk, undefined);
-				return;
-			}
-			void readDisk().then((read) => {
-				if (read === null) return;
+			withDiskVersion(uri, disk, (next) => {
 				// Issue #851 (3): ディスクの版を取り込んだので、自分の以前の保存の印も忘れる(applyNow と同じ)。
 				// 外部がその中身に戻しても、エコーとして捨てずに普通の外部変更として扱う。
 				selfHash = null;
-				setBase(read);
-				syncWindowDocument(read, undefined);
+				setBase(next);
+				syncWindowDocument(uri, next);
 			});
 		},
 		useFileOnDisk() {
 			const disk = theirs;
 			conflict = false;
 			theirs = null;
-			const apply = (next: string) => {
+			withDiskVersion(uri, disk, (next) => {
 				resetDocument(next);
-				syncWindowDocument(next, undefined);
-			};
-			if (disk !== null) apply(disk);
-			else
-				void readDisk().then((read) => {
-					if (read !== null) apply(read);
-				});
+				syncWindowDocument(uri, next);
+			});
 		},
 		showSaveConflict() {
 			theirs = null;
@@ -546,7 +541,7 @@
 			conflict = false;
 			theirs = null;
 			setBase(disk);
-			syncWindowDocument(disk, undefined);
+			syncWindowDocument(uri, disk);
 		},
 		reset(next: string) {
 			resetDocument(next);
@@ -559,7 +554,6 @@
 
 	// --- Link… / Image…(契約8・項目 7・11) --------------------------------
 
-	const WORD_CHAR = /[\p{L}\p{N}_]/u;
 	const URL_LIKE = /^(https?:\/\/|mailto:|www\.)\S+$/i;
 
 	/** 選択の範囲。空ならカーソルの単語(前後どちらも語の文字)。単語の上でもなければ null。 */
@@ -567,17 +561,7 @@
 		if (!view) return null;
 		const { from, to, empty } = view.state.selection;
 		if (!empty) return { from, to };
-		const at = view.state.selection.$from;
-		const parent = at.parent;
-		if (!parent.isTextblock) return null;
-		const text = parent.textBetween(0, parent.content.size, '\0', '\0');
-		const offset = at.parentOffset;
-		if (!WORD_CHAR.test(text[offset - 1] ?? '') || !WORD_CHAR.test(text[offset] ?? '')) return null;
-		let start = offset;
-		while (start > 0 && WORD_CHAR.test(text[start - 1]!)) start--;
-		let end = offset;
-		while (end < text.length && WORD_CHAR.test(text[end]!)) end++;
-		return { from: at.start() + start, to: at.start() + end };
+		return wordRangeAt(view.state.selection.$from);
 	}
 
 	/**
@@ -730,11 +714,9 @@
 	// --- 航行(契約17・(aa)・判断 5・7) ------------------------------------
 
 	function resolveHref(href: string): string {
-		try {
-			return new URL(href, uri).toString();
-		} catch {
-			return href;
-		}
+		// Issue #845: open_document / new_window が受けるのはアプリの形(パスを符号化しない)。文書の URI のパスの #・?・% は
+		// 解く前に符号にし(フォルダの中で解く)、解いた後はパスを戻す(崩れた % は字面のまま)
+		return resolveAppUri(href, uri) ?? href;
 	}
 
 	/** id を持つ要素を面(と Viewer の本文)から探す。無ければ null(判断 5: 見出しには id が無いので飛ばない)。 */
@@ -1135,24 +1117,26 @@
 			else unlistenFocus = off;
 		});
 		void announceRawSource(untrack(() => rawOnly));
+		// 面の種類(rendered・閾値超えの raw だけ)に依らない登録と後始末: 窓の handle と印刷の受け手
+		const attach = () => {
+			windowState.fileEditor = handle;
+			window.addEventListener('beforeprint', onBeforePrint);
+			window.addEventListener('afterprint', onAfterPrint);
+		};
 		const cleanup = () => {
 			disposed = true;
 			unlistenRaw?.();
 			unlistenFocus?.();
 			void announceRawSource(false);
+			window.removeEventListener('beforeprint', onBeforePrint);
+			window.removeEventListener('afterprint', onAfterPrint);
+			if (noticeTimer) clearTimeout(noticeTimer);
+			if (windowState.fileEditor === handle) windowState.fileEditor = null;
 		};
 		if (untrack(() => rawOnly)) {
 			model = rawOnlyModel(untrack(() => content));
-			windowState.fileEditor = handle;
-			window.addEventListener('beforeprint', onBeforePrint);
-			window.addEventListener('afterprint', onAfterPrint);
-			return () => {
-				cleanup();
-				window.removeEventListener('beforeprint', onBeforePrint);
-				window.removeEventListener('afterprint', onAfterPrint);
-				if (noticeTimer) clearTimeout(noticeTimer);
-				if (windowState.fileEditor === handle) windowState.fileEditor = null;
-			};
+			attach();
+			return cleanup;
 		}
 		model = withFacePlugins(createMarkdownDocument(untrack(() => content), { uri, readOnly }), facePlugins());
 		view = new EditorView(host!, {
@@ -1234,37 +1218,13 @@
 					hideBar();
 					return handleEditorContextMenu(event as MouseEvent, { surface: 'markdown', uri, readOnly, handle });
 				},
-				compositionstart: () => {
-					// 第4段 4-3: 変換中は浮遊バーを出さない
-					hideBar();
-					composing = true;
-					onComposingChange?.(true);
-					return false;
-				},
-				compositionend: () => {
-					if (!composing) return false;
-					composing = false;
-					setTimeout(() => {
-						onComposingChange?.(false);
-						flushPending();
-					}, 0);
-					return false;
-				},
-				blur: () => {
-					// WebKit は変換中の blur で compositionend を出さないことがある(契約10)=確定として扱い、控えた分を 1 回流す
-					if (!composing) return false;
-					composing = false;
-					setTimeout(() => {
-						onComposingChange?.(false);
-						flushPending();
-					}, 0);
-					return false;
-				},
+				compositionstart: startComposition,
+				compositionend: endComposition,
+				// WebKit は変換中の blur で compositionend を出さないことがある(契約10)=確定として扱い、控えた分を 1 回流す
+				blur: endComposition,
 			},
 		});
-		windowState.fileEditor = handle;
-		window.addEventListener('beforeprint', onBeforePrint);
-		window.addEventListener('afterprint', onAfterPrint);
+		attach();
 		// 第4段 4-3: ペインのスクロールで浮遊バーの位置を写し直す
 		const scroller = rootEl?.closest('article.viewer') ?? null;
 		const onScroll = () => {
@@ -1290,10 +1250,6 @@
 			scroller?.removeEventListener('scroll', onScroll);
 			clearBarTimer();
 			cleanup();
-			window.removeEventListener('beforeprint', onBeforePrint);
-			window.removeEventListener('afterprint', onAfterPrint);
-			if (noticeTimer) clearTimeout(noticeTimer);
-			if (windowState.fileEditor === handle) windowState.fileEditor = null;
 			view?.destroy();
 			view = null;
 		};
@@ -1422,6 +1378,7 @@
 			{findCurrent}
 			{onFindResults}
 			onChange={onRawChange}
+			onComposition={(value) => (value ? startComposition() : endComposition())}
 		/>
 	{/if}
 	<div class="markdown-editor-surface" bind:this={host}></div>

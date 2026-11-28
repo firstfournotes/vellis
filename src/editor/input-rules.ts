@@ -17,9 +17,7 @@ import { Plugin, TextSelection, type Command, type EditorState, type Transaction
 import type { EditorView } from 'prosemirror-view';
 import { canJoin, findWrapping } from 'prosemirror-transform';
 import type { MarkType, Node as PMNode, NodeType } from 'prosemirror-model';
-import { unified } from 'unified';
-import remarkParse from 'remark-parse';
-import remarkGfm from 'remark-gfm';
+import { markdownProcessor } from './from-mdast';
 import { markdownSchema as schema } from './markdown-schema';
 
 const nodes = schema.nodes;
@@ -103,7 +101,6 @@ const BLOCK_RULES: InputRule[] = [
 // インラインの規則(remark の判定)
 // ---------------------------------------------------------------------------
 
-const parser = unified().use(remarkParse).use(remarkGfm);
 
 type MdNode = { type: string; value?: string; children?: MdNode[]; position?: { start: { offset?: number }; end: { offset?: number } } };
 
@@ -124,7 +121,7 @@ function textOf(n: MdNode): string {
 
 /** snippet の [open, close) をちょうど覆う mdType の節があり、中身が content か。 */
 function remarkAgrees(snippet: string, open: number, close: number, mdType: string, content: string): boolean {
-	const tree = parser.parse(snippet) as MdNode;
+	const tree = markdownProcessor.parse(snippet) as MdNode;
 	const para = tree.children?.[0];
 	if (!para || para.type !== 'paragraph' || (tree.children?.length ?? 0) !== 1) return false;
 	const stack: MdNode[] = [...(para.children ?? [])];

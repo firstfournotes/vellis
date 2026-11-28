@@ -143,16 +143,20 @@ function serializedWithEntries(model: MarkdownDocument) {
 	return { ...result, entries: usable ? parsed.entries : null };
 }
 
-/** 文書の位置 → 原文(serializeMarkdown(...).text)の文字の位置。3 段目のブロックの中はそのブロックの先頭。 */
-export function pmToSource(model: MarkdownDocument, pos: number): number {
-	const doc = model.state.doc;
-	const { text, segments, entries } = serializedWithEntries(model);
+/** 書き出し 1 回ぶんの上で、文書の位置 → 原文の文字の位置。3 段目のブロックの中はそのブロックの先頭。 */
+function sourceOffsetOf(doc: PMNode, serialized: ReturnType<typeof serializedWithEntries>, pos: number): number {
+	const { text, segments, entries } = serialized;
 	if (pos >= doc.content.size) return text.length;
 	const { index } = blockAt(doc, pos);
 	const segment = segments[index];
 	if (!segment) return text.length;
 	if (segment.stage === 3 || !entries) return segment.start;
 	return posToOffset(doc, entries, pos, segment.start);
+}
+
+/** 文書の位置 → 原文(serializeMarkdown(...).text)の文字の位置。3 段目のブロックの中はそのブロックの先頭。 */
+export function pmToSource(model: MarkdownDocument, pos: number): number {
+	return sourceOffsetOf(model.state.doc, serializedWithEntries(model), pos);
 }
 
 /** 原文の文字の位置 → 文書の位置(その位置を含む最上位ブロックの中。1・2 段目の run の中は正確)。 */
@@ -165,17 +169,13 @@ export function sourceToPm(model: MarkdownDocument, offset: number): number {
 /** rendered → raw: 書き出しと、選択を写した原文の位置。 */
 export function toRaw(model: MarkdownDocument): RawSnapshot {
 	const doc = model.state.doc;
-	const { text, segments, entries } = serializedWithEntries(model);
-	const map = (pos: number) => {
-		if (pos >= doc.content.size) return text.length;
-		const { index } = blockAt(doc, pos);
-		const segment = segments[index];
-		if (!segment) return text.length;
-		if (segment.stage === 3 || !entries) return segment.start;
-		return posToOffset(doc, entries, pos, segment.start);
-	};
+	const serialized = serializedWithEntries(model);
 	const { anchor, head } = model.state.selection;
-	return { text, anchor: map(anchor), head: map(head) };
+	return {
+		text: serialized.text,
+		anchor: sourceOffsetOf(doc, serialized, anchor),
+		head: sourceOffsetOf(doc, serialized, head),
+	};
 }
 
 function selectionAt(doc: PMNode, anchor: number, head: number): Selection {

@@ -14,7 +14,15 @@
 	 */
 	import { onMount, untrack } from 'svelte';
 	import { lineDiff, splitLines } from '../editor/line-diff';
-	import { applyChoices, carryChoices, mergeChunks, type MergeChoice, type MergePart } from '../editor/merge-chunks';
+	import {
+		applyChoices,
+		carryChoices,
+		conflictsOf,
+		mergeChunks,
+		type MergeChoice,
+		type MergeConflict,
+		type MergePart,
+	} from '../editor/merge-chunks';
 
 	let {
 		title,
@@ -42,14 +50,13 @@
 		onMerge?: () => void;
 		/**
 		 * 要件#89 契約9〜12: マージの画面にする。base=基準の版・mine=今の文字列・theirs=ディスクの版・rebuilt=作り直しの印。
-		 * Cancel は onCancel、Apply は onApply(マージした文字列)。
+		 * Cancel(と Escape)は onClose、Apply は onApply(マージした文字列)。見出しは title。
 		 */
 		merge?: {
 			base: string;
 			mine: string;
 			theirs: string;
 			rebuilt: boolean;
-			onCancel: () => void;
 			onApply: (merged: string) => void;
 		};
 	} = $props();
@@ -70,7 +77,7 @@
 	let lines = $derived.by((): Line[] | null => {
 		const hunks = lineDiff(left, right);
 		if (hunks === null) return null;
-		const aLines = left.match(/[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$/g) ?? [];
+		const aLines = splitLines(left);
 		const out: Line[] = [];
 		let a = 0;
 		let b = 0;
@@ -141,32 +148,24 @@
 		if (e.key !== 'Escape' || e.isComposing) return;
 		e.preventDefault();
 		e.stopPropagation();
-		if (merge) merge.onCancel();
-		else onClose();
+		onClose();
 	}
 
 	// --- マージの画面(要件#89) ------------------------------------------------
 
-	type Conflict = Extract<MergePart, { kind: 'conflict' }>;
 	/** 画面の並び: 文脈(clean の前後の行)・畳んだ行の数・塊(conflict の番号つき)。 */
 	type MergeRow =
 		| { type: 'context'; key: string; lines: string[] }
 		| { type: 'fold'; key: string; count: number }
-		| { type: 'chunk'; key: string; index: number; chunk: Conflict };
-
-	function conflictsOf(parts: readonly MergePart[] | null): Conflict[] {
-		return (parts ?? []).filter((p): p is Conflict => p.kind === 'conflict');
-	}
+		| { type: 'chunk'; key: string; index: number; chunk: MergeConflict };
 
 	/** 塊の並び(mergeChunks)。null=差分が大きすぎる。中身(base・mine・theirs)が変わったときだけ作り直す。 */
-	let mergeParts = $state.raw<MergePart[] | null>(untrack(() => (merge ? mergeChunks(merge.base, merge.mine, merge.theirs) : null)));
+	let mergeParts = $state.raw<MergePart[] | null>(null);
 	/** 塊ごとの選び(conflict の番号の並び)。 */
-	let choices = $state<Array<MergeChoice | null>>(untrack(() => conflictsOf(mergeParts).map(() => null)));
-	let builtFrom: { base: string; mine: string; theirs: string } | null = untrack(() =>
-		merge ? { base: merge.base, mine: merge.mine, theirs: merge.theirs } : null,
-	);
+	let choices = $state<Array<MergeChoice | null>>([]);
+	let builtFrom: { base: string; mine: string; theirs: string } | null = null;
 
-	// 契約12: 届いた中身(か今の文字列・基準の版)が変わったら塊を作り直し、同じ中身の塊の選びを残す。
+	// 最初の組み立て(描く前に走る)と、契約12: 届いた中身(か今の文字列・基準の版)が変わったら塊を作り直し、同じ中身の塊の選びを残す。
 	$effect.pre(() => {
 		const m = merge;
 		if (!m) return;
@@ -201,16 +200,17 @@
 				out.push({ type: 'chunk', key: `chunk-${i}`, index: index++, chunk: part });
 				return;
 			}
-			const all = splitLines(part.text).map(strip);
+			// 出すのは前後 CONTEXT 行だけなので、改行の印を外すのもその行だけ
+			const all = splitLines(part.text);
 			const head = i === 0 ? 0 : CONTEXT;
 			const tail = i === parts.length - 1 ? 0 : CONTEXT;
 			if (all.length <= head + tail) {
-				out.push({ type: 'context', key: `context-${i}`, lines: all });
+				out.push({ type: 'context', key: `context-${i}`, lines: all.map(strip) });
 				return;
 			}
-			if (head > 0) out.push({ type: 'context', key: `context-${i}-head`, lines: all.slice(0, head) });
+			if (head > 0) out.push({ type: 'context', key: `context-${i}-head`, lines: all.slice(0, head).map(strip) });
 			out.push({ type: 'fold', key: `fold-${i}`, count: all.length - head - tail });
-			if (tail > 0) out.push({ type: 'context', key: `context-${i}-tail`, lines: all.slice(all.length - tail) });
+			if (tail > 0) out.push({ type: 'context', key: `context-${i}-tail`, lines: all.slice(all.length - tail).map(strip) });
 		});
 		return out;
 	});
@@ -228,13 +228,13 @@
 			class="editor-diff merge-view"
 			data-testid="merge-view"
 			role="dialog"
-			aria-label="Merge Changes"
+			aria-label={title}
 			tabindex="-1"
 			bind:this={panelEl}
 			onkeydown={handleKeydown}
 		>
 			<header class="editor-diff-header">
-				<span class="editor-diff-title">Merge Changes</span>
+				<span class="editor-diff-title">{title}</span>
 				<span class="editor-diff-names">
 					{#if mergeParts === null}
 						My Edits ↔ On Disk
@@ -244,7 +244,7 @@
 						{chunkCount} overlapping {chunkCount === 1 ? 'change' : 'changes'}: choose what to keep
 					{/if}
 				</span>
-				<button type="button" class="editor-diff-button" data-testid="merge-cancel" onclick={merge.onCancel}>Cancel</button>
+				<button type="button" class="editor-diff-button" data-testid="merge-cancel" onclick={onClose}>Cancel</button>
 				<button
 					type="button"
 					class="editor-diff-button"

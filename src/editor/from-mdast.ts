@@ -20,6 +20,7 @@ import { Fragment, Mark, type Node as PMNode } from 'prosemirror-model';
 
 import { remarkVellisAlert } from '../markdown/plugins/alert';
 import { markdownSchema as schema } from './markdown-schema';
+import { detectLineEnding } from './text-document';
 
 /** 閲覧(`src/markdown/renderer.ts`)と同じ読み込みの段。 */
 export const markdownProcessor = unified().use(remarkParse).use(remarkGfm).use(remarkVellisAlert).freeze();
@@ -65,6 +66,11 @@ export interface ParsedMarkdown {
 	doc: PMNode;
 	generation: Generation;
 	entries: OriginEntry[];
+	/**
+	 * 原文の全体を読んだ mdast(offset がそのまま `src` の位置)。BOM・front matter を剥がして読んだときは null。
+	 * 流儀の検出(`detectMarkdownStyle`)が同じ原文を読み直さずに使う。
+	 */
+	tree: M.Root | null;
 }
 
 let generationCounter = 0;
@@ -77,22 +83,7 @@ export function freshBid(): number {
 
 /** 改行コードの多いほう(数が同じなら \n)。 */
 export function detectEol(src: string): string {
-	let lf = 0;
-	let crlf = 0;
-	let cr = 0;
-	for (let i = 0; i < src.length; i++) {
-		const c = src.charCodeAt(i);
-		if (c === 13) {
-			if (src.charCodeAt(i + 1) === 10) {
-				crlf++;
-				i++;
-			} else cr++;
-		} else if (c === 10) lf++;
-	}
-	const max = Math.max(lf, crlf, cr);
-	if (max === 0) return '\n';
-	if ([lf, crlf, cr].filter((n) => n === max).length > 1) return '\n';
-	return crlf === max ? '\r\n' : cr === max ? '\r' : '\n';
+	return detectLineEnding(src).dominant;
 }
 
 /** `from` から始まる `---` 行から次の `---` / `...` 行まで(その行の改行の手前まで)。無ければ 0。 */
@@ -514,5 +505,5 @@ export function parseMarkdownDocument(src: string): ParsedMarkdown {
 	doc.forEach((child, _offset, i) => {
 		if (child !== entries[i]!.node) entries[i]!.node = child;
 	});
-	return { doc, generation, entries };
+	return { doc, generation, entries, tree: parseFrom === 0 ? tree : null };
 }

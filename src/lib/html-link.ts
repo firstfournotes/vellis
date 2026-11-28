@@ -15,6 +15,8 @@
  * know the token, and a report whose token does not match is dropped.
  */
 
+import { urlToAppUri } from './uri';
+
 /** The event the Rust side sends (`navigation.rs`'s constant of the same name). */
 export const HTML_LINK_CLICKED_EVENT = 'html_link_clicked';
 
@@ -201,8 +203,9 @@ export function decideHtmlLink(input: { url: string; token: string; docUri: stri
  * The URI the app's own file commands take for a URI `decideHtmlLink` opened.
  * The URL parser percent-encodes the path (`My%20Docs`, `%E8%B3%87…`), while
  * the app's URIs — the Explorer's rows, `open_document` — carry the path as it
- * is (`fs/uri.rs` does not decode), so the path is decoded back. One that does
- * not decode is left as it is.
+ * is (`fs/uri.rs` does not decode), so the path is decoded back — leniently:
+ * a lone `%` (`My Docs/50%off.md`) stays as written while the rest is decoded
+ * (Issue #845, `urlToAppUri`). One that does not parse is left as it is.
  */
 export function toDocumentUri(uri: string): string {
 	let url: URL;
@@ -211,10 +214,5 @@ export function toDocumentUri(uri: string): string {
 	} catch {
 		return uri;
 	}
-	try {
-		const user = url.username === '' ? '' : `${decodeURIComponent(url.username)}@`;
-		return `${url.protocol}//${user}${url.host}${decodeURIComponent(url.pathname)}`;
-	} catch {
-		return uri;
-	}
+	return urlToAppUri(url);
 }

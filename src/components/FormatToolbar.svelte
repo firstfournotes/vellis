@@ -11,41 +11,17 @@
 	import Icon from './Icon.svelte';
 	import { runFormatCommand, type FormatItemId } from '../editor/commands';
 	import { activeFormat } from '../editor/active-format';
-	import { FORMAT_TOOLBAR_BLOCK_TYPES, FORMAT_TOOLBAR_ITEMS, formatToolbarName, formatToolbarTitle } from '../editor/format-toolbar';
+	import {
+		FORMAT_ITEM_ICONS as ICONS,
+		FORMAT_TOOLBAR_BLOCK_TYPES,
+		FORMAT_TOOLBAR_ITEMS,
+		PRESSABLE_FORMAT_ITEMS as PRESSABLE,
+		formatToolbarName,
+		formatToolbarTitle,
+	} from '../editor/format-toolbar';
 	import type { MarkdownEditorHandle } from '../editor/file-editor';
 
 	let { handle }: { handle: MarkdownEditorHandle } = $props();
-
-	/** 押下の印を持つ項目(mark 4・リスト 3・Quote・Code Block)。Link… / Insert / Clear は持たない。 */
-	const PRESSABLE: ReadonlySet<FormatItemId> = new Set<FormatItemId>([
-		'format-bold',
-		'format-italic',
-		'format-strikethrough',
-		'format-inline-code',
-		'format-bulleted-list',
-		'format-numbered-list',
-		'format-task-list',
-		'format-quote',
-		'format-code-block',
-	]);
-
-	/** ボタンの字形(モックの sprite の名前)。 */
-	const ICONS: Partial<Record<FormatItemId, string>> = {
-		'format-bold': 'bold',
-		'format-italic': 'italic',
-		'format-strikethrough': 'strike',
-		'format-inline-code': 'code',
-		'format-link': 'chain',
-		'format-bulleted-list': 'list-ul',
-		'format-numbered-list': 'list-ol',
-		'format-task-list': 'task',
-		'format-quote': 'quote',
-		'format-insert-table': 'table',
-		'format-code-block': 'codeblock',
-		'format-insert-image': 'image',
-		'format-insert-footnote': 'footnote',
-		'format-clear': 'clear',
-	};
 
 	/** 今の装飾(面の取引のたびに読み直す)。 */
 	let active = $derived.by(() => {

@@ -642,7 +642,8 @@ fn view_menu_starts_with_tab_bar_items_then_the_existing_order() {
     let separators = separator_bindings(&code);
     // 要件#80 で 13(Reload File と区切り線)・要件#74 2-3 で 14(Raw Source)・要件#74 第4段 4-2 で 15(Show Formatting Toolbar)。
     // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): 要件90 で 16(View ▸ Alerts ▸ の alerts_menu)。
-    let expected_len = 16;
+    // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): 要件91 で 17(View ▸ Show Audio Spectrum の show_spectrum_item)。
+    let expected_len = 17;
     assert_eq!(
         idents.len(),
         expected_len,
@@ -685,18 +686,20 @@ fn view_menu_starts_with_tab_bar_items_then_the_existing_order() {
     assert_eq!(idents[8], "show_format_toolbar_item", "View[8] must be Show Formatting Toolbar (requirement #74 4-2) ({idents:?})");
     // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): [9] Alerts ▸(区切り線以降はさらに 1 つずれる)。
     assert_eq!(idents[9], "alerts_menu", "View[9] must be the Alerts submenu (requirement #90 契約1) ({idents:?})");
+    // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): [10] Show Audio Spectrum(区切り線以降はさらに 1 つずれる)。
+    assert_eq!(idents[10], "show_spectrum_item", "View[10] must be Show Audio Spectrum (requirement #91 契約11) ({idents:?})");
     assert!(
-        separators.contains(idents[10]),
-        "View[10] must be a PredefinedMenuItem::separator binding ({idents:?})"
+        separators.contains(idents[11]),
+        "View[11] must be a PredefinedMenuItem::separator binding ({idents:?})"
     );
-    assert_eq!(idents[11], zoom_in, "View[11] must be Zoom In ({idents:?})");
-    assert_eq!(idents[12], zoom_out, "View[12] must be Zoom Out ({idents:?})");
-    assert_eq!(idents[13], actual_size, "View[13] must be Actual Size ({idents:?})");
+    assert_eq!(idents[12], zoom_in, "View[12] must be Zoom In ({idents:?})");
+    assert_eq!(idents[13], zoom_out, "View[13] must be Zoom Out ({idents:?})");
+    assert_eq!(idents[14], actual_size, "View[14] must be Actual Size ({idents:?})");
     assert!(
-        separators.contains(idents[14]),
-        "View[14] must be a PredefinedMenuItem::separator binding ({idents:?})"
+        separators.contains(idents[15]),
+        "View[15] must be a PredefinedMenuItem::separator binding ({idents:?})"
     );
-    assert_eq!(idents[15], devtools, "View[15] must be Toggle Developer Tools ({idents:?})");
+    assert_eq!(idents[16], devtools, "View[16] must be Toggle Developer Tools ({idents:?})");
     // The zoom / devtools constants above are the ones the items are built with
     // (guards against the binding lookup silently matching another item).
     let _ = (ZOOM_IN_ITEM_ID, ZOOM_OUT_ITEM_ID, ACTUAL_SIZE_ITEM_ID, TOGGLE_DEVTOOLS_ITEM_ID);

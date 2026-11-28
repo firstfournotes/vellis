@@ -10,6 +10,7 @@ import type { MarkdownDocument } from './markdown-document';
 import type { FileChangedDecision } from '$lib/document-edit';
 import { invoke } from '$lib/ipc';
 import { windowState, type DocumentPayload } from '../stores/window-state.svelte';
+import { merge3 } from './merge';
 
 export interface FileEditorHandle {
 	/** 面の種類(コードと plain text=CodeMirror・Markdown=ProseMirror)。 */
@@ -84,6 +85,54 @@ export const MERGED_NOTICE = 'This file was changed on disk. The changes were me
 export const CONFLICT_MESSAGE = 'This file was changed on disk. It overlaps your edits.';
 /** Rust の `save_document` が照合に失敗したときのエラーの接頭辞(契約14)。 */
 export const SAVE_CONFLICT_PREFIX = 'The file was changed on disk';
+
+/** 届いた内容 `incoming` の当て方(契約12・13)。面(CodeMirror・ProseMirror・raw)に依らない純関数。 */
+export type ExternalChangePlan =
+	/** 今の文書と同じ: 文書は触らず、基準の版だけを進める。 */
+	| { kind: 'same' }
+	/** 未編集: 文書を届いた内容に置き換える。 */
+	| { kind: 'replace'; text: string }
+	/** 編集中で重ならない: 3 方向マージの結果に置き換えて知らせる。 */
+	| { kind: 'merged'; text: string }
+	/** 編集中で重なる: 文書は触らず、帯で選ばせる。 */
+	| { kind: 'conflict' };
+
+export function planExternalChange(o: { base: string; current: string; incoming: string; dirty: boolean }): ExternalChangePlan {
+	if (o.incoming === o.current) return { kind: 'same' };
+	if (!o.dirty) return { kind: 'replace', text: o.incoming };
+	const merged = merge3(o.base, o.current, o.incoming);
+	return merged.kind === 'clean' ? { kind: 'merged', text: merged.text } : { kind: 'conflict' };
+}
+
+/** ディスクの今の中身。読めなければ知らせて null。 */
+export async function readDiskText(uri: string): Promise<string | null> {
+	try {
+		const doc = await invoke<DocumentPayload>('open_document', { uri });
+		return doc.content;
+	} catch (err) {
+		alert(`Could not read the file: ${err}`);
+		return null;
+	}
+}
+
+/**
+ * 衝突の相手の版に `apply` を当てる。`theirs` は重なった外部変更の中身。保存の照合の衝突から来たとき(null)は
+ * ディスクの今の版を読み直す(読めなければ何もしない)。
+ */
+export function withDiskVersion(uri: string, theirs: string | null, apply: (disk: string) => void): void {
+	if (theirs !== null) apply(theirs);
+	else
+		void readDiskText(uri).then((read) => {
+			if (read !== null) apply(read);
+		});
+}
+
+/** 窓の文書(currentDocument)を基準の版にそろえる(page の再描画・Copy の元)。別の文書を開いていれば何もしない。 */
+export function syncWindowDocument(uri: string, next: string, modified?: number | null): void {
+	const doc = windowState.currentDocument;
+	if (!doc || doc.uri !== uri) return;
+	windowState.currentDocument = { ...doc, content: next, modified: modified ?? doc.modified };
+}
 
 /**
  * Command + S / File ▸ Save / 削除の帯の Save / 未保存の確認の Save の共通の経路(契約14)。

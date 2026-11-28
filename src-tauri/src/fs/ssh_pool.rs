@@ -207,8 +207,9 @@ impl<C: PooledConnection> ConnectionPool<C> {
     }
 
     /// The connection currently kept for `key`, without checking liveness or
-    /// opening anything (`None` while it is still being opened). For tests
-    /// and diagnostics.
+    /// opening anything (`None` while it is still being opened). For tests,
+    /// diagnostics, and best-effort follow-up lookups that must not open a
+    /// connection (`SshProvider::read_bytes`, 要件#71 追補e).
     pub async fn cached(&self, key: &str) -> Option<Arc<C>> {
         match self.slots().get(key) {
             Some(Slot::Ready(conn)) => Some(conn.clone()),
@@ -289,6 +290,7 @@ fn copy_fs_error(e: &FsError) -> FsError {
         FsError::InvalidUtf8 => FsError::InvalidUtf8,
         FsError::UnsupportedScheme(s) => FsError::UnsupportedScheme(s.clone()),
         FsError::Unsupported(s) => FsError::Unsupported(s.clone()),
+        FsError::NotAFile(s) => FsError::NotAFile(s.clone()),
         FsError::Io(io) => FsError::Io(std::io::Error::new(io.kind(), io.to_string())),
     }
 }

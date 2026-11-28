@@ -11,6 +11,7 @@ import { bookmarks } from '../stores/bookmarks.svelte';
 import { activeFormat } from './active-format';
 import { runFormatCommand, type FormatItemId } from './commands';
 import type { FileEditorHandle, MarkdownEditorHandle } from './file-editor';
+import { selectionTableCell } from './table-commands';
 import {
 	buildEditorContextMenu,
 	EDITOR_MENU_PIN,
@@ -27,16 +28,6 @@ export interface EditorContextMenuTarget {
 	readOnly: boolean;
 	/** 第3段 3-4: Markdown の面の handle(今の装飾・表の中か・Format の項目の実行に使う)。 */
 	handle?: FileEditorHandle | MarkdownEditorHandle | null;
-}
-
-/** 選択が表のセル(見出しのセルも)の中か。 */
-function selectionInTable(handle: MarkdownEditorHandle): boolean {
-	const $from = handle.view.state.selection.$from;
-	for (let d = $from.depth; d > 0; d--) {
-		const name = $from.node(d).type.name;
-		if (name === 'table_cell' || name === 'table_header') return true;
-	}
-	return false;
 }
 
 /** 項目を押したとき。Bookmark の失敗は本文のメニュー(ContextMenu.svelte)と同じく 1 回知らせる。 */
@@ -68,7 +59,7 @@ export function handleEditorContextMenu(event: MouseEvent, target: EditorContext
 	const cell = event.target instanceof Element ? event.target.closest('td, th') : null;
 	const entries = buildEditorContextMenu({
 		surface: target.surface,
-		inTable: md ? selectionInTable(md) : cell !== null,
+		inTable: md ? selectionTableCell(md.view.state) !== null : cell !== null,
 		pinned: isBookmarked(bookmarks.list, target.uri),
 		...(md ? { active: activeFormat(md.view.state) } : {}),
 	});

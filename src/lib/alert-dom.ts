@@ -28,9 +28,11 @@ import {
 
 export const ALERT_SELECTOR = 'blockquote.markdown-alert';
 export const ALERT_TITLE_SELECTOR = '.markdown-alert-title';
-export const ALERT_MARKER_LABEL_TESTID = 'alert-marker-label';
+const ALERT_MARKER_LABEL_TESTID = 'alert-marker-label';
 const ALERT_MARKER_LABEL_SELECTOR = `[data-testid="${ALERT_MARKER_LABEL_TESTID}"]`;
 const CONCEALED_SELECTOR = `${ALERT_SELECTOR}[data-alert-state="hidden"], ${ALERT_SELECTOR}[data-alert-state="collapsed"]`;
+/** 印の組を作る設定(渡す種類はもう隠れたものだけ)。 */
+const ALL_HIDDEN = hideAll();
 
 /** 隠した・畳んだ枠を開いてほしいという知らせ(枠の要素に送る・泡立つ)。面と読み取り専用の描画の両方が受ける。 */
 export const ALERT_REVEAL_EVENT = 'vellis-alert-reveal';
@@ -40,7 +42,7 @@ export type AlertState = 'shown' | 'collapsed' | 'hidden';
 export type AlertOverride = 'shown' | 'collapsed';
 
 /** 枠の種類(class `markdown-alert-<kind>`)。要件15 の 5 種でなければ null(契約10)。 */
-export function alertKindOfElement(el: Element): AlertKind | null {
+function alertKindOfElement(el: Element): AlertKind | null {
 	if (!el.classList.contains('markdown-alert')) return null;
 	for (const kind of ALERT_KINDS) if (el.classList.contains(`markdown-alert-${kind}`)) return kind;
 	return null;
@@ -55,6 +57,36 @@ export function effectiveAlertState(v: AlertVisibility, kind: AlertKind, overrid
 /** 設定が変わった種類(その種類の枠の上書きを捨てる=設定が当たるたびに設定が勝つ)。 */
 export function changedKinds(before: AlertVisibility, after: AlertVisibility): Set<AlertKind> {
 	return new Set(ALERT_KINDS.filter((kind) => before[kind] !== after[kind]));
+}
+
+/** 見出しで畳む・開く(契約3): 出ている枠は畳み、畳んだ枠は開く。隠れている枠は変えない(null)。 */
+export function toggledOverride(state: AlertState): AlertOverride | null {
+	if (state === 'shown') return 'collapsed';
+	if (state === 'collapsed') return 'shown';
+	return null;
+}
+
+/**
+ * 全体の設定が `before` から `after` になったときに残す上書き(契約7)。Show All / Hide All(`resetLocal`)は全部捨て、ほかは設定が
+ * 変わった種類の枠のものだけ捨てる。設定も上書きも変わらないときは null(描き直さなくてよい)。面(位置が鍵)と読み取り専用の描画
+ * (要素が鍵)の両方が使う。
+ */
+export function overridesAfterSetting<K>(
+	overrides: ReadonlyMap<K, AlertOverride>,
+	kindOf: (key: K) => AlertKind | undefined,
+	before: AlertVisibility,
+	after: AlertVisibility,
+	resetLocal: boolean,
+): Map<K, AlertOverride> | null {
+	const changed = changedKinds(before, after);
+	if (resetLocal) return changed.size === 0 && overrides.size === 0 ? null : new Map();
+	if (changed.size === 0) return null;
+	return new Map(
+		[...overrides].filter(([key]) => {
+			const kind = kindOf(key);
+			return kind === undefined || !changed.has(kind);
+		}),
+	);
 }
 
 /**
@@ -110,6 +142,11 @@ export function revealAlertsAround(node: Node | null): boolean {
 	return concealed.length > 0;
 }
 
+/** `root` の中に隠した・畳んだ枠があるか(無ければ検索で開くものも無い)。 */
+export function hasConcealedAlert(root: ParentNode): boolean {
+	return root.querySelector(CONCEALED_SELECTOR) !== null;
+}
+
 /** 見出しの字をドラッグで選んだ(click の時点で選択が見出しにかかっている)か。 */
 export function selectionTouches(el: Element): boolean {
 	const sel = el.ownerDocument.getSelection();
@@ -125,7 +162,7 @@ function bodyTextOfAlertElement(alert: Element): string {
 }
 
 /** 1 つの枠に状態の属性を当てる。 */
-export function setAlertElementState(alert: HTMLElement, kind: AlertKind, state: AlertState, summary?: string): void {
+function setAlertElementState(alert: HTMLElement, kind: AlertKind, state: AlertState, summary?: string): void {
 	alert.setAttribute('data-alert-kind', kind);
 	alert.setAttribute('data-alert-state', state);
 	alert.hidden = state === 'hidden';
@@ -174,7 +211,7 @@ export function attachAlertVisibility(root: HTMLElement): () => void {
 	const alerts = [...root.querySelectorAll<HTMLElement>(ALERT_SELECTOR)].filter((el) => alertKindOfElement(el) !== null);
 	if (alerts.length === 0) return () => {};
 	const kindOf = new Map(alerts.map((el) => [el, alertKindOfElement(el)!] as const));
-	const overrides = new Map<HTMLElement, AlertOverride>();
+	let overrides = new Map<HTMLElement, AlertOverride>();
 	let visibility = currentAlertVisibility();
 	let markers: HTMLElement[] = [];
 
@@ -189,7 +226,7 @@ export function attachAlertVisibility(root: HTMLElement): () => void {
 		for (const parent of parents) {
 			const children = [...parent.children] as HTMLElement[];
 			const kinds = children.map((child) => (kindOf.has(child) && stateOf(child) === 'hidden' ? kindOf.get(child)! : null));
-			for (const group of groupHiddenAlerts(kinds, hideAll())) {
+			for (const group of groupHiddenAlerts(kinds, ALL_HIDDEN)) {
 				const members = children.slice(group.start, group.end);
 				const marker = createAlertMarker(doc, group.counts, () => {
 					for (const el of members) overrides.set(el, 'shown');
@@ -210,10 +247,9 @@ export function attachAlertVisibility(root: HTMLElement): () => void {
 		return alert;
 	};
 	const toggle = (alert: HTMLElement) => {
-		const state = stateOf(alert);
-		if (state === 'hidden') return;
-		if (state === 'collapsed') overrides.set(alert, 'shown');
-		else overrides.set(alert, 'collapsed');
+		const next = toggledOverride(stateOf(alert));
+		if (!next) return;
+		overrides.set(alert, next);
 		render();
 	};
 	const onClick = (e: MouseEvent) => {
@@ -237,16 +273,10 @@ export function attachAlertVisibility(root: HTMLElement): () => void {
 		render();
 	};
 	const unsubscribe = subscribeAlertVisibility((next, change) => {
-		const changed = changedKinds(visibility, next);
+		const kept = overridesAfterSetting(overrides, (el) => kindOf.get(el), visibility, next, change.resetLocal);
 		visibility = next;
-		if (change.resetLocal) {
-			// Show All / Hide All: 1 つずつの開き・畳みを全部捨てる
-			if (changed.size === 0 && overrides.size === 0) return;
-			overrides.clear();
-		} else {
-			if (changed.size === 0) return;
-			for (const [el] of overrides) if (changed.has(kindOf.get(el)!)) overrides.delete(el);
-		}
+		if (!kept) return;
+		overrides = kept;
 		render();
 	});
 	root.addEventListener('click', onClick);

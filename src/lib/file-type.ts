@@ -196,7 +196,7 @@ function escapeHtml(source: string): string {
  * The newline right after `<pre>` is dropped by the HTML parser, so a source
  * that itself starts with a newline still round-trips through `textContent`.
  */
-function renderPlainText(content: string): string {
+export function renderPlainText(content: string): string {
 	return `<pre class="vellis-plaintext">\n${escapeHtml(content)}</pre>`;
 }
 

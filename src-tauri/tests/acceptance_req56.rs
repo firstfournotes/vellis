@@ -410,11 +410,13 @@ fn default_theme_item_is_a_plain_menu_item_labelled_default() {
     assert!(last_argument(call).starts_with("None"), "Default must have no accelerator");
     // 要件74 4-2(決定 4-5): View ▸ Show Formatting Toolbar(SHOW_FORMAT_TOOLBAR_ITEM_ID)も CheckMenuItem なので 2 つ(Raw Source と Show Formatting Toolbar)。
     // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts の種類のチェック項目を helper `alert_kind_item` 1 か所で作るので 3 つ。
+    // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): View ▸ Show Audio Spectrum(SHOW_SPECTRUM_ITEM_ID)も CheckMenuItem なので 4 つ。
     let checks: Vec<usize> = code.match_indices("CheckMenuItem::with_id(").map(|(i, _)| i).collect();
-    assert_eq!(checks.len(), 3, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23), View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5) and the alert kinds' helper alert_kind_item (要件90)");
+    assert_eq!(checks.len(), 4, "the only check marks in menu.rs are View ▸ Raw Source (要件74 契約23), View ▸ Show Formatting Toolbar (要件74 4-2・決定 4-5), the alert kinds' helper alert_kind_item (要件90) and View ▸ Show Audio Spectrum (要件91)");
     let check_calls: Vec<&str> = checks.iter().map(|&at| &code[at..code[at..].find(')').unwrap() + at]).collect();
     assert!(check_calls.iter().any(|c| c.contains("RAW_SOURCE_ITEM_ID")), "one CheckMenuItem is Raw Source: {check_calls:?}");
     assert!(check_calls.iter().any(|c| c.contains("SHOW_FORMAT_TOOLBAR_ITEM_ID")), "the other CheckMenuItem is Show Formatting Toolbar: {check_calls:?}");
+    assert!(check_calls.iter().any(|c| c.contains("SHOW_SPECTRUM_ITEM_ID")), "one CheckMenuItem is Show Audio Spectrum (要件91): {check_calls:?}");
     assert!(check_calls.iter().all(|c| !c.contains("THEME")), "no theme item is a CheckMenuItem: {check_calls:?}");
 }
 
@@ -457,7 +459,8 @@ fn view_menu_holds_appearance_and_full_width_between_the_tab_items_and_zoom() {
     let separators = separator_bindings(&code);
     // 要件#74 第4段 4-2(2026-11-17 由谷の決定 4-5・棚卸し 3): Raw Source の直後に `show_format_toolbar_item`(View ▸ Show Formatting Toolbar)。14 → 15。
     // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): Show Formatting Toolbar の直後に `alerts_menu`(View ▸ Alerts ▸)。15 → 16。
-    assert_eq!(idents.len(), 16, "View must hold exactly 16 entries ({idents:?})");
+    // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): Alerts の直後に `show_spectrum_item`(View ▸ Show Audio Spectrum)。16 → 17。
+    assert_eq!(idents.len(), 17, "View must hold exactly 17 entries ({idents:?})");
 
     let show_tab_bar = menu_item_binding(&code, "SHOW_TAB_BAR_ITEM_ID");
     let show_all_tabs = menu_item_binding(&code, "SHOW_ALL_TABS_ITEM_ID");
@@ -480,12 +483,14 @@ fn view_menu_holds_appearance_and_full_width_between_the_tab_items_and_zoom() {
     assert_eq!(idents[8], "show_format_toolbar_item", "View[8] must be Show Formatting Toolbar (requirement #74 4-2) ({idents:?})");
     // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): [9] Alerts ▸(区切り線以降はさらに 1 つずれる)。
     assert_eq!(idents[9], "alerts_menu", "View[9] must be the Alerts submenu (requirement #90 契約1) ({idents:?})");
-    assert!(separators.contains(idents[10]), "View[10] must be a separator ({idents:?})");
-    assert_eq!(idents[11], zoom_in, "View[11] ({idents:?})");
-    assert_eq!(idents[12], zoom_out, "View[12] ({idents:?})");
-    assert_eq!(idents[13], actual_size, "View[13] ({idents:?})");
-    assert!(separators.contains(idents[14]), "View[14] must be a separator ({idents:?})");
-    assert_eq!(idents[15], devtools, "View[15] ({idents:?})");
+    // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): [10] Show Audio Spectrum(区切り線以降はさらに 1 つずれる)。
+    assert_eq!(idents[10], "show_spectrum_item", "View[10] must be Show Audio Spectrum (requirement #91 契約11) ({idents:?})");
+    assert!(separators.contains(idents[11]), "View[11] must be a separator ({idents:?})");
+    assert_eq!(idents[12], zoom_in, "View[12] ({idents:?})");
+    assert_eq!(idents[13], zoom_out, "View[13] ({idents:?})");
+    assert_eq!(idents[14], actual_size, "View[14] ({idents:?})");
+    assert!(separators.contains(idents[15]), "View[15] must be a separator ({idents:?})");
+    assert_eq!(idents[16], devtools, "View[16] ({idents:?})");
 }
 
 // ---------------------------------------------------------------------------

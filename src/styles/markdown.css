@@ -72,6 +72,7 @@
 	.markdown-body > dl,
 	.markdown-body > hr,
 	.markdown-body > .footnotes,
+	.markdown-body > .vellis-alert-marker,
 	.markdown-body > .vellis-plaintext:not([data-vellis-lang]):read-only {
 		max-width: var(--doc-measure);
 	}
@@ -98,6 +99,7 @@
 	:root[data-doc-measure="full"] .markdown-body > dl,
 	:root[data-doc-measure="full"] .markdown-body > hr,
 	:root[data-doc-measure="full"] .markdown-body > .footnotes,
+	:root[data-doc-measure="full"] .markdown-body > .vellis-alert-marker,
 	:root[data-doc-measure="full"] .markdown-body > .vellis-plaintext:not([data-vellis-lang]):read-only {
 		max-width: none;
 	}
@@ -157,11 +159,16 @@
 	color: var(--md-alert-color, var(--md-color-blockquote-text));
 }
 
-.markdown-body .markdown-alert-note { --md-alert-color: var(--md-color-alert-note); }
-.markdown-body .markdown-alert-tip { --md-alert-color: var(--md-color-alert-tip); }
-.markdown-body .markdown-alert-important { --md-alert-color: var(--md-color-alert-important); }
-.markdown-body .markdown-alert-warning { --md-alert-color: var(--md-color-alert-warning); }
-.markdown-body .markdown-alert-caution { --md-alert-color: var(--md-color-alert-caution); }
+.markdown-body .markdown-alert-note,
+.markdown-body .vellis-alert-marker[data-alert-kind="note"] { --md-alert-color: var(--md-color-alert-note); }
+.markdown-body .markdown-alert-tip,
+.markdown-body .vellis-alert-marker[data-alert-kind="tip"] { --md-alert-color: var(--md-color-alert-tip); }
+.markdown-body .markdown-alert-important,
+.markdown-body .vellis-alert-marker[data-alert-kind="important"] { --md-alert-color: var(--md-color-alert-important); }
+.markdown-body .markdown-alert-warning,
+.markdown-body .vellis-alert-marker[data-alert-kind="warning"] { --md-alert-color: var(--md-color-alert-warning); }
+.markdown-body .markdown-alert-caution,
+.markdown-body .vellis-alert-marker[data-alert-kind="caution"] { --md-alert-color: var(--md-color-alert-caution); }
 
 /* --- Hiding and folding alerts (requirement #90) ---
  * Screen-only state: the Markdown is never rewritten. A hidden alert keeps its
@@ -223,12 +230,6 @@
 	margin: 0 0 1em;
 }
 
-.markdown-body .vellis-alert-marker[data-alert-kind="note"] { --md-alert-color: var(--md-color-alert-note); }
-.markdown-body .vellis-alert-marker[data-alert-kind="tip"] { --md-alert-color: var(--md-color-alert-tip); }
-.markdown-body .vellis-alert-marker[data-alert-kind="important"] { --md-alert-color: var(--md-color-alert-important); }
-.markdown-body .vellis-alert-marker[data-alert-kind="warning"] { --md-alert-color: var(--md-color-alert-warning); }
-.markdown-body .vellis-alert-marker[data-alert-kind="caution"] { --md-alert-color: var(--md-color-alert-caution); }
-
 .markdown-body .vellis-alert-marker::after {
 	content: "";
 	flex: 1 1 auto;
@@ -252,16 +253,6 @@
 
 .markdown-body .vellis-alert-marker-label::before {
 	content: attr(data-label);
-}
-
-@media screen {
-	.markdown-body > .vellis-alert-marker {
-		max-width: var(--doc-measure);
-	}
-
-	:root[data-doc-measure="full"] .markdown-body > .vellis-alert-marker {
-		max-width: none;
-	}
 }
 
 /* The marker is screen-only: the paper carries what the screen shows minus the

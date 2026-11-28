@@ -134,6 +134,7 @@
 	} from '$lib/theme';
 	import { effectiveMode, registerUiChromeListeners, restoreUiChrome } from '$lib/ui-chrome';
 	import { loadAlertVisibility, registerAlertVisibilityListeners } from '$lib/alert-visibility';
+	import { loadSpectrumShown, registerSpectrumVisibilityListeners } from '$lib/spectrum-visibility';
 	import type { PageData } from './$types';
 	import '../styles/theme.css';
 	import '../styles/app.css';
@@ -150,6 +151,8 @@
 	restoreUiChrome();
 	// 要件#90 契約7: GitHub Alerts の表示の設定(アプリ全体で 1 値)も描く前に読む。メニューと他の窓の選択は下の onMount で受ける。
 	loadAlertVisibility();
+	// Requirement #91 contract 11: the app-wide "show the audio spectrum" setting, read before the viewers are drawn.
+	loadSpectrumShown();
 
 	// The resolved theme now in effect. `null` = the Default of theme.css
 	// (`get_theme` was unavailable). Not drawn from, so not `$state`.
@@ -252,6 +255,8 @@
 		}).then(keep);
 		// 要件#90 契約1・7: View ▸ Alerts(面の無い窓でも受ける)と他の窓の選択(storage)
 		void registerAlertVisibilityListeners().then(keep);
+		// Requirement #91 contract 11: View ▸ Show Audio Spectrum (a receiver even without media), other windows, the focus
+		void registerSpectrumVisibilityListeners().then(keep);
 		return () => {
 			disposed = true;
 			for (const off of unlisteners) off();
@@ -824,8 +829,9 @@
 	/**
 	 * 契約⑦: Esc の宛先。Go to バーが開いていれば**バーが先に食う**(バーは編集より
 	 * 手前の一時 UI)。編集の破棄より先に決着させるため `document` の capture 段で
-	 * 受けて後段へ渡さない —— 要件#54 の検索バーとまったく同じ形で、`Viewer` 側も
-	 * `goToOpen` を見て譲るので、登録順に依らず結論が同じになる。
+	 * 受けて後段へ渡さない —— 要件#54 の検索バーとまったく同じ形。`Viewer` 側に Go to バーを
+	 * 見る門は無い(2026-11-25 の /simplify で使われていなかった `escBelongsToBar` を外した)ので、
+	 * 宛先はこの capture 段のハンドラだけが決める。
 	 *
 	 * IME の変換中の Esc は IME に委ねる(閉じない)。
 	 */
@@ -2176,7 +2182,6 @@
 								{findInitialQuery}
 								{findInitialIndex}
 								onFindOpenChange={handleFindOpenChange}
-								{goToOpen}
 								aiTools={legacy.ai}
 								{codeTheme}
 							/>

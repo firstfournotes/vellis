@@ -22,7 +22,7 @@ export type MergeResult = { kind: 'clean'; text: string } | { kind: 'conflict' }
  * 塊を行の単位に割る。`[from, to)` を `lines` に置き換える塊を、先頭から 1 行ずつの置き換えと、
  * 行数の差の分の末尾の削除(base の行が多い)か挿入(新しい行が多い)にする。
  */
-function splitByLine(hunk: Hunk): Hunk[] {
+export function splitByLine(hunk: Hunk): Hunk[] {
 	const baseCount = hunk.to - hunk.from;
 	const common = Math.min(baseCount, hunk.lines.length);
 	const out: Hunk[] = [];
@@ -36,18 +36,23 @@ function splitByLine(hunk: Hunk): Hunk[] {
 	return out;
 }
 
-function sameHunk(a: Hunk, b: Hunk): boolean {
+export function sameHunk(a: Hunk, b: Hunk): boolean {
 	return a.from === b.from && a.to === b.to && a.lines.length === b.lines.length && a.lines.every((l, i) => l === b.lines[i]);
 }
 
 /** 2 つの塊が同じ base の範囲を取り合うか。 */
-function overlaps(a: Hunk, b: Hunk): boolean {
+export function overlaps(a: Hunk, b: Hunk): boolean {
 	const aEmpty = a.from === a.to;
 	const bEmpty = b.from === b.to;
 	if (aEmpty && bEmpty) return a.from === b.from;
 	if (aEmpty) return b.from < a.from && a.from < b.to;
 	if (bEmpty) return a.from < b.from && b.from < a.to;
 	return a.from < b.to && b.from < a.to;
+}
+
+/** 同じ位置の挿入と、その位置から始まる置き換えは、挿入を先に置く。 */
+export function byPosition(a: { from: number; to: number }, b: { from: number; to: number }): number {
+	return a.from - b.from || a.to - a.from - (b.to - b.from);
 }
 
 /** 行単位の 3 方向マージ。行末の改行コードは行の一部(両側とも触っていない行は byte のまま)。 */
@@ -75,8 +80,7 @@ export function merge3(base: string, mine: string, theirs: string): MergeResult 
 			if (overlaps(a, b)) return { kind: 'conflict' };
 		}
 	}
-	// 同じ位置の挿入と、その位置から始まる置き換えは、挿入を先に置く。
-	all.sort((a, b) => a.from - b.from || (a.to - a.from) - (b.to - b.from));
+	all.sort(byPosition);
 
 	let out = '';
 	let at = 0;

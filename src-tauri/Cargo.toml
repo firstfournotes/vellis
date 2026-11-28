@@ -1,9 +1,11 @@
 [package]
 name = "vellis"
-version = "0.7.3"
+version = "0.7.4"
 description = "A desktop viewer and text editor for AI-generated documents"
 authors = ["FirstFourNotes"]
 edition = "2021"
+# lib.rs のメニューの分岐が if let の guard(Rust 1.95 で安定)を使う
+rust-version = "1.95"
 
 [lib]
 name = "vellis_lib"

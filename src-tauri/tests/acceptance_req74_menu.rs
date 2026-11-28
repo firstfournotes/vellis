@@ -358,7 +358,8 @@ const EXPECTED_FORMAT: [&str; 28] = [
 ];
 
 // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts ▸(`alerts_menu`)を Show Formatting Toolbar の直後に。15 → 16。
-const EXPECTED_VIEW: [&str; 16] = [
+// 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): View ▸ Show Audio Spectrum(`show_spectrum_item`)を Alerts の直後に。16 → 17。
+const EXPECTED_VIEW: [&str; 17] = [
     "show_tab_bar_item",
     "show_all_tabs_item",
     "view_tab_sep",
@@ -370,6 +371,7 @@ const EXPECTED_VIEW: [&str; 16] = [
     // 第4段 4-2(4-5): View ▸ Show Formatting Toolbar(CheckMenuItem・アクセラレータなし)は Raw Source の直後
     "show_format_toolbar_item",
     "alerts_menu",
+    "show_spectrum_item",
     "view_chrome_sep",
     "zoom_in_item",
     "zoom_out_item",
@@ -769,11 +771,12 @@ fn ac74_7_raw_source_is_a_check_item_right_after_toggle_full_width() {
     assert_eq!(last_argument(call), "Some(RAW_SOURCE_ACCELERATOR)");
     assert_eq!(item_binding(&code, "RAW_SOURCE_ITEM_ID"), "raw_source_item");
     // 要件90(2026-11-26)で改めた(docs/requirements/req-90.md「要件側の更新」): View ▸ Alerts の種類のチェック項目を helper `alert_kind_item` 1 か所で作る。2 → 3。
-    assert_eq!(code.matches("CheckMenuItem::with_id(").count(), 3, "Raw Source, Show Formatting Toolbar (第4段 4-2) and the alert kinds' helper (要件90) are the only CheckMenuItems");
+    // 要件91(2026-11-27)で改めた(docs/requirements/req-91.md「要件側の更新」): View ▸ Show Audio Spectrum も CheckMenuItem。3 → 4。
+    assert_eq!(code.matches("CheckMenuItem::with_id(").count(), 4, "Raw Source, Show Formatting Toolbar (第4段 4-2), the alert kinds' helper (要件90) and Show Audio Spectrum (要件91) are the only CheckMenuItems");
 
     let view = submenu_call_with_label(&code, "View").expect("menu.rs must build a \"View\" submenu");
     let idents = slice_idents(view);
-    assert_eq!(idents, EXPECTED_VIEW, "View must hold these 16 entries ((ao)・第4段 4-2・要件90): found {idents:?}");
+    assert_eq!(idents, EXPECTED_VIEW, "View must hold these 17 entries ((ao)・第4段 4-2・要件90・要件91): found {idents:?}");
     let full_width = item_binding(&code, "TOGGLE_FULL_WIDTH_ITEM_ID");
     assert_eq!(idents[6], full_width);
     assert_eq!(idents[7], "raw_source_item");
@@ -801,7 +804,7 @@ fn ac74_62_show_format_toolbar_is_a_check_item_right_after_raw_source() {
 
     let view = submenu_call_with_label(&code, "View").expect("menu.rs must build a \"View\" submenu");
     let idents = slice_idents(view);
-    assert_eq!(idents, EXPECTED_VIEW, "View must hold these 16 entries (要件90 adds alerts_menu): found {idents:?}");
+    assert_eq!(idents, EXPECTED_VIEW, "View must hold these 17 entries (要件90 adds alerts_menu, 要件91 adds show_spectrum_item): found {idents:?}");
     let raw_at = idents.iter().position(|i| *i == "raw_source_item").expect("Raw Source in View");
     assert_eq!(idents.get(raw_at + 1), Some(&"show_format_toolbar_item"), "right after Raw Source");
     let separators = separator_bindings(&code);

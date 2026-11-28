@@ -40,6 +40,33 @@
 		windowXToTime,
 		zoomWaveformAtAnchor,
 	} from '$lib/waveform-zoom';
+	import {
+		DEFAULT_SPECTRUM_HEIGHT,
+		SPECTRUM_TICK_ROW_PX,
+		analyzeSpectrumSource,
+		clampSpectrumHeight,
+		createPeakHold,
+		decodeSpectrumAudio,
+		dragSpectrumHeight,
+		drawSpectrum,
+		loadSpectrumHeight,
+		resetPeakHold,
+		saveSpectrumHeight,
+		spectrumBandNote,
+		spectrumDbTickMarks,
+		spectrumFrequencyTickMarks,
+		spectrumLaneCount,
+		spectrumLaneLabelMarks,
+		spectrumLanes,
+		updatePeakHold,
+		type PeakHold,
+		type SpectrumSource,
+	} from '$lib/audio-spectrum';
+	import {
+		currentSpectrumShown,
+		setSpectrumAvailable,
+		subscribeSpectrumShown,
+	} from '$lib/spectrum-visibility';
 
 	let {
 		uri,
@@ -125,6 +152,35 @@
 	/** ドラッグ開始時のキャプチャ(要件#43 契約④と同形)。 */
 	let dragStart: { height: number; y: number; freeSpace: number } | null = null;
 
+	// --- The audio spectrum band (requirement #91; the same band as VideoViewer's) -------------------
+	/** View ▸ Show Audio Spectrum (app-wide, contract 11). Hidden = no divider, no band, no analysis. */
+	let spectrumShown = $state(currentSpectrumShown());
+	/** The 32 kHz audio of this `src`. null = not analysed yet (just opened, analysing, or hidden). */
+	let spectrumSource = $state<SpectrumSource | null>(null);
+	let spectrumAnalyzing = $state(false);
+	/** Which `src` the spectrum's audio belongs to. Not drawn, so not `$state`. */
+	let spectrumAnalyzedSrc: string | null = null;
+	let spectrumCanvas: HTMLCanvasElement | undefined = $state();
+	/** The band's inner width = the 20 Hz…16 kHz axis. */
+	let spectrumWidth = $state(0);
+	/** The band height (contract 2): one key for both viewers. Replaced by the saved value on mount. */
+	let spectrumHeight = $state(DEFAULT_SPECTRUM_HEIGHT);
+	let resizingSpectrum = $state(false);
+	let spectrumDragStart: { height: number; y: number; freeSpace: number } | null = null;
+	/** One peak-hold line per lane (contract 6). Reset by a seek; not drawn state. */
+	let peakHolds: PeakHold[] = [];
+	/** The same words as this viewer's waveform band (contract 10). */
+	let spectrumNote = $derived(spectrumBandNote(spectrumSource, spectrumAnalyzing, audioWaveformNote));
+	let spectrumCanvasHeight = $derived(Math.max(0, spectrumHeight - SPECTRUM_TICK_ROW_PX));
+	let spectrumLaneTotal = $derived(spectrumLaneCount(spectrumSource));
+	/** The lanes at the playback position (contract 7). */
+	let spectrumDbLanes = $derived(
+		spectrumShown && spectrumSource?.state === 'ready' ? spectrumLanes(spectrumSource, position) : null,
+	);
+	let spectrumLaneLabels = $derived(spectrumLaneLabelMarks(spectrumLaneTotal, spectrumCanvasHeight));
+	let spectrumDbTicks = $derived(spectrumDbTickMarks(spectrumLaneTotal, spectrumCanvasHeight));
+	const spectrumFrequencyTicks = spectrumFrequencyTickMarks();
+
 	/**
 	 * 横軸の尺(契約④(b))。第2引数が解析尺 ―― `<audio>` が尺を言えない(NaN/Infinity)
 	 * ときの受け皿になる。判断そのものは純関数 `audioAxisDuration` の持ち場。
@@ -200,6 +256,10 @@
 		analyzedSrc = null;
 		waveformZoom = 1;
 		waveformWindowStart = 0;
+		spectrumSource = null;
+		spectrumAnalyzing = false;
+		spectrumAnalyzedSrc = null;
+		peakHolds = [];
 	});
 
 	// 設計どおりのプレースホルダ(ssh)も、出した時点で「表示できた」に入れる(要件#64 追補f
@@ -257,6 +317,118 @@
 			// `waveformAnalyzing` は降ろさない ―― 降ろすと「結果なし・解析中でもない」
 			// 宙ぶらりんの帯が残り得る。
 			if (!settled) analyzedSrc = null;
+		};
+	});
+
+	/**
+	 * The spectrum's audio (requirement #91 contract 1 / 3 / 10): the waveform's routes, decoded at 32 kHz; wav comes
+	 * from the Rust extraction command as a 32 kHz WAV (never fetched). Runs only while the band is shown.
+	 */
+	$effect(() => {
+		const key = src;
+		const inline = mode === 'inline';
+		const wanted = spectrumShown;
+		if (!inline || !wanted || spectrumAnalyzedSrc === key) return;
+
+		const target = untrack(() => uri);
+		spectrumAnalyzedSrc = key;
+		spectrumSource = null;
+		spectrumAnalyzing = true;
+		peakHolds = [];
+
+		let settled = false;
+		let cancelled = false;
+
+		void (async () => {
+			const seconds = untrack(() => (barDuration > 0 ? barDuration : null));
+			const result = await analyzeSpectrumSource(target, {
+				durationSeconds: seconds,
+				hasAudioTrack: null,
+				decode: decodeSpectrumAudio,
+				extract: extractWaveformAudio,
+				loadWav: extractWaveformAudio,
+			});
+			settled = true;
+			if (cancelled) return;
+			spectrumSource = result;
+			spectrumAnalyzing = false;
+		})();
+
+		return () => {
+			cancelled = true;
+			if (!settled) spectrumAnalyzedSrc = null;
+		};
+	});
+
+	/** The spectrum at the playback position (contract 6 / 7), its peak-hold lines and the canvas. */
+	$effect(() => {
+		const lanes = spectrumDbLanes;
+		const canvas = spectrumCanvas;
+		const width = spectrumWidth;
+		const height = spectrumCanvasHeight;
+		void appearanceTick;
+		let peaks: Float32Array[] | null = null;
+		if (lanes) {
+			if (peakHolds.length !== lanes.length) peakHolds = lanes.map((db) => createPeakHold(db.length));
+			const now = performance.now();
+			peaks = lanes.map((db, i) => updatePeakHold(peakHolds[i], db, now));
+		}
+		if (!canvas || width <= 0) return;
+		drawSpectrum(canvas, lanes, peaks, width, height);
+	});
+
+	/** A seek (the bar, the waveform, ← / →) forgets the held peaks (contract 6). */
+	$effect(() => {
+		const el = audio;
+		if (!el) return;
+		const onSeeking = () => {
+			for (const hold of peakHolds) resetPeakHold(hold);
+		};
+		el.addEventListener('seeking', onSeeking);
+		return () => el.removeEventListener('seeking', onSeeking);
+	});
+
+	/** The band's divider drag (contract 2): the waveform divider's way, the spectrum's own range and key. */
+	function startSpectrumResize(event: PointerEvent): void {
+		const handle = event.currentTarget as HTMLElement;
+		handle.setPointerCapture(event.pointerId);
+		const block = (stage?.offsetHeight ?? 0) + (controls?.offsetHeight ?? 0);
+		const freeSpace = Math.max(0, (pane?.clientHeight ?? 0) - block);
+		spectrumDragStart = { height: spectrumHeight, y: event.clientY, freeSpace };
+		resizingSpectrum = true;
+		event.preventDefault();
+	}
+
+	function moveSpectrumResize(event: PointerEvent): void {
+		const start = spectrumDragStart;
+		if (!resizingSpectrum || !start) return;
+		spectrumHeight = dragSpectrumHeight(start.height, start.y - event.clientY, start.freeSpace, window.innerHeight);
+	}
+
+	function endSpectrumResize(event: PointerEvent): void {
+		if (!resizingSpectrum) return;
+		resizingSpectrum = false;
+		spectrumDragStart = null;
+		const handle = event.currentTarget as HTMLElement;
+		if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+		saveSpectrumHeight(spectrumHeight);
+	}
+
+	// The setting (shown / hidden) and the report to Rust that this window shows audio (contract 11);
+	// the saved band height and the window-height clamp (contract 2).
+	onMount(() => {
+		spectrumShown = currentSpectrumShown();
+		const off = subscribeSpectrumShown((shown) => (spectrumShown = shown));
+		setSpectrumAvailable(true);
+		spectrumHeight = loadSpectrumHeight(window.innerHeight);
+		const handleWindowResize = () => {
+			spectrumHeight = clampSpectrumHeight(spectrumHeight, window.innerHeight);
+		};
+		window.addEventListener('resize', handleWindowResize);
+		return () => {
+			off();
+			setSpectrumAvailable(false);
+			window.removeEventListener('resize', handleWindowResize);
 		};
 	});
 
@@ -698,6 +870,53 @@
 		<div class="audio-stage" bind:this={stage}>
 			{#if mode === 'inline' && !loadFailed}
 				<!--
+					The audio spectrum at the playback position (requirement #91 contract 2): above the waveform (the
+					audio viewer's player part), with its own divider. Hidden by View > Show Audio Spectrum = neither is in
+					the DOM. The canvas spans the band's full width (the 20 Hz to 16 kHz log axis).
+				-->
+				{#if spectrumShown}
+					<div
+						class="spectrum-divider"
+						class:dragging={resizingSpectrum}
+						role="separator"
+						aria-orientation="horizontal"
+						aria-label="Resize Spectrum"
+						title="Drag to resize the audio spectrum"
+						onpointerdown={startSpectrumResize}
+						onpointermove={moveSpectrumResize}
+						onpointerup={endSpectrumResize}
+						onpointercancel={endSpectrumResize}
+					></div>
+					<div
+						class="spectrum-band"
+						data-testid="audio-spectrum"
+						style="height: {spectrumHeight}px"
+						bind:clientWidth={spectrumWidth}
+					>
+						<canvas
+							class="spectrum-canvas"
+							bind:this={spectrumCanvas}
+							style="height: {spectrumCanvasHeight}px"
+							aria-label="Audio spectrum at the playback position"
+						></canvas>
+						{#if spectrumNote}
+							<span class="spectrum-note">{spectrumNote}</span>
+						{:else}
+							{#each spectrumLaneLabels as label (label.text)}
+								<span class="spectrum-lane-label" style="top: {label.top}px">{label.text}</span>
+							{/each}
+							{#each spectrumDbTicks as tick (tick.key)}
+								<span class="spectrum-db-tick" style="top: {tick.top}px; transform: translateY({tick.shift}%)">{tick.text}</span>
+							{/each}
+							<div class="spectrum-ticks" style="height: {SPECTRUM_TICK_ROW_PX}px">
+								{#each spectrumFrequencyTicks as tick (tick.text)}
+									<span class="spectrum-tick" style="left: {tick.left}%; transform: translateX({tick.shift}%)">{tick.text}</span>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				{/if}
+				<!--
 					帯の上端の仕切り(契約⑪)。ドラッグ専用のハンドルで、既定高へ戻す手段
 					(ダブルクリック等)は設けない ―― 要件#42 の動画側と同じ整理。
 				-->
@@ -980,6 +1199,91 @@
 	.waveform-divider:hover,
 	.waveform-divider.dragging {
 		background-color: var(--color-border);
+	}
+
+	/* The audio spectrum band (requirement #91): the same band as VideoViewer's. */
+	.spectrum-divider {
+		flex-shrink: 0;
+		height: 6px;
+		margin-bottom: -2px;
+		cursor: row-resize;
+		background-color: transparent;
+		touch-action: none;
+	}
+
+	.spectrum-divider:hover,
+	.spectrum-divider.dragging {
+		background-color: var(--color-border);
+	}
+
+	/* `color` is the curve's colour, read by the drawing (getComputedStyle), not the text's. */
+	.spectrum-band {
+		position: relative;
+		width: 100%;
+		flex-shrink: 0;
+		overflow: hidden;
+		margin-bottom: 6px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		background-color: var(--color-bg-base);
+		color: var(--color-accent);
+	}
+
+	.spectrum-canvas {
+		display: block;
+		width: 100%;
+	}
+
+	.spectrum-ticks {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		pointer-events: none;
+	}
+
+	.spectrum-tick,
+	.spectrum-db-tick {
+		position: absolute;
+		font-size: 9px;
+		font-family: var(--font-mono);
+		line-height: 1.4;
+		color: var(--color-text-muted);
+		white-space: nowrap;
+		pointer-events: none;
+	}
+
+	.spectrum-tick {
+		bottom: 0;
+	}
+
+	.spectrum-db-tick {
+		right: 3px;
+	}
+
+	.spectrum-lane-label {
+		position: absolute;
+		left: 3px;
+		padding: 1px 3px;
+		border-radius: 3px;
+		font-size: 10px;
+		font-family: var(--font-mono);
+		font-weight: 600;
+		line-height: 1.2;
+		color: var(--color-text-muted);
+		background-color: var(--color-bg-base);
+		pointer-events: none;
+	}
+
+	.spectrum-note {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: var(--text-sm);
+		color: var(--color-text-muted);
+		pointer-events: none;
 	}
 
 	/*

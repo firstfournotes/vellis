@@ -13,7 +13,7 @@
 	import { openInNewWindowFailedMessage } from '$lib/open-in-new-window';
 	import { DEFAULT_ZOOM } from '$lib/zoom';
 	import { holdScrollForPrint } from '$lib/print-scroll';
-	import { attachAlertVisibility, revealAlertsAround } from '$lib/alert-dom';
+	import { attachAlertVisibility, hasConcealedAlert, revealAlertsAround } from '$lib/alert-dom';
 	import {
 		applyHighlights,
 		clearHighlights,
@@ -60,7 +60,6 @@
 		findInitialQuery = '',
 		findInitialIndex = 0,
 		onFindOpenChange,
-		goToOpen = false,
 		aiTools = true,
 		codeTheme = 'github-light',
 	}: {
@@ -99,15 +98,6 @@
 		findInitialIndex?: number;
 		/** 検索バーの開閉を +page.svelte へ返す(閉じたら html は iframe へ戻る)。 */
 		onFindOpenChange?: (open: boolean) => void;
-		/**
-		 * 要件#60 契約⑦: Go to バーが開いているか(バーは +page.svelte の持ち場)。
-		 *
-		 * 検索バーと同じ理由で、開いている間の Esc は**バーが先に食う**。あちらは
-		 * `document` の capture 段で `stopImmediatePropagation` するので普通は
-		 * ここまで届かないが、登録順に依らず結論を同じにするため、下の Esc
-		 * ハンドラも `findOpen` と同じようにこれを見て譲る(両側から挟む)。
-		 */
-		goToOpen?: boolean;
 		/**
 		 * 要件#84 契約5: ツールバーの Add Instruction と Marks(今の AI 連携)を出すか。
 		 * 配布版では +page.svelte が偽を渡す。既定は出る側(契約10)。
@@ -512,13 +502,6 @@
 		};
 	}
 
-	/**
-	 * Esc を一時 UI のバーへ譲るか(要件#54 契約⑤・要件#60 契約⑦)。バーは編集より
-	 * 手前の一時 UI なので、開いている間の Esc は編集の破棄に使わない。検索バーは
-	 * この中、Go to バーは +page.svelte の側にある(どちらも同じ扱い)。
-	 */
-	let escBelongsToBar = $derived(findOpen || goToOpen);
-
 	/** 探している語。バーを閉じても残す(次の ⌘F で全選択されて出る=契約①)。 */
 	let findQuery = $state('');
 
@@ -821,6 +804,8 @@
 		const match = ranges[current];
 		if (!match) return;
 		untrack(() => {
+			// 隠した・畳んだ枠が無い文書(ほとんど)は、一致の文字範囲を探しに文書をたどらない
+			if (!hasConcealedAlert(container)) return;
 			const range = rangeAtMatch(container, match);
 			if (!range) return;
 			revealAlertsAround(range.startContainer);
@@ -1379,14 +1364,7 @@
 			left={mergeView.mine}
 			right={mergeView.theirs}
 			onClose={closeMerge}
-			merge={{
-				base: mergeView.base,
-				mine: mergeView.mine,
-				theirs: mergeView.theirs,
-				rebuilt: mergeView.rebuilt,
-				onCancel: closeMerge,
-				onApply: applyMerge,
-			}}
+			merge={{ ...mergeView, onApply: applyMerge }}
 		/>
 	{/if}
 	{#if markdownTooBig && !bigRaw}

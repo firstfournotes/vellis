@@ -13,22 +13,24 @@
  * - リンク: 参照リンクの行き先は描画のときに定義から引く
  */
 import type { Mark, Node as PMNode } from 'prosemirror-model';
-import { Plugin, PluginKey, Selection, TextSelection, type EditorState } from 'prosemirror-state';
+import { Plugin, PluginKey, Selection, TextSelection, type EditorState, type Transaction } from 'prosemirror-state';
+import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform';
 import { Decoration, DecorationSet, type EditorView, type MarkView, type NodeView, type NodeViewConstructor, type MarkViewConstructor } from 'prosemirror-view';
 import { redo, undo } from 'prosemirror-history';
 import { Compartment, EditorState as CMState, type Extension } from '@codemirror/state';
 import { EditorView as CMView, keymap } from '@codemirror/view';
-import { LanguageDescription, bracketMatching, syntaxHighlighting } from '@codemirror/language';
+import { LanguageDescription, bracketMatching } from '@codemirror/language';
 import { languages } from '@codemirror/language-data';
 import { cursorCharLeft, cursorCharRight, cursorLineDown, cursorLineUp } from '@codemirror/commands';
 
 import { isExternal, resolveRelative, toAssetUri } from '$lib/uri';
 import { mountMermaid } from '$lib/mermaid-mounter';
 import { render } from '../../markdown/renderer';
-import { highlightStyleFor } from '../code-theme';
+import { createHighlightLoader } from '../cm-face';
 import { CODE_KEYMAP } from '../code-keymap';
 import { undoMarkdownInputRule } from '../input-rules';
 import { GapCursor } from 'prosemirror-gapcursor';
+import { gapValid } from '../gap-cursor';
 
 export interface NodeViewContext {
 	/** 文書の URI(画像の相対パスの基準)。 */
@@ -37,6 +39,8 @@ export interface NodeViewContext {
 	codeTheme: () => string;
 	/** 開いている code fence の NodeView(テーマの切り替えを配る先)。 */
 	codeBlocks?: Set<{ setTheme(name: string): void }>;
+	/** 生 HTML の描画の控え(原文の塊 → sanitize 済みの HTML)。面と一緒に消える。 */
+	rawHtmlCache?: Map<string, Promise<string>>;
 }
 
 /** 面の codeTheme が変わったら、開いている埋め込みの CodeMirror の配色を替える(文書・選択・履歴は保つ=契約5)。 */
@@ -51,18 +55,27 @@ export const MERMAID_REDRAW_DELAY_MS = 500;
 // 今の描画(sanitize 済み)の HTML
 // ---------------------------------------------------------------------------
 
-const renderedCache = new Map<string, Promise<string>>();
-
-/** 生 HTML を今の描画と同じ道(render=sanitize 済み)で HTML にする。 */
-function renderRaw(raw: string, uri: string): Promise<string> {
-	const key = `${uri}\n${raw}`;
-	let html = renderedCache.get(key);
+/** 生 HTML を今の描画と同じ道(render=sanitize 済み)で HTML にする。同じ塊は面ごとに 1 回だけ描く。 */
+function renderRaw(raw: string, ctx: NodeViewContext): Promise<string> {
+	const cache = (ctx.rawHtmlCache ??= new Map());
+	const key = `${ctx.uri}\n${raw}`;
+	let html = cache.get(key);
 	if (!html) {
-		html = render(raw + '\n', uri).then((r) => r.html);
-		html.catch(() => renderedCache.delete(key));
-		renderedCache.set(key, html);
+		html = render(raw + '\n', ctx.uri).then((r) => r.html);
+		html.catch(() => cache.delete(key));
+		cache.set(key, html);
 	}
 	return html;
+}
+
+/** 文書(不変)ごとに 1 回だけ求める表。NodeView は 1 つ作るたびに引くので、走査は文書の版ごとに 1 回にする。 */
+function memoByDoc<T extends object>(compute: (doc: PMNode) => T): (doc: PMNode) => T {
+	const cache = new WeakMap<PMNode, T>();
+	return (doc) => {
+		let value = cache.get(doc);
+		if (!value) cache.set(doc, (value = compute(doc)));
+		return value;
+	};
 }
 
 /** 外側の `<p>`(1 つだけのとき)を剥がす(インラインの生 HTML は段落の中に置くので)。 */
@@ -82,7 +95,7 @@ function rawHtmlView(node: PMNode, ctx: NodeViewContext, inline: boolean): NodeV
 	let request = 0;
 	const fill = () => {
 		const mine = ++request;
-		void renderRaw(raw, ctx.uri).then((html) => {
+		void renderRaw(raw, ctx).then((html) => {
 			if (mine !== request) return;
 			dom.innerHTML = inline ? stripOuterParagraph(html, dom.ownerDocument) : html;
 		});
@@ -141,17 +154,22 @@ export function displayImageSrc(src: string, uri: string): string {
 	}
 }
 
+/** 参照の定義の表(小文字の identifier → url。同じ identifier は先のもの)。 */
+const definitionUrls = memoByDoc((doc) => {
+	const urls = new Map<string, string>();
+	doc.descendants((n) => {
+		if (n.type.name !== 'definition') return true;
+		const identifier = String(n.attrs.identifier).toLowerCase();
+		if (!urls.has(identifier)) urls.set(identifier, String(n.attrs.url));
+		return true;
+	});
+	return urls;
+});
+
 /** 参照の定義(identifier → url)を文書から引く。 */
 function definitionUrl(doc: PMNode, identifier: string | null): string | null {
 	if (!identifier) return null;
-	const want = identifier.toLowerCase();
-	let found: string | null = null;
-	doc.descendants((n) => {
-		if (found !== null) return false;
-		if (n.type.name === 'definition' && String(n.attrs.identifier).toLowerCase() === want) found = String(n.attrs.url);
-		return true;
-	});
-	return found;
+	return definitionUrls(doc).get(identifier.toLowerCase()) ?? null;
 }
 
 function imageView(node: PMNode, view: EditorView, ctx: NodeViewContext): NodeView {
@@ -181,7 +199,7 @@ function imageView(node: PMNode, view: EditorView, ctx: NodeViewContext): NodeVi
 // ---------------------------------------------------------------------------
 
 /** 参照の順の番号(label → N)。 */
-function footnoteNumbers(doc: PMNode): Map<string, number> {
+const footnoteNumbers = memoByDoc((doc) => {
 	const numbers = new Map<string, number>();
 	doc.descendants((n) => {
 		if (n.type.name === 'footnote_reference') {
@@ -191,7 +209,7 @@ function footnoteNumbers(doc: PMNode): Map<string, number> {
 		return true;
 	});
 	return numbers;
-}
+});
 
 /** 面の脚注の番号を今の文書に合わせる(取引の後に呼ぶ)。 */
 export function refreshFootnoteNumbers(view: EditorView): void {
@@ -256,9 +274,6 @@ function footnoteDefinitionView(node: PMNode, view: EditorView): NodeView {
 // code fence(CodeMirror の埋め込み)と mermaid
 // ---------------------------------------------------------------------------
 
-/** `GapCursor.valid` は型の宣言で @internal(実装には在る)。 */
-const gapCursorValid = (GapCursor as unknown as { valid($pos: import('prosemirror-model').ResolvedPos): boolean }).valid;
-
 /** mermaid の fence のうち、選択の入っているものに付ける印(NodeView が図 ⇄ CodeMirror を切り替える)。 */
 const mermaidActiveKey = new PluginKey('vellis-mermaid-active');
 
@@ -298,7 +313,7 @@ export const mermaidActivePlugin = new Plugin({
 			const { $head } = state.selection;
 			for (let d = $head.depth; d > 0; d--) {
 				const node = $head.node(d);
-				if (node.type.name === 'code_block' && node.attrs.lang === 'mermaid') {
+				if (isMermaid(node)) {
 					const from = $head.before(d);
 					return DecorationSet.create(state.doc, [Decoration.node(from, from + node.nodeSize, {}, { mermaidActive: true })]);
 				}
@@ -376,6 +391,26 @@ function taskMarks(doc: PMNode): DecorationSet {
 }
 
 /**
+ * 取引の全部の step が、1 つの文字のブロックの中の文字だけを触ったか(mark の付け外しか、ブロックをまたがない
+ * インラインの置き換え)。真なら、タスクの項目の数・checked・先頭のブロックの種類は変わらない。
+ */
+function touchesInlineOnly(tr: Transaction): boolean {
+	return tr.steps.every((step, i) => {
+		if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) return true;
+		if (!(step instanceof ReplaceStep)) return false;
+		const { slice } = step;
+		if (slice.openStart !== 0 || slice.openEnd !== 0) return false;
+		const $from = tr.docs[i]!.resolve(step.from);
+		if (!$from.parent.isTextblock || step.to > $from.end()) return false;
+		let inline = true;
+		slice.content.forEach((node) => {
+			if (!node.isInline) inline = false;
+		});
+		return inline;
+	});
+}
+
+/**
  * 面のタスクの項目(checked が null でない list_item)ごとに、項目の頭に印(`input[type=checkbox]`)を widget で出す。
  * 印は文書の中身ではない(書き出し・textContent・検索に出ない)。押すと checked を反転する(取引 1 つ・undo 1 段)。
  */
@@ -384,7 +419,8 @@ export function taskMarksPlugin(): Plugin<DecorationSet> {
 		key: taskMarksKey,
 		state: {
 			init: (_config, state) => taskMarks(state.doc),
-			apply: (tr, set) => (tr.docChanged ? taskMarks(tr.doc) : set),
+			// 文字だけの取引(打鍵)では印の位置を写すだけ。項目の構造・checked に触れ得る取引のときだけ作り直す
+			apply: (tr, set) => (!tr.docChanged ? set : touchesInlineOnly(tr) ? set.map(tr.mapping, tr.doc) : taskMarks(tr.doc)),
 		},
 		props: {
 			decorations: (state) => taskMarksKey.getState(state),
@@ -442,6 +478,8 @@ class CodeBlockView implements NodeView {
 	private updating = false;
 	private readonly languageCompartment = new Compartment();
 	private readonly themeCompartment = new Compartment();
+	/** 配色を読んで当てる(失敗したら色なしで打てる)。 */
+	private readonly loadTheme = createHighlightLoader(() => this.cm, this.themeCompartment);
 	private chip: HTMLInputElement | null = null;
 	private pre: HTMLElement | null = null;
 	/** mermaid: 描いた図と、その元の文字列。 */
@@ -503,7 +541,7 @@ class CodeBlockView implements NodeView {
 		pre.appendChild(host);
 		this.cm = new CMView({ parent: host, state: this.cmState(this.node.textContent) });
 		void this.loadLanguage();
-		void this.loadTheme();
+		void this.loadTheme(this.ctx.codeTheme());
 		this.cm.contentDOM.addEventListener('compositionstart', () => {
 			this.composing = true;
 		});
@@ -544,7 +582,6 @@ class CodeBlockView implements NodeView {
 		return CMState.create({ doc: text, extensions });
 	}
 
-	/** CodeMirror の変更を ProseMirror の取引に写す。 */
 	/** CodeMirror の変更と選択を ProseMirror の取引に写す(公式の CodeMirror の NodeView の型= forwardUpdate)。 */
 	private forward(changes: import('@codemirror/state').ChangeSet, main: { anchor: number; head: number }) {
 		const pos = this.getPos();
@@ -559,9 +596,8 @@ class CodeBlockView implements NodeView {
 			else tr.delete(from, to);
 		});
 		const selection = TextSelection.create(tr.doc, start + main.anchor, start + main.head);
-		if (!this.view.state.selection.eq(selection) || tr.docChanged) tr.setSelection(selection);
 		if (!tr.docChanged && this.view.state.selection.eq(selection)) return;
-		this.view.dispatch(tr);
+		this.view.dispatch(tr.setSelection(selection));
 	}
 
 	private applyLang(value: string) {
@@ -582,19 +618,6 @@ class CodeBlockView implements NodeView {
 			this.cm?.dispatch({ effects: this.languageCompartment.reconfigure(support) });
 		} catch {
 			// 色なしで打てる
-		}
-	}
-
-	private themeRequest = 0;
-
-	private async loadTheme(name = this.ctx.codeTheme()) {
-		const request = ++this.themeRequest;
-		try {
-			const style = await highlightStyleFor(name);
-			if (request !== this.themeRequest) return;
-			this.cm?.dispatch({ effects: this.themeCompartment.reconfigure(syntaxHighlighting(style)) });
-		} catch {
-			// 色なし
 		}
 	}
 
@@ -619,7 +642,7 @@ class CodeBlockView implements NodeView {
 		// その向きに選択を置ける所が無い(文書の端の fence)なら fence の外の gap cursor へ(Selection.near は fence の中に戻る=
 		// 実機ゲート (9)・契約4・20)
 		const selection =
-			Selection.findFrom($target, dir) ?? (gapCursorValid($target) ? new GapCursor($target) : Selection.near($target, dir));
+			Selection.findFrom($target, dir) ?? (gapValid($target) ? new GapCursor($target) : Selection.near($target, dir));
 		this.view.dispatch(this.view.state.tr.setSelection(selection).scrollIntoView());
 		this.view.focus();
 		return true;

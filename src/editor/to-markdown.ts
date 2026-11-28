@@ -73,9 +73,12 @@ function vote<T>(counts: Map<T, number>, fallback: T): T {
 	return n === 0 || tie ? fallback : best;
 }
 
-/** 文書で使われている記号を数えて多いほう(例が無い・数が同じなら固定の綴り)。 */
-export function detectMarkdownStyle(src: string): MarkdownStyle {
-	const tree = markdownProcessor.parse(src) as M.Root;
+/**
+ * 文書で使われている記号を数えて多いほう(例が無い・数が同じなら固定の綴り)。`parsed` は `src` の全体を読んだ mdast
+ * (`parseMarkdownDocument(src).tree`)。渡せば読み直さない(数える種類のノードは alert の変換で変わらない)。
+ */
+export function detectMarkdownStyle(src: string, parsed?: M.Root | null): MarkdownStyle {
+	const tree = parsed ?? (markdownProcessor.parse(src) as M.Root);
 	const bullet = new Map<MarkdownStyle['bullet'], number>();
 	const em = new Map<MarkdownStyle['emphasis'], number>();
 	const strong = new Map<MarkdownStyle['strong'], number>();
@@ -1063,6 +1066,83 @@ function withoutTrailingBreak(node: PMNode): PMNode {
 	return node.type.create(node.attrs, kids.map(withoutTrailingBreak), node.marks);
 }
 
+/** 検算の条件(前後のブロックとその書き出し・間・読み直しの後ろに足す定義)。同じなら検算の結果も同じ。 */
+interface CheckContext {
+	prevNode: PMNode | undefined;
+	prevText: string | undefined;
+	sepBefore: string;
+	nextNode: PMNode | undefined;
+	nextSep: string | undefined;
+	nextText: string | undefined;
+	suffix: string;
+	suffixBlocks: number;
+}
+
+/** 検算のあとの書き出し(`Planned` のうち 2 巡目が決める欄)。 */
+type Settled = Pick<Planned, 'stage' | 'text' | 'fellBack' | 'escaped' | 'warn'>;
+
+/**
+ * 触ったブロック 1 つの書き出しの控え。Node・切片(entry)・origin の表は不変なので、1 巡目の結果は
+ * (Node・entry・eol)で決まり、2 巡目(検算)の結果はそれと前後の条件(`CheckContext`)で決まる。
+ * 打鍵のたびに書き出すので(dirty の判定)、触っていないブロックの読み直しをここで省く。
+ */
+interface BlockMemo {
+	entry: OriginEntry | null;
+	eol: string;
+	stage: Stage;
+	text: string;
+	check?: { context: CheckContext; settled: Settled };
+}
+
+/** origin の表(読み込み・保存・外部変更のたびに作り直す)ごとの控え。表が捨てられれば一緒に消える。 */
+const blockMemos = new WeakMap<OriginTable, WeakMap<PMNode, BlockMemo>>();
+
+function sameContext(a: CheckContext, b: CheckContext): boolean {
+	return (
+		a.prevNode === b.prevNode &&
+		a.prevText === b.prevText &&
+		a.sepBefore === b.sepBefore &&
+		a.nextNode === b.nextNode &&
+		a.nextSep === b.nextSep &&
+		a.nextText === b.nextText &&
+		a.suffix === b.suffix &&
+		a.suffixBlocks === b.suffixBlocks
+	);
+}
+
+/**
+ * 2 巡目: 触ったブロック `plan[i]` を前後と一緒に読み直して書き出しを決める。落ちたら 2 段目のエスケープ → 3 段目 →
+ * 3 段目の綴りの替え。どれも通らなければ文書の流儀の 3 段目のまま `warn`。
+ */
+function settleBlock(plan: Planned[], i: number, suffix: SuffixFor, origin: OriginTable, eol: string): Settled {
+	const p = plan[i]!;
+	const settled: Settled = { stage: p.stage, text: p.text, fellBack: false, escaped: false, warn: false };
+	if (checkWithNeighbors(plan, i, p.text, suffix)) return settled;
+	if (p.stage === 2 && p.entry) {
+		const esc = stage2(p.node, p.entry, origin, true);
+		if (esc !== null && esc.escaped && checkWithNeighbors(plan, i, esc.text, suffix)) {
+			settled.text = esc.text;
+			settled.escaped = true;
+			return settled;
+		}
+	}
+	if (p.stage === 2) {
+		settled.fellBack = true;
+		settled.stage = 3;
+	}
+	for (const variant of styleVariants(origin.style)) {
+		const t3 = writeStage3(p.node, p.entry, variant, eol);
+		if (checkWithNeighbors(plan, i, t3, suffix)) {
+			settled.text = t3;
+			return settled;
+		}
+	}
+	settled.text = writeStage3(p.node, p.entry, origin.style, eol);
+	settled.warn = true;
+	if (import.meta.env?.DEV) console.warn('Markdown: a rewritten block does not read back the same', p.node.type.name);
+	return settled;
+}
+
 /** 文書モデルを 3 段の規則で書き出す。`segments[i]` は `doc.child(i)` の書き出しの範囲と段。 */
 export function serializeMarkdown(doc: PMNode, origin: OriginTable, generation: Generation, opts: { check?: boolean } = {}): SerializeResult {
 	const check = opts.check ?? true;
@@ -1083,6 +1163,8 @@ export function serializeMarkdown(doc: PMNode, origin: OriginTable, generation: 
 		if ((seen.get(b) ?? 0) > 1 && e.node !== c) return null;
 		return e;
 	};
+	let memos = blockMemos.get(origin);
+	if (!memos) blockMemos.set(origin, (memos = new WeakMap()));
 	// 1 巡目: 段を決めて書く
 	const plan: Planned[] = [];
 	let prev: OriginEntry | null = null;
@@ -1098,53 +1180,52 @@ export function serializeMarkdown(doc: PMNode, origin: OriginTable, generation: 
 		if (e && e.node === c) {
 			stage = 1;
 			text = e.src.slice(e.start, e.end);
-		} else if (e) {
-			const t2 = stage2(c, e, origin, false);
-			if (t2 !== null) {
-				stage = 2;
-				text = t2.text;
+		} else {
+			const memo = memos.get(c);
+			if (memo && memo.entry === e && memo.eol === eol) {
+				stage = memo.stage;
+				text = memo.text;
+			} else {
+				const t2 = e ? stage2(c, e, origin, false) : null;
+				if (t2 !== null) {
+					stage = 2;
+					text = t2.text;
+				}
+				// 第4段 4-4: リストは触った項目だけを書き直す(検算に落ちたら 2 巡目でリスト全体の 3 段目へ)
+				if (text === null && e) text = writeListByItems(c, e, origin.style, eol);
+				if (text === null) text = writeStage3(c, e, origin.style, eol);
+				memos.set(c, { entry: e, eol, stage, text });
 			}
 		}
-		// 第4段 4-4: リストは触った項目だけを書き直す(検算に落ちたら 2 巡目でリスト全体の 3 段目へ)
-		if (text === null && e) text = writeListByItems(c, e, origin.style, eol);
-		if (text === null) text = writeStage3(c, e, origin.style, eol);
 		plan.push({ node: c, entry: e, stage, text, sepBefore, fellBack: false, escaped: false, warn: false });
 		prev = e;
 	}
-	// 2 巡目: 触ったブロックを前後と一緒に読み直す。落ちたら 2 段目のエスケープ → 3 段目 → 3 段目の綴りの替え
+	// 2 巡目: 触ったブロックを前後と一緒に読み直す(`settleBlock`)。前後の条件が前の書き出しと同じなら読み直さない
 	if (check) {
 		let suffix: SuffixFor | null = null;
 		for (let i = 0; i < plan.length; i++) {
 			const p = plan[i]!;
 			if (p.stage === 1) continue;
 			suffix ??= contextSuffix(doc, eol);
-			if (checkWithNeighbors(plan, i, p.text, suffix)) continue;
-			if (p.stage === 2 && p.entry) {
-				const esc = stage2(p.node, p.entry, origin, true);
-				if (esc !== null && esc.escaped && checkWithNeighbors(plan, i, esc.text, suffix)) {
-					p.text = esc.text;
-					p.escaped = true;
-					continue;
-				}
+			const before = plan[i - 1];
+			const after = plan[i + 1];
+			const around = suffix([before?.node, p.node, after?.node].filter((n): n is PMNode => n !== undefined));
+			const context: CheckContext = {
+				prevNode: before?.node,
+				prevText: before?.text,
+				sepBefore: p.sepBefore,
+				nextNode: after?.node,
+				nextSep: after?.sepBefore,
+				nextText: after?.text,
+				suffix: around.text,
+				suffixBlocks: around.blocks,
+			};
+			// 1 巡目がこの Node の控えを置いている(同じ entry・eol)。検算の控えは前後の条件が同じときだけ使う
+			const memo = memos.get(p.node)!;
+			if (!memo.check || !sameContext(memo.check.context, context)) {
+				memo.check = { context, settled: settleBlock(plan, i, suffix, origin, eol) };
 			}
-			if (p.stage === 2) {
-				p.fellBack = true;
-				p.stage = 3;
-			}
-			let ok = false;
-			for (const variant of styleVariants(origin.style)) {
-				const t3 = writeStage3(p.node, p.entry, variant, eol);
-				if (checkWithNeighbors(plan, i, t3, suffix)) {
-					p.text = t3;
-					ok = true;
-					break;
-				}
-			}
-			if (!ok) {
-				p.text = writeStage3(p.node, p.entry, origin.style, eol);
-				p.warn = true;
-				if (import.meta.env?.DEV) console.warn('Markdown: a rewritten block does not read back the same', p.node.type.name);
-			}
+			Object.assign(p, memo.check.settled);
 		}
 	}
 	// つなぐ

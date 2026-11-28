@@ -79,16 +79,27 @@ function withRows(table: PMNode, rows: PMNode[]): PMNode {
 	return table.type.create(table.attrs, Fragment.fromArray(rows), table.marks);
 }
 
-function rowsOf(table: PMNode): PMNode[] {
-	const rows: PMNode[] = [];
-	table.forEach((r) => rows.push(r));
-	return rows;
+function withCells(row: PMNode, cells: PMNode[]): PMNode {
+	return row.type.create(row.attrs, Fragment.fromArray(cells), row.marks);
 }
 
-function cellsOf(row: PMNode): PMNode[] {
-	const cells: PMNode[] = [];
-	row.forEach((c) => cells.push(c));
-	return cells;
+/** 表の行の並び・行のセルの並び(書き換えてよい配列)。 */
+function childrenOf(node: PMNode): PMNode[] {
+	const out: PMNode[] = [];
+	node.forEach((child) => out.push(child));
+	return out;
+}
+
+/**
+ * 列 `col` にセルがある行だけ、セルの並びを `change` で書き換えた行の並び(余分なセル・足りない行は保つ)。
+ * `change` が false を返した行はそのまま。
+ */
+function mapColumn(table: PMNode, col: number, change: (cells: PMNode[], r: number) => void | false): PMNode[] {
+	return childrenOf(table).map((row, r) => {
+		if (row.childCount <= col) return row;
+		const cells = childrenOf(row);
+		return change(cells, r) === false ? row : withCells(row, cells);
+	});
 }
 
 /** 表を next に置き換え、(row, col) のセルの中身の offset にカーソルを置く。 */
@@ -133,7 +144,7 @@ function tableCommand(build: (state: EditorState, ctx: CellContext) => Transacti
 function insertRow(below: boolean): Command {
 	return tableCommand((state, ctx) => {
 		const at = ctx.row === 0 ? 1 : below ? ctx.row + 1 : ctx.row;
-		const rows = rowsOf(ctx.table);
+		const rows = childrenOf(ctx.table);
 		rows.splice(at, 0, emptyBodyRow(ctx.table));
 		return replaceTable(state, ctx, withRows(ctx.table, rows), at, ctx.col);
 	});
@@ -141,7 +152,7 @@ function insertRow(below: boolean): Command {
 
 /** 行を消す。見出しの行では見出しのすぐ下の本文の行(無ければ false=3-7 代案 2)。見出しの行そのものは消さない。 */
 const deleteRow = tableCommand((state, ctx) => {
-	const rows = rowsOf(ctx.table);
+	const rows = childrenOf(ctx.table);
 	if (ctx.row === 0) {
 		if (rows.length < 2) return null;
 		rows.splice(1, 1);
@@ -156,12 +167,7 @@ const deleteRow = tableCommand((state, ctx) => {
 function insertColumn(right: boolean): Command {
 	return tableCommand((state, ctx) => {
 		const at = right ? ctx.col + 1 : ctx.col;
-		const rows = rowsOf(ctx.table).map((row, r) => {
-			if (row.childCount <= ctx.col) return row;
-			const cells = cellsOf(row);
-			cells.splice(at, 0, emptyCell(r === 0));
-			return row.type.create(row.attrs, Fragment.fromArray(cells), row.marks);
-		});
+		const rows = mapColumn(ctx.table, ctx.col, (cells, r) => void cells.splice(at, 0, emptyCell(r === 0)));
 		return replaceTable(state, ctx, withRows(ctx.table, rows), ctx.row, at);
 	});
 }
@@ -170,13 +176,10 @@ function insertColumn(right: boolean): Command {
 const deleteColumn = tableCommand((state, ctx) => {
 	const header = ctx.table.child(0);
 	if (header.childCount <= 1 && ctx.col === 0) return removeTable(state, ctx);
-	const rows = rowsOf(ctx.table).map((row, r) => {
-		if (row.childCount <= ctx.col) return row;
-		const cells = cellsOf(row);
+	const rows = mapColumn(ctx.table, ctx.col, (cells, r) => {
 		cells.splice(ctx.col, 1);
 		// 本文の行がそのセル 1 つだけだったら、空のセルを 1 つ残す(行は消さない)
 		if (cells.length === 0) cells.push(emptyCell(r === 0));
-		return row.type.create(row.attrs, Fragment.fromArray(cells), row.marks);
 	});
 	const col = ctx.col > 0 ? ctx.col - 1 : 0;
 	return replaceTable(state, ctx, withRows(ctx.table, rows), ctx.row, col);
@@ -206,10 +209,6 @@ export type TableHandleItemId =
 	| 'format-table-append-row'
 	| 'format-table-append-column';
 
-function withCells(row: PMNode, cells: PMNode[]): PMNode {
-	return row.type.create(row.attrs, Fragment.fromArray(cells), row.marks);
-}
-
 /** その行のすぐ下に同じ中身の行。見出しの行なら見出しのすぐ下に本文の行(table_cell)として(3-7 と同じ扱い)。 */
 const duplicateRow = tableCommand((state, ctx) => {
 	const source = ctx.table.child(ctx.row);
@@ -217,23 +216,20 @@ const duplicateRow = tableCommand((state, ctx) => {
 		ctx.row === 0
 			? withCells(
 					source,
-					cellsOf(source).map((c) => nodes.table_cell!.create(c.attrs, c.content, c.marks)),
+					childrenOf(source).map((c) => nodes.table_cell!.create(c.attrs, c.content, c.marks)),
 				)
 			: source.copy(source.content);
 	const at = ctx.row + 1;
-	const rows = rowsOf(ctx.table);
+	const rows = childrenOf(ctx.table);
 	rows.splice(at, 0, copy);
 	return replaceTable(state, ctx, withRows(ctx.table, rows), at, ctx.col);
 });
 
 /** その列のすぐ右に同じ中身の列(その位置にセルがある行だけ・余分なセルは保つ)。 */
 const duplicateColumn = tableCommand((state, ctx) => {
-	const rows = rowsOf(ctx.table).map((row) => {
-		if (row.childCount <= ctx.col) return row;
-		const cells = cellsOf(row);
+	const rows = mapColumn(ctx.table, ctx.col, (cells) => {
 		const source = cells[ctx.col]!;
 		cells.splice(ctx.col + 1, 0, source.copy(source.content));
-		return withCells(row, cells);
 	});
 	return replaceTable(state, ctx, withRows(ctx.table, rows), ctx.row, ctx.col + 1);
 });
@@ -242,14 +238,11 @@ const duplicateColumn = tableCommand((state, ctx) => {
 function alignColumn(align: 'left' | 'center' | 'right'): Command {
 	return tableCommand((state, ctx) => {
 		let changed = false;
-		const rows = rowsOf(ctx.table).map((row) => {
-			if (row.childCount <= ctx.col) return row;
-			const cells = cellsOf(row);
+		const rows = mapColumn(ctx.table, ctx.col, (cells) => {
 			const cell = cells[ctx.col]!;
-			if (cell.attrs.align === align) return row;
+			if (cell.attrs.align === align) return false;
 			changed = true;
 			cells[ctx.col] = cell.type.create({ ...cell.attrs, align }, cell.content, cell.marks);
-			return withCells(row, cells);
 		});
 		if (!changed) return null;
 		return replaceTable(state, ctx, withRows(ctx.table, rows), ctx.row, ctx.col, ctx.offset);
@@ -258,7 +251,7 @@ function alignColumn(align: 'left' | 'center' | 'right'): Command {
 
 /** 表の末尾に空の本文の行(=最後の行で Insert Row Below)。カーソルは新しい行のセルの先頭。 */
 const appendRow = tableCommand((state, ctx) => {
-	const rows = rowsOf(ctx.table);
+	const rows = childrenOf(ctx.table);
 	rows.push(emptyBodyRow(ctx.table));
 	return replaceTable(state, ctx, withRows(ctx.table, rows), rows.length - 1, ctx.col);
 });
@@ -267,12 +260,7 @@ const appendRow = tableCommand((state, ctx) => {
 const appendColumn = tableCommand((state, ctx) => {
 	const last = ctx.table.child(0).childCount - 1;
 	const at = last + 1;
-	const rows = rowsOf(ctx.table).map((row, r) => {
-		if (row.childCount <= last) return row;
-		const cells = cellsOf(row);
-		cells.splice(at, 0, emptyCell(r === 0));
-		return withCells(row, cells);
-	});
+	const rows = mapColumn(ctx.table, last, (cells, r) => void cells.splice(at, 0, emptyCell(r === 0)));
 	return replaceTable(state, ctx, withRows(ctx.table, rows), ctx.row, at);
 });
 
